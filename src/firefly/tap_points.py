@@ -27,7 +27,8 @@ class TapPoint:
     module_path: str  # dotted attribute path from the model root
 
 
-def _resolve(module: nn.Module, dotted_path: str) -> nn.Module:
+def resolve_module_path(module: nn.Module, dotted_path: str) -> nn.Module:
+    """Walk a dotted attribute path from ``module`` and return the leaf module."""
     obj: object = module
     for part in dotted_path.split("."):
         obj = getattr(obj, part)
@@ -36,7 +37,7 @@ def _resolve(module: nn.Module, dotted_path: str) -> nn.Module:
 
 def _try_resolve(module: nn.Module, dotted_path: str) -> nn.Module | None:
     try:
-        return _resolve(module, dotted_path)
+        return resolve_module_path(module, dotted_path)
     except AttributeError:
         return None
 
@@ -67,7 +68,7 @@ def select_default_tap_points(model: nn.Module) -> list[TapPoint]:
     the earliest point in the network where divergence appeared.
     """
     layers_path = find_decoder_layers_path(model)
-    layers = _resolve(model, layers_path)
+    layers = resolve_module_path(model, layers_path)
 
     taps: list[TapPoint] = []
     for i, layer in enumerate(layers):  # type: ignore[arg-type]
