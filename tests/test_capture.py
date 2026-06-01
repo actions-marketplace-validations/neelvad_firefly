@@ -150,3 +150,32 @@ def test_capture_reference_smollm_end_to_end(tmp_path: Path) -> None:
     assert manifest.model_fingerprint
     assert len(tensors) > 0
     assert "final_norm" in tensors
+
+
+@pytest.mark.slow
+def test_capture_via_cli(tmp_path: Path) -> None:
+    """End-to-end through the typer CLI wiring."""
+    from typer.testing import CliRunner
+
+    from firefly.cli import app
+    from firefly.reference import read_reference
+
+    inputs_path = tmp_path / "golden.json"
+    inputs_path.write_text(json.dumps({"texts": ["hello world"], "max_length": 8}))
+    out_dir = tmp_path / "reference"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "capture",
+            "--model", "HuggingFaceTB/SmolLM-135M",
+            "--inputs", str(inputs_path),
+            "--out", str(out_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "Wrote reference artifact" in result.stdout
+    manifest, _ = read_reference(out_dir)
+    assert manifest.model_id == "HuggingFaceTB/SmolLM-135M"

@@ -22,10 +22,13 @@ def test_cli_help() -> None:
     assert "check" in result.stdout
 
 
-def test_capture_stub() -> None:
-    result = runner.invoke(
-        app,
-        ["capture", "--model", "HuggingFaceTB/SmolLM-135M", "--inputs", "x.json", "--out", "ref/"],
-    )
+def test_capture_command_advertises_options() -> None:
+    result = runner.invoke(app, ["capture", "--help"])
     assert result.exit_code == 0
-    assert "[stub] capture" in result.stdout
+    for option in ("--model", "--inputs", "--out", "--device", "--seed"):
+        assert option in result.stdout
+
+
+def test_capture_command_errors_on_missing_required_args() -> None:
+    result = runner.invoke(app, ["capture"])
+    assert result.exit_code != 0

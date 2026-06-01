@@ -18,9 +18,21 @@ def capture(
     model: str = typer.Option(..., "--model", "-m", help="HF model ID or path to a checkpoint."),
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to a golden-inputs JSON file."),
     out: Path = typer.Option(..., "--out", "-o", help="Directory to write the reference artifact."),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
+    seed: int = typer.Option(0, "--seed", help="Determinism seed."),
 ) -> None:
     """Capture a reference artifact from a model + golden inputs."""
-    typer.echo(f"[stub] capture model={model} inputs={inputs} out={out}")
+    from firefly.capture import capture_reference
+
+    typer.echo(f"Capturing reference: model={model} device={device}")
+    capture_reference(
+        model_id=model,
+        inputs_path=inputs,
+        out_dir=out,
+        device=device,
+        seed=seed,
+    )
+    typer.echo(f"Wrote reference artifact to {out}")
 
 
 @app.command()

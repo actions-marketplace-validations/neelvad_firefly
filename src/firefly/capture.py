@@ -120,7 +120,7 @@ def capture_reference(
 
     set_deterministic(seed=seed)
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float32)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = model.to(device).eval()
 
