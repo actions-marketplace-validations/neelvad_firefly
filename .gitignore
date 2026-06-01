@@ -30,6 +30,9 @@ candidates/
 *.safetensors
 !tests/**/*.safetensors
 
+# Demo artifacts (generated locally)
+examples/**/_artifacts/
+
 # Models / data
 models/
 data/
