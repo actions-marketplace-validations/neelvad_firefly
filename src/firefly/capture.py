@@ -86,7 +86,7 @@ def _dtype_str(dtype: torch.dtype) -> str:
     return str(dtype).replace("torch.", "")
 
 
-def _load_golden_inputs(
+def load_golden_inputs(
     inputs_path: Path,
     tokenizer: PreTrainedTokenizerBase,
     device: str,
@@ -126,7 +126,7 @@ def capture_reference(
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = model.to(device).eval()
 
-    batch = _load_golden_inputs(inputs_path, tokenizer, device)
+    batch = load_golden_inputs(inputs_path, tokenizer, device)
     captured = run_capture(model, batch, domain=domain)
 
     manifest = ReferenceManifest(
@@ -137,5 +137,6 @@ def capture_reference(
         dtypes={name: _dtype_str(t.dtype) for name, t in captured.items()},
         captured_at=datetime.now(UTC).isoformat(),
         env=capture_env(),
+        domain=domain,
     )
     write_reference(out_dir, manifest, captured)
