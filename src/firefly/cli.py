@@ -48,10 +48,32 @@ def calibrate(
 def check(
     reference: Path = typer.Option(..., "--reference", "-r", help="Reference artifact directory."),
     candidate: str = typer.Option(..., "--candidate", "-c", help="Candidate HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
+    seed: int = typer.Option(0, "--seed", help="Determinism seed."),
     report_json: Path | None = typer.Option(None, "--report-json", help="Write structured report to this path."),
 ) -> None:
     """Check a candidate against a reference. Exits non-zero if divergence exceeds tolerance."""
-    typer.echo(f"[stub] check reference={reference} candidate={candidate}")
+    from firefly.attribution import attribute_first_divergence
+    from firefly.compare import compare_to_reference
+    from firefly.report import render_human, write_json
+
+    divergences = compare_to_reference(
+        reference_dir=reference,
+        candidate_model_id=candidate,
+        inputs_path=inputs,
+        device=device,
+        seed=seed,
+    )
+    result = attribute_first_divergence(divergences)
+
+    typer.echo(render_human(result))
+
+    if report_json is not None:
+        write_json(result, report_json)
+
+    if result.any_exceeded:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
