@@ -27,7 +27,7 @@ from firefly.reference import (
     capture_env,
     write_reference,
 )
-from firefly.tap_points import resolve_module_path, select_default_tap_points
+from firefly.tap_points import resolve_module_path, select_tap_points
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
@@ -36,14 +36,15 @@ if TYPE_CHECKING:
 def run_capture(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
+    domain: str = "llm",
 ) -> dict[str, torch.Tensor]:
-    """Register forward hooks at the model's default tap points, run a forward
-    pass on ``batch``, and return ``{tap_name: detached cpu tensor}``.
+    """Register forward hooks at the model's tap points, run a forward pass on
+    ``batch``, and return ``{tap_name: detached cpu tensor}``.
 
     Hooks handle tuple outputs (e.g., HF ``self_attn`` returns
     ``(hidden_states, attn_weights, past_kv)``) by capturing ``output[0]``.
     """
-    taps = select_default_tap_points(model)
+    taps = select_tap_points(model, domain=domain)
     captured: dict[str, torch.Tensor] = {}
     handles: list[torch.utils.hooks.RemovableHandle] = []
 
@@ -114,6 +115,7 @@ def capture_reference(
     out_dir: Path,
     device: str = "cpu",
     seed: int = 0,
+    domain: str = "llm",
 ) -> None:
     """Load ``model_id``, run the golden inputs, write a reference artifact."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -125,7 +127,7 @@ def capture_reference(
     model = model.to(device).eval()
 
     batch = _load_golden_inputs(inputs_path, tokenizer, device)
-    captured = run_capture(model, batch)
+    captured = run_capture(model, batch, domain=domain)
 
     manifest = ReferenceManifest(
         model_id=model_id,

@@ -1,9 +1,13 @@
-"""Architecturally stable tap points for transformer activation capture.
+"""Architecturally stable tap points for activation capture.
 
-We deliberately tap at module boundaries that survive quantization and
-torch.compile fusion: per-decoder-layer self-attn output, MLP output, and
-the residual stream at layer end. This is what makes Firefly robust to
-candidates that differ from the reference in graph structure.
+Tap-point selection is the only domain-specific module in Firefly: capture,
+compare, attribute, calibrate, and report are all domain-agnostic. A new
+domain (recsys, cv) plugs in by adding a `select_<domain>_tap_points`
+function and a dispatch entry, without touching the rest of the pipeline.
+
+For the LLM/transformer family we tap at module boundaries that survive
+quantization and torch.compile fusion: per-decoder-layer self-attn output,
+MLP output, and the residual stream at layer end.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ def find_decoder_layers_path(model: nn.Module) -> str:
     )
 
 
-def select_default_tap_points(model: nn.Module) -> list[TapPoint]:
+def select_llm_tap_points(model: nn.Module) -> list[TapPoint]:
     """Walk a HF-style decoder transformer and return its stable tap points.
 
     Per decoder layer i, emits (in forward order):
@@ -86,3 +90,21 @@ def select_default_tap_points(model: nn.Module) -> list[TapPoint]:
             break
 
     return taps
+
+
+_TAP_SELECTORS = {
+    "llm": select_llm_tap_points,
+    # "recsys": select_recsys_tap_points,  # planned v2
+    # "cv":     select_cv_tap_points,      # planned v2
+}
+
+
+def select_tap_points(model: nn.Module, domain: str = "llm") -> list[TapPoint]:
+    """Domain-aware tap-point selection. The dispatch seam for v2 domains."""
+    try:
+        selector = _TAP_SELECTORS[domain]
+    except KeyError as e:
+        raise ValueError(
+            f"Unsupported domain: {domain!r}. Available: {sorted(_TAP_SELECTORS)}"
+        ) from e
+    return selector(model)

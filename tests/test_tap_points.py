@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from firefly.tap_points import find_decoder_layers_path, select_default_tap_points
+from firefly.tap_points import (
+    find_decoder_layers_path,
+    select_llm_tap_points,
+    select_tap_points,
+)
 
 
 class _FakeAttn(nn.Module):
@@ -47,8 +51,8 @@ def test_find_decoder_layers_path() -> None:
     assert find_decoder_layers_path(_FakeLlama()) == "model.layers"
 
 
-def test_select_default_tap_points_forward_order() -> None:
-    taps = select_default_tap_points(_FakeLlama(n_layers=2))
+def test_select_llm_tap_points_forward_order() -> None:
+    taps = select_llm_tap_points(_FakeLlama(n_layers=2))
 
     expected = [
         "layer.0.self_attn",
@@ -72,6 +76,17 @@ def test_raises_when_no_decoder_layers_found() -> None:
 
     with pytest.raises(ValueError, match="Could not locate decoder layers"):
         find_decoder_layers_path(_Empty())
+
+
+def test_dispatcher_defaults_to_llm() -> None:
+    via_dispatch = [t.name for t in select_tap_points(_FakeLlama(n_layers=2))]
+    via_direct = [t.name for t in select_llm_tap_points(_FakeLlama(n_layers=2))]
+    assert via_dispatch == via_direct
+
+
+def test_dispatcher_rejects_unknown_domain() -> None:
+    with pytest.raises(ValueError, match="Unsupported domain"):
+        select_tap_points(_FakeLlama(), domain="finance")
 
 
 def test_handles_empty_module_list() -> None:
