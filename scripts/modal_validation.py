@@ -21,9 +21,19 @@ Usage:
 
 from __future__ import annotations
 
+import os
+
 import modal
 
 app = modal.App("firefly-validation")
+
+# Forward HF_TOKEN to the GPU container if the user has one set locally.
+# Public models (SmolLM, Llama base, etc.) work without it but emit a
+# rate-limit warning; gated models require it. Opt-in, not enforced.
+_HF_TOKEN_SET = bool(os.environ.get("HF_TOKEN"))
+_HF_SECRETS = (
+    [modal.Secret.from_local_environ(["HF_TOKEN"])] if _HF_TOKEN_SET else []
+)
 
 image = (
     modal.Image.from_registry(
@@ -42,7 +52,7 @@ image = (
 )
 
 
-@app.function(gpu="A10G", image=image, timeout=900)
+@app.function(gpu="A10G", image=image, timeout=900, secrets=_HF_SECRETS)
 def run_validation(
     model_id: str = "HuggingFaceTB/SmolLM-135M",
     texts: list[str] | None = None,
@@ -126,6 +136,13 @@ def main(model: str = "HuggingFaceTB/SmolLM-135M", runs: int = 8) -> None:
     from datetime import UTC, datetime
     from pathlib import Path
 
+    if _HF_TOKEN_SET:
+        print("HF_TOKEN found in local env — forwarding to GPU container.")
+    else:
+        print(
+            "No HF_TOKEN in local env — using anonymous HF access "
+            "(rate-limited; fine for public models)."
+        )
     print(f"Launching A10G job for model={model}, runs={runs}")
     results = run_validation.remote(model_id=model, runs=runs)
 

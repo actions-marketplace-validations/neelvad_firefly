@@ -26,6 +26,20 @@ uv run modal run scripts/modal_validation.py
 uv run modal run scripts/modal_validation.py --model HuggingFaceTB/SmolLM-360M
 ```
 
+### HuggingFace authentication (optional)
+
+Public models work without auth but get a rate-limit warning. To silence it
+and unlock faster downloads / gated models, set `HF_TOKEN` in your shell
+before running — the script forwards it to the GPU container automatically
+if present.
+
+```sh
+export HF_TOKEN=hf_...        # get from huggingface.co/settings/tokens
+uv run modal run scripts/modal_validation.py
+```
+
+Nothing happens if it's not set — the script just notes which mode it's in.
+
 Output lands in `scripts/results/modal_validation_<timestamp>.json`. The
 directory is gitignored — these are experiment artifacts, not source.
 
