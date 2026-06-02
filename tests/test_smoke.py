@@ -67,6 +67,7 @@ def test_calibrate_command_advertises_options() -> None:
         "--noise-sigma",
         "--noise-inject-at",
         "--noise-base-seed",
+        "--allow-tf32",
         "--device",
     ):
         assert option in result.stdout

@@ -29,7 +29,7 @@ from firefly.capture import (
     run_capture_repeated,
 )
 from firefly.compare import DEFAULT_TOLERANCE, TapTolerance, write_tolerances
-from firefly.determinism import set_deterministic
+from firefly.determinism import set_deterministic, set_hardware_noise_baseline
 from firefly.noise import NoiseSpec
 from firefly.reference import read_reference
 
@@ -91,7 +91,10 @@ def calibrate(
     """
     manifest, reference_tensors = read_reference(reference_dir)
 
-    set_deterministic(seed=seed)
+    if noise is not None and noise.mode == "hardware":
+        set_hardware_noise_baseline(seed=seed, allow_tf32=noise.allow_tf32)
+    else:
+        set_deterministic(seed=seed)
     model, tokenizer = load_model_and_tokenizer(manifest.model_id, device=device)
     batch = load_golden_inputs(inputs_path, tokenizer, device)
 

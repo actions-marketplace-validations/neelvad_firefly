@@ -67,8 +67,9 @@ def run_capture_repeated(
         return _hook
 
     # Noise hook is registered FIRST so it fires before the capture hook on
-    # the same module — the capture sees the noised output.
-    if noise is not None and noise.mode != "none":
+    # the same module — the capture sees the noised output. Only synthetic
+    # mode registers a hook; hardware mode relies on the hardware itself.
+    if noise is not None and noise.mode == "synthetic":
         handles.append(register_noise_hook(model, noise, domain=domain))
 
     for tap in taps:

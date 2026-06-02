@@ -24,24 +24,32 @@ import torch.nn as nn
 
 from firefly.tap_points import resolve_module_path, select_tap_points
 
-NoiseMode = Literal["none", "synthetic"]
+NoiseMode = Literal["none", "synthetic", "hardware"]
 
 
 @dataclass
 class NoiseSpec:
-    """Configuration for noise injection at a single tap.
+    """Configuration for the noise source used during calibration.
 
-    ``mode="none"`` is the no-op (pure determinism). ``mode="synthetic"`` injects
-    Gaussian noise of standard deviation ``sigma`` at the module identified by
-    ``inject_at`` (a tap name from ``select_tap_points``). Per-call seeding off
-    ``base_seed`` makes successive forward passes produce *different* noise
-    realizations while keeping the whole experiment reproducible.
+    ``mode="none"`` is the no-op (pure determinism).
+
+    ``mode="synthetic"`` injects Gaussian noise of standard deviation
+    ``sigma`` at the module identified by ``inject_at`` (a tap name from
+    ``select_tap_points``). Per-call seeding off ``base_seed`` makes
+    successive forward passes produce *different* noise realizations while
+    keeping the whole experiment reproducible.
+
+    ``mode="hardware"`` registers no hook; instead it relaxes determinism so
+    the hardware itself (atomics, cuDNN kernel selection, optionally TF32)
+    becomes the noise source. ``allow_tf32`` is the only knob that applies in
+    this mode; the synthetic-mode fields are ignored.
     """
 
     mode: NoiseMode = "none"
     sigma: float = 0.0
     inject_at: str | None = None
     base_seed: int = 0
+    allow_tf32: bool = False  # hardware mode only
 
 
 class _NoiseInjector:
@@ -89,10 +97,10 @@ def register_noise_hook(
 
     Returns the handle so the caller can remove the hook when done.
     """
-    if spec.mode == "none":
-        raise ValueError("register_noise_hook called with mode='none'")
     if spec.mode != "synthetic":
-        raise ValueError(f"Unknown noise mode: {spec.mode!r}")
+        raise ValueError(
+            f"register_noise_hook only supports mode='synthetic', got {spec.mode!r}"
+        )
     if spec.inject_at is None:
         raise ValueError("inject_at is required for noise injection")
 

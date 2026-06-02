@@ -33,3 +33,26 @@ def set_deterministic(seed: int = 0) -> None:
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = False
+
+
+def set_hardware_noise_baseline(seed: int = 0, allow_tf32: bool = False) -> None:
+    """Configure PyTorch to expose hardware nondeterminism for calibration.
+
+    The inverse of :func:`set_deterministic`: we *want* the hardware to
+    produce different bits across runs, because that variance is exactly
+    what calibration needs to measure. Atomics, cuDNN/cuBLAS kernel
+    selection, and (optionally) TF32 all get to do their thing.
+
+    Calling this on CPU+fp32 typically still produces zero noise — the CPU
+    BLAS path has very few nondeterministic sources. Useful primarily on CUDA.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.use_deterministic_algorithms(False, warn_only=True)
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32

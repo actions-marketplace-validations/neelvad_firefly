@@ -41,10 +41,11 @@ def calibrate(
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
     runs: int = typer.Option(16, "--runs", "-n", help="Number of self-runs for the noise baseline."),
     safety_factor: float = typer.Option(6.0, "--safety-factor", help="atol = safety_factor × observed noise floor."),
-    noise_mode: str = typer.Option("none", "--noise-mode", help="'none' (deterministic) or 'synthetic' (Gaussian injection)."),
+    noise_mode: str = typer.Option("none", "--noise-mode", help="'none' (deterministic), 'synthetic' (Gaussian injection), or 'hardware' (real hardware noise)."),
     noise_sigma: float = typer.Option(0.0, "--noise-sigma", help="Standard deviation of injected noise (synthetic mode)."),
     noise_inject_at: str | None = typer.Option(None, "--noise-inject-at", help="Tap name to inject noise at (e.g. layer.0)."),
     noise_base_seed: int = typer.Option(0, "--noise-base-seed", help="Base seed for noise injection (run i uses base_seed+i)."),
+    allow_tf32: bool = typer.Option(False, "--allow-tf32", help="Allow TF32 matmul (hardware mode only)."),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
     seed: int = typer.Option(0, "--seed", help="Determinism seed."),
 ) -> None:
@@ -52,9 +53,9 @@ def calibrate(
     from firefly.calibrate import calibrate as run_calibrate
     from firefly.noise import NoiseSpec
 
-    if noise_mode not in ("none", "synthetic"):
+    if noise_mode not in ("none", "synthetic", "hardware"):
         raise typer.BadParameter(
-            f"--noise-mode must be 'none' or 'synthetic', got {noise_mode!r}",
+            f"--noise-mode must be 'none', 'synthetic', or 'hardware', got {noise_mode!r}",
             param_hint="--noise-mode",
         )
     if noise_mode == "synthetic":
@@ -74,6 +75,7 @@ def calibrate(
         sigma=noise_sigma,
         inject_at=noise_inject_at,
         base_seed=noise_base_seed,
+        allow_tf32=allow_tf32,
     )
 
     typer.echo(f"Calibrating: reference={reference} runs={runs} noise_mode={noise_mode}")

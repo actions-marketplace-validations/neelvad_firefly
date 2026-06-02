@@ -113,8 +113,25 @@ def test_noise_injector_varies_across_calls() -> None:
 
 def test_register_noise_hook_rejects_mode_none() -> None:
     model, _ = _model_and_batch()
-    with pytest.raises(ValueError, match="mode='none'"):
+    with pytest.raises(ValueError, match="only supports mode='synthetic'"):
         register_noise_hook(model, NoiseSpec(mode="none"))
+
+
+def test_register_noise_hook_rejects_mode_hardware() -> None:
+    """Hardware mode is not a hook-based noise source — it must not slip
+    through and register a hook by mistake."""
+    model, _ = _model_and_batch()
+    with pytest.raises(ValueError, match="only supports mode='synthetic'"):
+        register_noise_hook(model, NoiseSpec(mode="hardware", inject_at="layer.0"))
+
+
+def test_noisespec_hardware_mode_accepts_minimal_args() -> None:
+    """mode='hardware' doesn't need sigma or inject_at — just construct it."""
+    spec = NoiseSpec(mode="hardware", allow_tf32=True)
+    assert spec.mode == "hardware"
+    assert spec.allow_tf32 is True
+    assert spec.sigma == 0.0
+    assert spec.inject_at is None
 
 
 def test_register_noise_hook_rejects_unknown_tap() -> None:
@@ -179,6 +196,21 @@ def test_noise_mode_none_is_no_op() -> None:
     for tap in without_arg:
         for a, b in zip(without_arg[tap], with_none[tap], strict=True):
             assert torch.equal(a, b)
+
+
+def test_noise_mode_hardware_registers_no_hook() -> None:
+    """In hardware mode, run_capture_repeated must not register a noise hook —
+    only the capture hooks. After the call no hooks remain.
+    """
+    model, batch = _model_and_batch()
+    spec = NoiseSpec(mode="hardware")
+
+    captures = run_capture_repeated(model, batch, runs=2, noise=spec)
+
+    # All taps captured, no leftover hooks.
+    assert "layer.0" in captures
+    leftover = sum(len(m._forward_hooks) for m in model.modules())
+    assert leftover == 0
 
 
 def test_noise_runs_are_reproducible_with_same_base_seed() -> None:
