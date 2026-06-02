@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from firefly.determinism import set_deterministic
+from firefly.noise import NoiseSpec, register_noise_hook
 from firefly.reference import (
     ReferenceManifest,
     capture_env,
@@ -38,10 +39,16 @@ def run_capture_repeated(
     batch: dict[str, torch.Tensor],
     runs: int = 1,
     domain: str = "llm",
+    noise: NoiseSpec | None = None,
 ) -> dict[str, list[torch.Tensor]]:
     """Register hooks once, run ``runs`` forward passes, return one tensor per
     run per tap. Used by calibration, which needs many self-runs to measure
     the per-tap noise floor without paying for repeated hook registration.
+
+    If ``noise`` is supplied (and ``noise.mode != "none"``), a noise hook is
+    registered at ``noise.inject_at`` *before* the capture hooks, so the
+    captured tensors at and downstream of the injection point reflect the
+    noised activations.
 
     Hooks handle tuple outputs (e.g., HF ``self_attn`` returns
     ``(hidden_states, attn_weights, past_kv)``) by capturing ``output[0]``.
@@ -58,6 +65,11 @@ def run_capture_repeated(
             tensor = output[0] if isinstance(output, tuple) else output
             captures[tap_name].append(tensor.detach().cpu().contiguous())
         return _hook
+
+    # Noise hook is registered FIRST so it fires before the capture hook on
+    # the same module — the capture sees the noised output.
+    if noise is not None and noise.mode != "none":
+        handles.append(register_noise_hook(model, noise, domain=domain))
 
     for tap in taps:
         submod = resolve_module_path(model, tap.module_path)
