@@ -5,9 +5,13 @@ Layout::
     reference/
         weights.safetensors     # captured per-tap-point tensors, key = tap name
         manifest.json           # tap points, shapes, dtypes, fingerprint, env
+        tolerances.json         # (optional) per-tap tolerances — see compare.py
 
 This is a first-class file format. Inspectable, diffable, versionable — kept
 deliberately simple so a reviewer can `unzip` it mentally without running code.
+The optional ``tolerances.json`` is written by ``firefly calibrate`` and
+auto-loaded by ``firefly check``; its read/write live in ``compare.py``
+beside the ``TapTolerance`` type they serialize.
 """
 
 from __future__ import annotations

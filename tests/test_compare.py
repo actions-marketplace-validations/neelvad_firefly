@@ -88,6 +88,38 @@ def test_default_tolerance_is_documented_value() -> None:
 
 
 @pytest.mark.slow
+def test_compare_to_reference_auto_loads_tolerances(tmp_path: Path) -> None:
+    """If tolerances.json exists in the reference dir and the caller passes no
+    tolerances explicitly, compare_to_reference uses them instead of defaults."""
+    from firefly.capture import capture_reference
+    from firefly.compare import (
+        TapTolerance,
+        compare_to_reference,
+        write_tolerances,
+    )
+
+    inputs_path = tmp_path / "golden.json"
+    inputs_path.write_text(json.dumps({"texts": ["hello world"], "max_length": 8}))
+    ref_dir = tmp_path / "reference"
+
+    capture_reference("HuggingFaceTB/SmolLM-135M", inputs_path, ref_dir)
+
+    # Calibrated atol on one tap; everything else gets default.
+    write_tolerances(
+        ref_dir,
+        {"layer.0": TapTolerance(atol=2.5e-5, source="calibrated", noise_floor=1.1e-7, n_calibration_runs=4)},
+    )
+
+    divs = compare_to_reference(ref_dir, "HuggingFaceTB/SmolLM-135M", inputs_path)
+    by_tap = {d.tap_name: d for d in divs}
+
+    assert by_tap["layer.0"].tolerance.atol == 2.5e-5
+    assert by_tap["layer.0"].tolerance.source == "calibrated"
+    # Untuned taps still get the default.
+    assert by_tap["layer.1"].tolerance.source == "default"
+
+
+@pytest.mark.slow
 def test_compare_same_model_is_clean(tmp_path: Path) -> None:
     """Capturing then comparing the same model yields zero divergence."""
     from firefly.capture import capture_reference

@@ -12,7 +12,8 @@ Two layers, matching the capture module:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -28,6 +29,7 @@ from firefly.determinism import set_deterministic
 from firefly.reference import read_reference
 
 DEFAULT_TOLERANCE = 1e-5
+TOLERANCES_FILE = "tolerances.json"
 
 ToleranceSource = Literal["default", "manual", "calibrated"]
 
@@ -60,6 +62,29 @@ class TapTolerance:
 
 def _default_tolerance() -> TapTolerance:
     return TapTolerance(atol=DEFAULT_TOLERANCE, source="default")
+
+
+def write_tolerances(ref_dir: Path, tolerances: dict[str, TapTolerance]) -> None:
+    """Persist ``tolerances`` to ``<ref_dir>/tolerances.json``.
+
+    Written by ``firefly calibrate``; auto-loaded by ``firefly check``.
+    Users can also hand-edit the file to tune individual atols.
+    """
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"tolerances": {name: asdict(t) for name, t in tolerances.items()}}
+    with (ref_dir / TOLERANCES_FILE).open("w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def read_tolerances(ref_dir: Path) -> dict[str, TapTolerance] | None:
+    """Load tolerances from ``<ref_dir>/tolerances.json``, or ``None`` if absent."""
+    path = ref_dir / TOLERANCES_FILE
+    if not path.exists():
+        return None
+    with path.open() as f:
+        data = json.load(f)
+    raw = data.get("tolerances", {})
+    return {name: TapTolerance(**fields) for name, fields in raw.items()}
 
 
 @dataclass
@@ -133,6 +158,9 @@ def compare_to_reference(
     is set.
     """
     manifest, ref_tensors = read_reference(reference_dir)
+
+    if tolerances is None:
+        tolerances = read_tolerances(reference_dir)
 
     set_deterministic(seed=seed)
     candidate, tokenizer = load_model_and_tokenizer(candidate_model_id, device=device)
