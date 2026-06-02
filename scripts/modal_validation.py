@@ -36,9 +36,14 @@ _HF_SECRETS = (
     [modal.Secret.from_local_environ(["HF_TOKEN"])] if _HF_TOKEN_SET else []
 )
 
+# PyTorch 2.7+ with CUDA 12.8 is required for Blackwell (sm_100, B200).
+# Older images (e.g., 2.6.0-cuda12.4) will UserWarning + fail on B200 because
+# the wheels were compiled before sm_100 was added to TORCH_CUDA_ARCH_LIST.
+# H100 / H200 / A100 / A10G all still work on the newer image — Hopper's sm_90
+# and Ampere's sm_80 are supported in both 2.6 and 2.7.
 image = (
     modal.Image.from_registry(
-        "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime",
+        "pytorch/pytorch:2.7.0-cuda12.8-cudnn9-runtime",
         add_python="3.11",
     )
     .pip_install(
