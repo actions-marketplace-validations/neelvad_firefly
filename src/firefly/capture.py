@@ -115,6 +115,37 @@ def _dtype_str(dtype: torch.dtype) -> str:
     return str(dtype).replace("torch.", "")
 
 
+_DTYPE_BY_NAME: dict[str, torch.dtype] = {
+    "fp32": torch.float32, "float32": torch.float32,
+    "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+    "fp16": torch.float16, "float16": torch.float16,
+}
+_NAME_BY_DTYPE: dict[torch.dtype, str] = {
+    torch.float32: "float32",
+    torch.bfloat16: "bfloat16",
+    torch.float16: "float16",
+}
+
+
+def parse_dtype(name: str) -> torch.dtype:
+    """Map a user-facing dtype string ('bf16', 'bfloat16', etc.) to torch.dtype."""
+    try:
+        return _DTYPE_BY_NAME[name]
+    except KeyError as e:
+        available = sorted({k for k in _DTYPE_BY_NAME if len(k) <= 4})
+        raise ValueError(
+            f"Unknown dtype: {name!r}. Choose from: {', '.join(available)}"
+        ) from e
+
+
+def dtype_to_name(dtype: torch.dtype) -> str:
+    """Map a torch.dtype to its canonical manifest-stored name."""
+    try:
+        return _NAME_BY_DTYPE[dtype]
+    except KeyError as e:
+        raise ValueError(f"Unsupported dtype: {dtype}") from e
+
+
 def load_model_and_tokenizer(
     model_id: str,
     device: str = "cpu",
@@ -158,10 +189,11 @@ def capture_reference(
     device: str = "cpu",
     seed: int = 0,
     domain: str = "llm",
+    dtype: torch.dtype = torch.float32,
 ) -> None:
     """Load ``model_id``, run the golden inputs, write a reference artifact."""
     set_deterministic(seed=seed)
-    model, tokenizer = load_model_and_tokenizer(model_id, device=device)
+    model, tokenizer = load_model_and_tokenizer(model_id, device=device, dtype=dtype)
     batch = load_golden_inputs(inputs_path, tokenizer, device)
     captured = run_capture(model, batch, domain=domain)
 
@@ -174,5 +206,6 @@ def capture_reference(
         captured_at=datetime.now(UTC).isoformat(),
         env=capture_env(),
         domain=domain,
+        dtype=dtype_to_name(dtype),
     )
     write_reference(out_dir, manifest, captured)

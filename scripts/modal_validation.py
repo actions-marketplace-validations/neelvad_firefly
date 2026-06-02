@@ -64,6 +64,7 @@ def run_validation(
     texts: list[str] | None = None,
     max_length: int = 16,
     runs: int = 8,
+    dtype: str = "fp32",
 ) -> dict:
     """Run capture + the three calibration configs on GPU; return all per-tap data."""
     import json
@@ -73,7 +74,7 @@ def run_validation(
     import torch
 
     from firefly.calibrate import calibrate
-    from firefly.capture import capture_reference
+    from firefly.capture import capture_reference, parse_dtype
     from firefly.noise import NoiseSpec
 
     if texts is None:
@@ -94,6 +95,7 @@ def run_validation(
             "runs": runs,
             "device": device_name,
             "torch_version": torch.__version__,
+            "dtype": dtype,
         },
         "configs": {},
     }
@@ -110,8 +112,10 @@ def run_validation(
         inputs_path.write_text(json.dumps({"texts": texts, "max_length": max_length}))
         ref_dir = tmp_path / "reference"
 
-        print(f"\nCapturing reference: {model_id}")
-        capture_reference(model_id, inputs_path, ref_dir, device="cuda")
+        print(f"\nCapturing reference: {model_id}  dtype={dtype}")
+        capture_reference(
+            model_id, inputs_path, ref_dir, device="cuda", dtype=parse_dtype(dtype),
+        )
 
         for name, spec in configs.items():
             print(f"\n=== Calibrating: {name} (mode={spec.mode}, allow_tf32={spec.allow_tf32}) ===")
@@ -161,6 +165,7 @@ def main(
     model: str = "HuggingFaceTB/SmolLM-135M",
     runs: int = 8,
     gpu: str = "A10G",
+    dtype: str = "fp32",
 ) -> None:
     import json
     from datetime import UTC, datetime
@@ -180,16 +185,18 @@ def main(
         if hourly is not None
         else "(unknown cost — check modal.com/pricing)"
     )
-    print(f"Launching {gpu} job for model={model}, runs={runs}  {cost_hint}")
+    print(f"Launching {gpu} job for model={model}, runs={runs}, dtype={dtype}  {cost_hint}")
 
     results = run_validation.with_options(gpu=gpu).remote(
-        model_id=model, runs=runs,
+        model_id=model, runs=runs, dtype=dtype,
     )
 
     out_dir = Path(__file__).parent / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"modal_validation_{_gpu_filename_tag(gpu)}_{timestamp}.json"
+    out_path = (
+        out_dir / f"modal_validation_{_gpu_filename_tag(gpu)}_{dtype}_{timestamp}.json"
+    )
     out_path.write_text(json.dumps(results, indent=2))
 
     print(f"\nResults written to {out_path}")

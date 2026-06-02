@@ -15,7 +15,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-from firefly.capture import fingerprint_model, run_capture, run_capture_repeated
+from firefly.capture import (
+    dtype_to_name,
+    fingerprint_model,
+    parse_dtype,
+    run_capture,
+    run_capture_repeated,
+)
 
 
 class _Submod(nn.Module):
@@ -166,6 +172,26 @@ def test_run_capture_repeated_rejects_zero_runs() -> None:
 
     with pytest.raises(ValueError, match="runs must be >= 1"):
         run_capture_repeated(model, batch, runs=0)
+
+
+def test_parse_dtype_accepts_short_and_long_names() -> None:
+    assert parse_dtype("fp32") is torch.float32
+    assert parse_dtype("float32") is torch.float32
+    assert parse_dtype("bf16") is torch.bfloat16
+    assert parse_dtype("bfloat16") is torch.bfloat16
+    assert parse_dtype("fp16") is torch.float16
+
+
+def test_parse_dtype_rejects_unknown() -> None:
+    with pytest.raises(ValueError, match="Unknown dtype"):
+        parse_dtype("int8")
+
+
+def test_dtype_round_trip() -> None:
+    for name in ("fp32", "bf16", "fp16"):
+        dt = parse_dtype(name)
+        canonical = dtype_to_name(dt)
+        assert parse_dtype(canonical) is dt
 
 
 def test_fingerprint_differs_for_different_weights() -> None:

@@ -39,6 +39,7 @@ class ReferenceManifest:
     captured_at: str  # ISO-8601 UTC
     env: dict[str, str] = field(default_factory=dict)
     domain: str = "llm"
+    dtype: str = "float32"  # the model's storage dtype: float32 / bfloat16 / float16
     schema_version: int = SCHEMA_VERSION
 
 

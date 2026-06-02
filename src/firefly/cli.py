@@ -20,17 +20,19 @@ def capture(
     out: Path = typer.Option(..., "--out", "-o", help="Directory to write the reference artifact."),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
     seed: int = typer.Option(0, "--seed", help="Determinism seed."),
+    dtype: str = typer.Option("fp32", "--dtype", help="Model dtype: fp32, bf16, or fp16."),
 ) -> None:
     """Capture a reference artifact from a model + golden inputs."""
-    from firefly.capture import capture_reference
+    from firefly.capture import capture_reference, parse_dtype
 
-    typer.echo(f"Capturing reference: model={model} device={device}")
+    typer.echo(f"Capturing reference: model={model} device={device} dtype={dtype}")
     capture_reference(
         model_id=model,
         inputs_path=inputs,
         out_dir=out,
         device=device,
         seed=seed,
+        dtype=parse_dtype(dtype),
     )
     typer.echo(f"Wrote reference artifact to {out}")
 

@@ -26,6 +26,7 @@ import torch
 from firefly.capture import (
     load_golden_inputs,
     load_model_and_tokenizer,
+    parse_dtype,
     run_capture_repeated,
 )
 from firefly.compare import DEFAULT_TOLERANCE, TapTolerance, write_tolerances
@@ -90,12 +91,15 @@ def calibrate(
     tolerances dict so callers can introspect without reloading.
     """
     manifest, reference_tensors = read_reference(reference_dir)
+    model_dtype = parse_dtype(manifest.dtype)
 
     if noise is not None and noise.mode == "hardware":
         set_hardware_noise_baseline(seed=seed, allow_tf32=noise.allow_tf32)
     else:
         set_deterministic(seed=seed)
-    model, tokenizer = load_model_and_tokenizer(manifest.model_id, device=device)
+    model, tokenizer = load_model_and_tokenizer(
+        manifest.model_id, device=device, dtype=model_dtype,
+    )
     batch = load_golden_inputs(inputs_path, tokenizer, device)
 
     captures = run_capture_repeated(
