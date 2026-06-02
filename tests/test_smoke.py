@@ -37,7 +37,14 @@ def test_capture_command_errors_on_missing_required_args() -> None:
 def test_check_command_advertises_options() -> None:
     result = runner.invoke(app, ["check", "--help"])
     assert result.exit_code == 0
-    for option in ("--reference", "--candidate", "--inputs", "--device", "--report-json"):
+    for option in (
+        "--reference",
+        "--candidate",
+        "--inputs",
+        "--device",
+        "--report-json",
+        "--allow-fingerprint",  # truncated by narrow help-text width in CliRunner
+    ):
         assert option in result.stdout
 
 

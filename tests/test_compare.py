@@ -91,3 +91,55 @@ def test_compare_same_model_is_clean(tmp_path: Path) -> None:
 
     assert all(not d.exceeds_tolerance for d in divs)
     assert max(d.max_abs_diff for d in divs) == 0.0
+
+
+@pytest.mark.slow
+def test_compare_raises_on_fingerprint_mismatch(tmp_path: Path) -> None:
+    """Hand-edit the manifest's fingerprint to simulate a model swap;
+    compare_to_reference should refuse to proceed."""
+    from firefly.capture import capture_reference
+    from firefly.compare import FingerprintMismatchError, compare_to_reference
+
+    inputs_path = tmp_path / "golden.json"
+    inputs_path.write_text(json.dumps({"texts": ["hello world"], "max_length": 8}))
+    ref_dir = tmp_path / "reference"
+
+    capture_reference("HuggingFaceTB/SmolLM-135M", inputs_path, ref_dir)
+
+    manifest_path = ref_dir / "manifest.json"
+    with manifest_path.open() as f:
+        manifest = json.load(f)
+    manifest["model_fingerprint"] = "0000000000000000"
+    with manifest_path.open("w") as f:
+        json.dump(manifest, f)
+
+    with pytest.raises(FingerprintMismatchError, match="Candidate fingerprint differs"):
+        compare_to_reference(ref_dir, "HuggingFaceTB/SmolLM-135M", inputs_path)
+
+
+@pytest.mark.slow
+def test_compare_allow_fingerprint_mismatch_proceeds(tmp_path: Path) -> None:
+    """With the escape hatch set, compare proceeds even when fingerprints differ."""
+    from firefly.capture import capture_reference
+    from firefly.compare import compare_to_reference
+
+    inputs_path = tmp_path / "golden.json"
+    inputs_path.write_text(json.dumps({"texts": ["hello world"], "max_length": 8}))
+    ref_dir = tmp_path / "reference"
+
+    capture_reference("HuggingFaceTB/SmolLM-135M", inputs_path, ref_dir)
+
+    manifest_path = ref_dir / "manifest.json"
+    with manifest_path.open() as f:
+        manifest = json.load(f)
+    manifest["model_fingerprint"] = "0000000000000000"
+    with manifest_path.open("w") as f:
+        json.dump(manifest, f)
+
+    divs = compare_to_reference(
+        ref_dir,
+        "HuggingFaceTB/SmolLM-135M",
+        inputs_path,
+        allow_fingerprint_mismatch=True,
+    )
+    assert max(d.max_abs_diff for d in divs) == 0.0

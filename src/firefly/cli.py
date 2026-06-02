@@ -52,6 +52,11 @@ def check(
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
     seed: int = typer.Option(0, "--seed", help="Determinism seed."),
     report_json: Path | None = typer.Option(None, "--report-json", help="Write structured report to this path."),
+    allow_fingerprint_mismatch: bool = typer.Option(
+        False,
+        "--allow-fingerprint-mismatch",
+        help="Proceed even if the candidate's weights have changed since reference was captured.",
+    ),
 ) -> None:
     """Check a candidate against a reference. Exits non-zero if divergence exceeds tolerance."""
     from firefly.attribution import attribute_first_divergence
@@ -64,6 +69,7 @@ def check(
         inputs_path=inputs,
         device=device,
         seed=seed,
+        allow_fingerprint_mismatch=allow_fingerprint_mismatch,
     )
     result = attribute_first_divergence(divergences)
 
