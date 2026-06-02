@@ -15,7 +15,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from firefly.capture import fingerprint_model, run_capture
+from firefly.capture import fingerprint_model, run_capture, run_capture_repeated
 
 
 class _Submod(nn.Module):
@@ -120,6 +120,52 @@ def test_fingerprint_is_stable_across_runs() -> None:
     torch.manual_seed(0)
     fp_b = fingerprint_model(_FakeLM(dim=8, n_layers=2))
     assert fp_a == fp_b
+
+
+def test_run_capture_repeated_returns_one_tensor_per_run() -> None:
+    torch.manual_seed(0)
+    model = _FakeLM(dim=8, n_layers=2).eval()
+    batch = {"input_ids": torch.zeros(1, 4, dtype=torch.long)}
+
+    captures = run_capture_repeated(model, batch, runs=3)
+
+    for name, tensors in captures.items():
+        assert len(tensors) == 3, f"tap {name} has {len(tensors)} captures, expected 3"
+
+
+def test_run_capture_repeated_is_deterministic_on_cpu() -> None:
+    """All N runs must produce bit-equal tensors at every tap."""
+    torch.manual_seed(0)
+    model = _FakeLM(dim=8, n_layers=2).eval()
+    batch = {"input_ids": torch.zeros(1, 4, dtype=torch.long)}
+
+    captures = run_capture_repeated(model, batch, runs=4)
+
+    for tensors in captures.values():
+        first = tensors[0]
+        for other in tensors[1:]:
+            assert torch.equal(first, other)
+
+
+def test_run_capture_repeated_registers_hooks_once() -> None:
+    """After the call, no leftover hooks remain — regardless of run count."""
+    torch.manual_seed(0)
+    model = _FakeLM(dim=8, n_layers=2).eval()
+    batch = {"input_ids": torch.zeros(1, 4, dtype=torch.long)}
+
+    run_capture_repeated(model, batch, runs=5)
+
+    leftover = sum(len(m._forward_hooks) for m in model.modules())
+    assert leftover == 0
+
+
+def test_run_capture_repeated_rejects_zero_runs() -> None:
+    torch.manual_seed(0)
+    model = _FakeLM(dim=8, n_layers=2).eval()
+    batch = {"input_ids": torch.zeros(1, 4, dtype=torch.long)}
+
+    with pytest.raises(ValueError, match="runs must be >= 1"):
+        run_capture_repeated(model, batch, runs=0)
 
 
 def test_fingerprint_differs_for_different_weights() -> None:

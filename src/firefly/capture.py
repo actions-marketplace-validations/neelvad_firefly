@@ -33,25 +33,30 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
 
-def run_capture(
+def run_capture_repeated(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
+    runs: int = 1,
     domain: str = "llm",
-) -> dict[str, torch.Tensor]:
-    """Register forward hooks at the model's tap points, run a forward pass on
-    ``batch``, and return ``{tap_name: detached cpu tensor}``.
+) -> dict[str, list[torch.Tensor]]:
+    """Register hooks once, run ``runs`` forward passes, return one tensor per
+    run per tap. Used by calibration, which needs many self-runs to measure
+    the per-tap noise floor without paying for repeated hook registration.
 
     Hooks handle tuple outputs (e.g., HF ``self_attn`` returns
     ``(hidden_states, attn_weights, past_kv)``) by capturing ``output[0]``.
     """
+    if runs < 1:
+        raise ValueError(f"runs must be >= 1, got {runs}")
+
     taps = select_tap_points(model, domain=domain)
-    captured: dict[str, torch.Tensor] = {}
+    captures: dict[str, list[torch.Tensor]] = {tap.name: [] for tap in taps}
     handles: list[torch.utils.hooks.RemovableHandle] = []
 
     def _make_hook(tap_name: str):
         def _hook(_module: nn.Module, _inputs: Any, output: Any) -> None:
             tensor = output[0] if isinstance(output, tuple) else output
-            captured[tap_name] = tensor.detach().cpu().contiguous()
+            captures[tap_name].append(tensor.detach().cpu().contiguous())
         return _hook
 
     for tap in taps:
@@ -60,12 +65,23 @@ def run_capture(
 
     try:
         with torch.inference_mode():
-            model(**batch)
+            for _ in range(runs):
+                model(**batch)
     finally:
         for h in handles:
             h.remove()
 
-    return captured
+    return captures
+
+
+def run_capture(
+    model: nn.Module,
+    batch: dict[str, torch.Tensor],
+    domain: str = "llm",
+) -> dict[str, torch.Tensor]:
+    """Single-run convenience wrapper around :func:`run_capture_repeated`."""
+    repeated = run_capture_repeated(model, batch, runs=1, domain=domain)
+    return {name: tensors[0] for name, tensors in repeated.items()}
 
 
 def fingerprint_model(model: nn.Module) -> str:
