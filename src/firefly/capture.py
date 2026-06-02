@@ -86,6 +86,19 @@ def _dtype_str(dtype: torch.dtype) -> str:
     return str(dtype).replace("torch.", "")
 
 
+def load_model_and_tokenizer(
+    model_id: str,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> tuple[nn.Module, PreTrainedTokenizerBase]:
+    """Load an HF causal-LM and its tokenizer onto ``device`` in eval mode."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    return model.to(device).eval(), tokenizer
+
+
 def load_golden_inputs(
     inputs_path: Path,
     tokenizer: PreTrainedTokenizerBase,
@@ -118,14 +131,8 @@ def capture_reference(
     domain: str = "llm",
 ) -> None:
     """Load ``model_id``, run the golden inputs, write a reference artifact."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
     set_deterministic(seed=seed)
-
-    model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float32)
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = model.to(device).eval()
-
+    model, tokenizer = load_model_and_tokenizer(model_id, device=device)
     batch = load_golden_inputs(inputs_path, tokenizer, device)
     captured = run_capture(model, batch, domain=domain)
 

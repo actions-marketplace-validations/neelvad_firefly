@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 
-from firefly.capture import load_golden_inputs, run_capture
+from firefly.capture import load_golden_inputs, load_model_and_tokenizer, run_capture
 from firefly.determinism import set_deterministic
 from firefly.reference import read_reference
 
@@ -88,14 +88,10 @@ def compare_to_reference(
     tolerances: dict[str, float] | None = None,
 ) -> list[TapDivergence]:
     """Run candidate, diff against reference, return per-tap divergences in forward order."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
     manifest, ref_tensors = read_reference(reference_dir)
 
     set_deterministic(seed=seed)
-    candidate = AutoModelForCausalLM.from_pretrained(candidate_model_id, dtype=torch.float32)
-    tokenizer = AutoTokenizer.from_pretrained(candidate_model_id)
-    candidate = candidate.to(device).eval()
+    candidate, tokenizer = load_model_and_tokenizer(candidate_model_id, device=device)
 
     batch = load_golden_inputs(inputs_path, tokenizer, device)
     candidate_tensors = run_capture(candidate, batch, domain=manifest.domain)
