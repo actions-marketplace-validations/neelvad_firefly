@@ -53,6 +53,7 @@ addopts = "-m 'not slow'"
 dev = [
     "pytest>=8",
     "ruff>=0.5",
+    "modal>=0.64",
 ]
 
 [[tool.uv.index]]
