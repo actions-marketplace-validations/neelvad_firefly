@@ -21,10 +21,35 @@ than enough — one full validation run on an A10G is well under $1.
 ### Running
 
 ```sh
-uv run modal run scripts/modal_validation.py
-# or with a different model:
-uv run modal run scripts/modal_validation.py --model HuggingFaceTB/SmolLM-360M
+uv run modal run scripts/modal_validation.py                   # default: A10G
+uv run modal run scripts/modal_validation.py --gpu A100
+uv run modal run scripts/modal_validation.py --gpu H100
+uv run modal run scripts/modal_validation.py --gpu A100 --model HuggingFaceTB/SmolLM-360M
 ```
+
+The output filename includes the GPU tag — e.g.
+`scripts/results/modal_validation_a100_<timestamp>.json` — so multiple runs
+land side-by-side for cross-hardware comparison.
+
+### Supported GPUs and rough cost
+
+Modal exposes NVIDIA hardware via the `--gpu` flag. Approximate on-demand
+hourly rates as of 2026-Q2 (check [modal.com/pricing](https://modal.com/pricing)
+for current numbers); each validation run completes in ~3–5 min:
+
+| GPU | $/hr (approx) | Full run (approx) |
+|---|---|---|
+| `T4` | $0.59 | $0.05 |
+| `L4` | $0.80 | $0.07 |
+| `A10G` (default) | $1.10 | $0.09 |
+| `A100` (40GB) | $2.10 | $0.18 |
+| `A100-80GB` | $2.50 | $0.21 |
+| `H100` | $4.56 | $0.38 |
+| `H200` | $4.56 | $0.38 |
+| `B200` | $6.25 | $0.52 |
+
+Running A10G + A100 + H100 together costs roughly $0.65 — well within the
+$30/mo free-tier credit.
 
 ### HuggingFace authentication (optional)
 

@@ -1,6 +1,6 @@
 """Modal-driven validation of the synthetic-noise calibration methodology.
 
-Runs on an NVIDIA A10G:
+Runs on an NVIDIA GPU (default A10G; configurable via ``--gpu``):
 
     1. Captures a reference from a small HF transformer.
     2. Calibrates three configurations against it:
@@ -11,12 +11,13 @@ Runs on an NVIDIA A10G:
 
 The local entrypoint writes the returned JSON to scripts/results/ so a plot
 script (or notebook) can render the depth-amplification curves and compare
-against the synthetic-noise baseline captured locally on CPU.
+across hardware generations.
 
 Usage:
     uv run modal token new                          # one-time auth
     uv run modal run scripts/modal_validation.py
-    uv run modal run scripts/modal_validation.py --model HuggingFaceTB/SmolLM-360M
+    uv run modal run scripts/modal_validation.py --gpu A100
+    uv run modal run scripts/modal_validation.py --gpu H100 --model HuggingFaceTB/SmolLM-360M
 """
 
 from __future__ import annotations
@@ -130,8 +131,32 @@ def run_validation(
     return results
 
 
+# Approximate Modal on-demand pricing as of 2026-Q2, for the cost hint
+# printed at launch. Rates change; treat as a sanity check, not a quote.
+_GPU_COST_PER_HR = {
+    "T4": 0.59,
+    "L4": 0.80,
+    "L40S": 1.95,
+    "A10G": 1.10,
+    "A100": 2.10,
+    "A100-40GB": 2.10,
+    "A100-80GB": 2.50,
+    "H100": 4.56,
+    "H200": 4.56,
+    "B200": 6.25,
+}
+
+
+def _gpu_filename_tag(gpu: str) -> str:
+    return gpu.lower().replace("-", "_")
+
+
 @app.local_entrypoint()
-def main(model: str = "HuggingFaceTB/SmolLM-135M", runs: int = 8) -> None:
+def main(
+    model: str = "HuggingFaceTB/SmolLM-135M",
+    runs: int = 8,
+    gpu: str = "A10G",
+) -> None:
     import json
     from datetime import UTC, datetime
     from pathlib import Path
@@ -143,16 +168,27 @@ def main(model: str = "HuggingFaceTB/SmolLM-135M", runs: int = 8) -> None:
             "No HF_TOKEN in local env — using anonymous HF access "
             "(rate-limited; fine for public models)."
         )
-    print(f"Launching A10G job for model={model}, runs={runs}")
-    results = run_validation.remote(model_id=model, runs=runs)
+
+    hourly = _GPU_COST_PER_HR.get(gpu)
+    cost_hint = (
+        f"(approx ${hourly:.2f}/hr; full run ≈ ${hourly * 5 / 60:.2f})"
+        if hourly is not None
+        else "(unknown cost — check modal.com/pricing)"
+    )
+    print(f"Launching {gpu} job for model={model}, runs={runs}  {cost_hint}")
+
+    results = run_validation.with_options(gpu=gpu).remote(
+        model_id=model, runs=runs,
+    )
 
     out_dir = Path(__file__).parent / "results"
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"modal_validation_{timestamp}.json"
+    out_path = out_dir / f"modal_validation_{_gpu_filename_tag(gpu)}_{timestamp}.json"
     out_path.write_text(json.dumps(results, indent=2))
 
     print(f"\nResults written to {out_path}")
+    print(f"Device reported by torch: {results['metadata']['device']}")
     print("\n--- Quick summary ---")
     for name, config in results["configs"].items():
         floors = [tap["noise_floor"] for tap in config.values()]
