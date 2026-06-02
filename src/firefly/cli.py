@@ -38,10 +38,62 @@ def capture(
 @app.command()
 def calibrate(
     reference: Path = typer.Option(..., "--reference", "-r", help="Reference artifact directory."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
     runs: int = typer.Option(16, "--runs", "-n", help="Number of self-runs for the noise baseline."),
+    safety_factor: float = typer.Option(6.0, "--safety-factor", help="atol = safety_factor × observed noise floor."),
+    noise_mode: str = typer.Option("none", "--noise-mode", help="'none' (deterministic) or 'synthetic' (Gaussian injection)."),
+    noise_sigma: float = typer.Option(0.0, "--noise-sigma", help="Standard deviation of injected noise (synthetic mode)."),
+    noise_inject_at: str | None = typer.Option(None, "--noise-inject-at", help="Tap name to inject noise at (e.g. layer.0)."),
+    noise_base_seed: int = typer.Option(0, "--noise-base-seed", help="Base seed for noise injection (run i uses base_seed+i)."),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
+    seed: int = typer.Option(0, "--seed", help="Determinism seed."),
 ) -> None:
     """Calibrate per-tap-point tolerances by running the reference against itself."""
-    typer.echo(f"[stub] calibrate reference={reference} runs={runs}")
+    from firefly.calibrate import calibrate as run_calibrate
+    from firefly.noise import NoiseSpec
+
+    if noise_mode not in ("none", "synthetic"):
+        raise typer.BadParameter(
+            f"--noise-mode must be 'none' or 'synthetic', got {noise_mode!r}",
+            param_hint="--noise-mode",
+        )
+    if noise_mode == "synthetic":
+        if noise_sigma <= 0:
+            raise typer.BadParameter(
+                "--noise-sigma must be > 0 when --noise-mode=synthetic",
+                param_hint="--noise-sigma",
+            )
+        if noise_inject_at is None:
+            raise typer.BadParameter(
+                "--noise-inject-at is required when --noise-mode=synthetic",
+                param_hint="--noise-inject-at",
+            )
+
+    noise = NoiseSpec(
+        mode=noise_mode,  # type: ignore[arg-type]
+        sigma=noise_sigma,
+        inject_at=noise_inject_at,
+        base_seed=noise_base_seed,
+    )
+
+    typer.echo(f"Calibrating: reference={reference} runs={runs} noise_mode={noise_mode}")
+    tolerances = run_calibrate(
+        reference_dir=reference,
+        inputs_path=inputs,
+        runs=runs,
+        safety_factor=safety_factor,
+        noise=noise,
+        device=device,
+        seed=seed,
+    )
+
+    n_above_floor = sum(1 for t in tolerances.values() if t.noise_floor > 0)
+    max_floor = max((t.noise_floor for t in tolerances.values()), default=0.0)
+    typer.echo(
+        f"Calibrated {len(tolerances)} taps "
+        f"({n_above_floor} above zero, max noise_floor={max_floor:.3e})"
+    )
+    typer.echo(f"Wrote tolerances.json to {reference}")
 
 
 @app.command()

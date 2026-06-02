@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from typer.testing import CliRunner
 
 import firefly
@@ -50,4 +52,64 @@ def test_check_command_advertises_options() -> None:
 
 def test_check_command_errors_on_missing_required_args() -> None:
     result = runner.invoke(app, ["check"])
+    assert result.exit_code != 0
+
+
+def test_calibrate_command_advertises_options() -> None:
+    result = runner.invoke(app, ["calibrate", "--help"])
+    assert result.exit_code == 0
+    for option in (
+        "--reference",
+        "--inputs",
+        "--runs",
+        "--safety-factor",
+        "--noise-mode",
+        "--noise-sigma",
+        "--noise-inject-at",
+        "--noise-base-seed",
+        "--device",
+    ):
+        assert option in result.stdout
+
+
+def test_calibrate_command_errors_on_missing_required_args() -> None:
+    result = runner.invoke(app, ["calibrate"])
+    assert result.exit_code != 0
+
+
+def test_calibrate_rejects_synthetic_without_sigma(tmp_path: Path) -> None:
+    """--noise-mode=synthetic requires --noise-sigma > 0 and --noise-inject-at."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    inputs = tmp_path / "x.json"
+    inputs.write_text("{}")
+
+    result = runner.invoke(
+        app,
+        [
+            "calibrate",
+            "--reference", str(ref),
+            "--inputs", str(inputs),
+            "--noise-mode", "synthetic",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "noise-sigma" in result.output.lower() or "noise-sigma" in result.stderr.lower()
+
+
+def test_calibrate_rejects_unknown_noise_mode(tmp_path: Path) -> None:
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    inputs = tmp_path / "x.json"
+    inputs.write_text("{}")
+
+    result = runner.invoke(
+        app,
+        [
+            "calibrate",
+            "--reference", str(ref),
+            "--inputs", str(inputs),
+            "--noise-mode", "magic",
+        ],
+    )
     assert result.exit_code != 0
