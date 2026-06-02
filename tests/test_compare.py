@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from firefly.compare import DEFAULT_TOLERANCE, diff_captures
+from firefly.compare import DEFAULT_TOLERANCE, TapTolerance, diff_captures
 
 
 def _t(values: list[float]) -> torch.Tensor:
@@ -39,11 +39,22 @@ def test_diff_captures_respects_per_tap_tolerance() -> None:
     a = {"x": _t([1.0])}
     b = {"x": _t([1.0 + 1e-3])}
 
-    relaxed = diff_captures(a, b, ["x"], tolerances={"x": 1e-2})
-    strict = diff_captures(a, b, ["x"], tolerances={"x": 1e-5})
+    relaxed = diff_captures(a, b, ["x"], tolerances={"x": TapTolerance(atol=1e-2)})
+    strict = diff_captures(a, b, ["x"], tolerances={"x": TapTolerance(atol=1e-5)})
 
     assert not relaxed[0].exceeds_tolerance
     assert strict[0].exceeds_tolerance
+
+
+def test_diff_captures_records_tolerance_source() -> None:
+    a = {"x": _t([1.0])}
+    b = {"x": _t([1.0])}
+
+    explicit = diff_captures(a, b, ["x"], tolerances={"x": TapTolerance(atol=1e-2, source="manual")})
+    implicit = diff_captures(a, b, ["x"])
+
+    assert explicit[0].tolerance.source == "manual"
+    assert implicit[0].tolerance.source == "default"
 
 
 def test_diff_captures_preserves_forward_order() -> None:

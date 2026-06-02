@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import torch
 
@@ -28,6 +29,8 @@ from firefly.reference import read_reference
 
 DEFAULT_TOLERANCE = 1e-5
 
+ToleranceSource = Literal["default", "manual", "calibrated"]
+
 
 class FingerprintMismatchError(ValueError):
     """Candidate's actual weights don't match what the reference recorded.
@@ -40,11 +43,31 @@ class FingerprintMismatchError(ValueError):
 
 
 @dataclass
+class TapTolerance:
+    """The threshold applied at a single tap, plus the provenance metadata
+    Phase 2 calibration will fill in.
+
+    ``source`` distinguishes a default-flat tolerance from one the user
+    supplied by hand from one derived empirically by ``firefly calibrate``.
+    The numerical fields are populated for ``source="calibrated"``.
+    """
+
+    atol: float
+    source: ToleranceSource = "default"
+    noise_floor: float | None = None
+    n_calibration_runs: int | None = None
+
+
+def _default_tolerance() -> TapTolerance:
+    return TapTolerance(atol=DEFAULT_TOLERANCE, source="default")
+
+
+@dataclass
 class TapDivergence:
     tap_name: str
     max_abs_diff: float
     mean_abs_diff: float
-    tolerance: float
+    tolerance: TapTolerance
     exceeds_tolerance: bool
 
 
@@ -52,7 +75,7 @@ def diff_captures(
     reference_tensors: dict[str, torch.Tensor],
     candidate_tensors: dict[str, torch.Tensor],
     tap_order: list[str],
-    tolerances: dict[str, float] | None = None,
+    tolerances: dict[str, TapTolerance] | None = None,
 ) -> list[TapDivergence]:
     """Diff two captures in the given tap order.
 
@@ -80,14 +103,14 @@ def diff_captures(
         diff = (cand_t.float() - ref_t.float()).abs()
         max_d = float(diff.max().item())
         mean_d = float(diff.mean().item())
-        tol = tolerances.get(tap_name, DEFAULT_TOLERANCE)
+        tol = tolerances.get(tap_name, _default_tolerance())
         divergences.append(
             TapDivergence(
                 tap_name=tap_name,
                 max_abs_diff=max_d,
                 mean_abs_diff=mean_d,
                 tolerance=tol,
-                exceeds_tolerance=max_d > tol,
+                exceeds_tolerance=max_d > tol.atol,
             )
         )
 
@@ -100,7 +123,7 @@ def compare_to_reference(
     inputs_path: Path,
     device: str = "cpu",
     seed: int = 0,
-    tolerances: dict[str, float] | None = None,
+    tolerances: dict[str, TapTolerance] | None = None,
     allow_fingerprint_mismatch: bool = False,
 ) -> list[TapDivergence]:
     """Run candidate, diff against reference, return per-tap divergences in forward order.

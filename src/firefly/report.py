@@ -41,7 +41,7 @@ def render_human(result: AttributionResult, console: Console | None = None) -> s
             d.tap_name,
             f"{d.max_abs_diff:.3e}",
             f"{d.mean_abs_diff:.3e}",
-            f"{d.tolerance:.0e}",
+            f"{d.tolerance.atol:.0e}",
             status,
             style=row_style,
         )

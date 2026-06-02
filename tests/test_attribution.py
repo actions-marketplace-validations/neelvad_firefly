@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from firefly.attribution import attribute_first_divergence
-from firefly.compare import TapDivergence
+from firefly.compare import TapDivergence, TapTolerance
 
 
 def _div(name: str, exceeds: bool, max_d: float = 0.0) -> TapDivergence:
@@ -11,7 +11,7 @@ def _div(name: str, exceeds: bool, max_d: float = 0.0) -> TapDivergence:
         tap_name=name,
         max_abs_diff=max_d,
         mean_abs_diff=max_d,
-        tolerance=1e-5,
+        tolerance=TapTolerance(atol=1e-5),
         exceeds_tolerance=exceeds,
     )
 

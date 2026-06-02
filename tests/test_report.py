@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from firefly.attribution import AttributionResult
-from firefly.compare import TapDivergence
+from firefly.compare import TapDivergence, TapTolerance
 from firefly.report import render_human, write_json
 
 
@@ -15,7 +15,7 @@ def _div(name: str, max_d: float, exceeds: bool) -> TapDivergence:
         tap_name=name,
         max_abs_diff=max_d,
         mean_abs_diff=max_d / 10,
-        tolerance=1e-5,
+        tolerance=TapTolerance(atol=1e-5),
         exceeds_tolerance=exceeds,
     )
 
@@ -70,6 +70,9 @@ def test_write_json_payload_shape(tmp_path: Path) -> None:
     assert len(payload["divergences"]) == 3
     assert payload["divergences"][1]["tap_name"] == "layer.1.mlp"
     assert payload["divergences"][1]["exceeds_tolerance"] is True
+    # TapTolerance serializes as a nested object, not a bare float.
+    assert payload["divergences"][1]["tolerance"]["atol"] == 1e-5
+    assert payload["divergences"][1]["tolerance"]["source"] == "default"
 
 
 def test_write_json_clean_run(tmp_path: Path) -> None:
