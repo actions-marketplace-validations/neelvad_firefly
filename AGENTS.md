@@ -37,7 +37,7 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 - ✅ Activation-magnitude diagnostic (`scripts/analyze.py`)
 - ⏳ **Blog post / public writeup** — not yet started, data is ready
 - ⏳ **GitHub Pages site** — not yet started
-- ⏳ **Real GPU validation at scale** — done for fp32+TF32; BF16 sweep currently running
+- ✅ **Real GPU validation at scale** — done for FP32, BF16, and FP16 (27 GPU-runs across 9 GPUs × 3 dtypes)
 
 ## Architecture (load-bearing modules)
 
@@ -72,37 +72,22 @@ optional TF32 matmul. All results in `scripts/results/`. Key findings:
 8. **Explanation (confirmed by `scripts/analyze.py`):** SmolLM-135M develops **outlier features** at layer 11 (Dettmers et al. 2022 phenomenon). Activation magnitude at layer.11.mlp jumps from ~50 to ~30,303 in one layer — a 610× jump. The residual stream then "locks in" at ~32k for layers 11–27. **TF32 produces roughly constant relative error (~0.05–0.1%) everywhere**, so the absolute noise scales with activation magnitude. The "phase transition" in noise is just the activation magnitude jumping.
 9. **Layer-norm masks the symptom:** final_norm rescales 32k → 56. Output-level monitoring (Arize, Galileo, etc.) can't see this internal phenomenon; Firefly can. Strongest pro-Firefly argument we've generated.
 
-## What's running right now
-
-User just kicked off a full BF16 sweep:
-
-```sh
-for GPU in T4 L4 L40S A10G A100 A100-80GB H100 H200 B200; do
-  uv run modal run scripts/modal_validation.py --gpu "$GPU" --dtype bf16
-done
-```
-
-Files will land as `scripts/results/modal_validation_<gpu>_bf16_<timestamp>.json`.
-Hypothesis going in: BF16 has 7-bit mantissa (vs TF32's 10) → relative error
-~0.78% (vs ~0.1%) → ~8× more noise — but at the **same layer 11** if the
-outlier-features explanation is right. If the transition shifts, that's a
-publishable observation about precision-format-dependent transitions.
+10. **BF16 and FP16 inference are both bit-deterministic on all 9 GPUs, including with TF32 enabled.** Original hypothesis (mantissa width → noise) was wrong. Reason: `torch.backends.cuda.matmul.allow_tf32` is an *FP32-input-specific* downcast; BF16/FP16 storage takes the dedicated tensor-core path with deterministic reduction order. Verified each format actually loaded by checking that Config C atol stayed at the 1e-5 floor (vs ~7.8e+1 at layer.11.mlp in FP32). **Counterintuitive headline for blog: BF16 and FP16 are more reproducible than FP32+TF32 — and FP16 has the same 10-bit mantissa as TF32, which rules out "narrow mantissa tensor cores" as the cause. The noise is in cuBLAS's FP32-storage-with-TF32 *kernel dispatch path*, not in tensor-core arithmetic itself.**
 
 ## Roadmap (ordered)
 
-1. **Analyze BF16 results** when sweep finishes. Compare against the FP32+TF32 baseline. Confirm or refute the constant-relative-error claim.
-2. **Blog post draft.** Likely lives at `docs/index.md` rendered via GitHub Pages on this repo. Should include:
+1. **Blog post draft.** Likely lives at `docs/index.md` rendered via GitHub Pages on this repo. Should include:
+   - Punchline: 27 GPU-runs (9 GPUs × 3 dtypes), exactly **one** failure mode (FP32+TF32)
    - The methodology (per-tap calibration via empirical noise floor)
-   - The 9-GPU validation
-   - The PyTorch 2.6/2.7 invariance
-   - The layer-11 outlier-features explanation
+   - The 9-GPU FP32 validation + layer-11 outlier-features explanation (Dettmers 2022)
+   - The BF16 + FP16 sweeps that disambiguate: cause is cuBLAS FP32-input *dispatch path*, not mantissa width (since FP16 has same 10-bit mantissa as TF32 but is bit-stable)
+   - PyTorch 2.6/2.7 invariance (no version-induced confounder)
    - Per-layer activation magnitude plots from `scripts/analyze.py`
-   - Cross-precision (FP32+TF32 vs BF16) comparison
-   - The "why output-level monitoring can't see this" pitch
-3. **Plotting script** (`scripts/plot_validation.py` with matplotlib) for the writeup figures.
-4. **GitHub Pages setup** (`docs/_config.yml`, minimal Jekyll theme).
-5. **Phase 3 work** — package + GitHub Action wrapper, PyPI publish. Hold until blog post lands and we see if anyone's interested.
-6. **Recsys v2** (per `project_recsys_v2_angle.md` memory) — natural expansion using user's Meta connections. Pluggable `tap_points_recsys.py` is the architectural seam.
+   - The "why output-level monitoring can't see this" pitch (LayerNorm rescales 32k → 56)
+2. **Plotting script** (`scripts/plot_validation.py` with matplotlib) for the writeup figures.
+3. **GitHub Pages setup** (`docs/_config.yml`, minimal Jekyll theme).
+4. **Phase 3 work** — package + GitHub Action wrapper, PyPI publish. Hold until blog post lands and we see if anyone's interested.
+5. **Recsys v2** (per `project_recsys_v2_angle.md` memory) — natural expansion using user's Meta connections. Pluggable `tap_points_recsys.py` is the architectural seam.
 
 ## Non-obvious decisions to preserve
 
@@ -119,6 +104,9 @@ publishable observation about precision-format-dependent transitions.
 - **HF_TOKEN forwarding is opt-in.** If set locally, modal script forwards via `Secret.from_local_environ`; if not, anonymous HF access (rate-limited but works for public models).
 - **The user is a former Meta-Instagram-Search engineer** with deep model-internal-state telemetry expertise (PyTorch/Triton hooks, custom ops, checkpoint analyses). Don't over-explain PyTorch internals; do explain ML-product/market concepts.
 - **Don't squash merge.** Commit history is itself an artifact for the interview-signal goal. Each commit should be coherent and pass tests on its own (intermediate-commit hygiene relaxed where forward-looking test imports made this hard).
+- **vLLM capture design (decided 2026-06-03):** load with `enforce_eager=True` so CUDA graphs are disabled — forward hooks then work without graph breaks. Hooks keep tensors on GPU (`.detach()` only, no `.cpu()`); a separate `apply_model(_drain)` call bulk-transfers to CPU at end. Collapses ~90 per-tap sync points into 1. **v1 captures prefill only** (filter on `out.shape[0] > 1`) — keeps the diff story simple and rules out KV-cache-state confounders.
+- **Decode capture is the planned v1.5 extension** and is arguably *more* valuable than prefill for catching real regressions. Most vLLM optimization happens in the decode hot path (PagedAttention, speculative decoding, FlashAttention-decode kernels), so most version-bump bugs land there. KV-cache state at decode step N is deterministically derived from prompt + earlier steps, so decode IS reproducible at temp=0 — the "cache state is hard to control" framing I used initially was wrong. Implementation: drop prefill filter, add per-token-position indexing (`{tap}@token_{i}`), bound with `max_tokens=N`. Prefill and decode captures should be **separate tap groups** because their tensor shapes differ — prefill is `(prompt_tokens, hidden)`, decode is `(1, hidden)` per step.
+- **Eager mode is acceptable for the CI use case but NOT for production capture.** In CI, Firefly spins up its own vLLM instance for a one-off diagnostic run — slowness from eager mode is fine, the user doesn't see it. For *shadow-mode* capture (Firefly listening to production traffic), nobody runs vLLM in eager mode in prod — they need CUDA graphs + torch.compile for throughput. That capture path needs **a custom op** (e.g., `torch.ops.firefly.capture(tensor, name)`) that Dynamo treats as opaque tensor-in/tensor-out so it doesn't force a graph break. This is significant work — weeks, not days — and gated on v2/v3 product direction. Note explicitly so we don't accidentally architect the v1 CI capture as if shadow-mode were already a goal.
 
 ## How to pick up a cold session
 
