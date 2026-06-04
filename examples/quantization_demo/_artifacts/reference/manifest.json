@@ -1,0 +1,656 @@
+{
+  "captured_at": "2026-06-01T23:45:40.005325+00:00",
+  "domain": "llm",
+  "dtypes": {
+    "final_norm": "float32",
+    "layer.0": "float32",
+    "layer.0.mlp": "float32",
+    "layer.0.self_attn": "float32",
+    "layer.1": "float32",
+    "layer.1.mlp": "float32",
+    "layer.1.self_attn": "float32",
+    "layer.10": "float32",
+    "layer.10.mlp": "float32",
+    "layer.10.self_attn": "float32",
+    "layer.11": "float32",
+    "layer.11.mlp": "float32",
+    "layer.11.self_attn": "float32",
+    "layer.12": "float32",
+    "layer.12.mlp": "float32",
+    "layer.12.self_attn": "float32",
+    "layer.13": "float32",
+    "layer.13.mlp": "float32",
+    "layer.13.self_attn": "float32",
+    "layer.14": "float32",
+    "layer.14.mlp": "float32",
+    "layer.14.self_attn": "float32",
+    "layer.15": "float32",
+    "layer.15.mlp": "float32",
+    "layer.15.self_attn": "float32",
+    "layer.16": "float32",
+    "layer.16.mlp": "float32",
+    "layer.16.self_attn": "float32",
+    "layer.17": "float32",
+    "layer.17.mlp": "float32",
+    "layer.17.self_attn": "float32",
+    "layer.18": "float32",
+    "layer.18.mlp": "float32",
+    "layer.18.self_attn": "float32",
+    "layer.19": "float32",
+    "layer.19.mlp": "float32",
+    "layer.19.self_attn": "float32",
+    "layer.2": "float32",
+    "layer.2.mlp": "float32",
+    "layer.2.self_attn": "float32",
+    "layer.20": "float32",
+    "layer.20.mlp": "float32",
+    "layer.20.self_attn": "float32",
+    "layer.21": "float32",
+    "layer.21.mlp": "float32",
+    "layer.21.self_attn": "float32",
+    "layer.22": "float32",
+    "layer.22.mlp": "float32",
+    "layer.22.self_attn": "float32",
+    "layer.23": "float32",
+    "layer.23.mlp": "float32",
+    "layer.23.self_attn": "float32",
+    "layer.24": "float32",
+    "layer.24.mlp": "float32",
+    "layer.24.self_attn": "float32",
+    "layer.25": "float32",
+    "layer.25.mlp": "float32",
+    "layer.25.self_attn": "float32",
+    "layer.26": "float32",
+    "layer.26.mlp": "float32",
+    "layer.26.self_attn": "float32",
+    "layer.27": "float32",
+    "layer.27.mlp": "float32",
+    "layer.27.self_attn": "float32",
+    "layer.28": "float32",
+    "layer.28.mlp": "float32",
+    "layer.28.self_attn": "float32",
+    "layer.29": "float32",
+    "layer.29.mlp": "float32",
+    "layer.29.self_attn": "float32",
+    "layer.3": "float32",
+    "layer.3.mlp": "float32",
+    "layer.3.self_attn": "float32",
+    "layer.4": "float32",
+    "layer.4.mlp": "float32",
+    "layer.4.self_attn": "float32",
+    "layer.5": "float32",
+    "layer.5.mlp": "float32",
+    "layer.5.self_attn": "float32",
+    "layer.6": "float32",
+    "layer.6.mlp": "float32",
+    "layer.6.self_attn": "float32",
+    "layer.7": "float32",
+    "layer.7.mlp": "float32",
+    "layer.7.self_attn": "float32",
+    "layer.8": "float32",
+    "layer.8.mlp": "float32",
+    "layer.8.self_attn": "float32",
+    "layer.9": "float32",
+    "layer.9.mlp": "float32",
+    "layer.9.self_attn": "float32"
+  },
+  "env": {
+    "device": "mps",
+    "platform": "macOS-26.4.1-arm64-arm-64bit",
+    "python": "3.11.15",
+    "torch": "2.12.0"
+  },
+  "model_fingerprint": "6808547c42b7f2b3",
+  "model_id": "HuggingFaceTB/SmolLM-135M",
+  "schema_version": 1,
+  "shapes": {
+    "final_norm": [
+      2,
+      16,
+      576
+    ],
+    "layer.0": [
+      2,
+      16,
+      576
+    ],
+    "layer.0.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.0.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.1": [
+      2,
+      16,
+      576
+    ],
+    "layer.1.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.1.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.10": [
+      2,
+      16,
+      576
+    ],
+    "layer.10.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.10.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.11": [
+      2,
+      16,
+      576
+    ],
+    "layer.11.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.11.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.12": [
+      2,
+      16,
+      576
+    ],
+    "layer.12.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.12.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.13": [
+      2,
+      16,
+      576
+    ],
+    "layer.13.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.13.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.14": [
+      2,
+      16,
+      576
+    ],
+    "layer.14.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.14.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.15": [
+      2,
+      16,
+      576
+    ],
+    "layer.15.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.15.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.16": [
+      2,
+      16,
+      576
+    ],
+    "layer.16.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.16.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.17": [
+      2,
+      16,
+      576
+    ],
+    "layer.17.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.17.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.18": [
+      2,
+      16,
+      576
+    ],
+    "layer.18.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.18.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.19": [
+      2,
+      16,
+      576
+    ],
+    "layer.19.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.19.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.2": [
+      2,
+      16,
+      576
+    ],
+    "layer.2.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.2.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.20": [
+      2,
+      16,
+      576
+    ],
+    "layer.20.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.20.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.21": [
+      2,
+      16,
+      576
+    ],
+    "layer.21.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.21.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.22": [
+      2,
+      16,
+      576
+    ],
+    "layer.22.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.22.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.23": [
+      2,
+      16,
+      576
+    ],
+    "layer.23.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.23.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.24": [
+      2,
+      16,
+      576
+    ],
+    "layer.24.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.24.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.25": [
+      2,
+      16,
+      576
+    ],
+    "layer.25.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.25.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.26": [
+      2,
+      16,
+      576
+    ],
+    "layer.26.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.26.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.27": [
+      2,
+      16,
+      576
+    ],
+    "layer.27.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.27.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.28": [
+      2,
+      16,
+      576
+    ],
+    "layer.28.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.28.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.29": [
+      2,
+      16,
+      576
+    ],
+    "layer.29.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.29.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.3": [
+      2,
+      16,
+      576
+    ],
+    "layer.3.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.3.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.4": [
+      2,
+      16,
+      576
+    ],
+    "layer.4.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.4.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.5": [
+      2,
+      16,
+      576
+    ],
+    "layer.5.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.5.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.6": [
+      2,
+      16,
+      576
+    ],
+    "layer.6.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.6.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.7": [
+      2,
+      16,
+      576
+    ],
+    "layer.7.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.7.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.8": [
+      2,
+      16,
+      576
+    ],
+    "layer.8.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.8.self_attn": [
+      2,
+      16,
+      576
+    ],
+    "layer.9": [
+      2,
+      16,
+      576
+    ],
+    "layer.9.mlp": [
+      2,
+      16,
+      576
+    ],
+    "layer.9.self_attn": [
+      2,
+      16,
+      576
+    ]
+  },
+  "tap_points": [
+    "layer.0.self_attn",
+    "layer.0.mlp",
+    "layer.0",
+    "layer.1.self_attn",
+    "layer.1.mlp",
+    "layer.1",
+    "layer.2.self_attn",
+    "layer.2.mlp",
+    "layer.2",
+    "layer.3.self_attn",
+    "layer.3.mlp",
+    "layer.3",
+    "layer.4.self_attn",
+    "layer.4.mlp",
+    "layer.4",
+    "layer.5.self_attn",
+    "layer.5.mlp",
+    "layer.5",
+    "layer.6.self_attn",
+    "layer.6.mlp",
+    "layer.6",
+    "layer.7.self_attn",
+    "layer.7.mlp",
+    "layer.7",
+    "layer.8.self_attn",
+    "layer.8.mlp",
+    "layer.8",
+    "layer.9.self_attn",
+    "layer.9.mlp",
+    "layer.9",
+    "layer.10.self_attn",
+    "layer.10.mlp",
+    "layer.10",
+    "layer.11.self_attn",
+    "layer.11.mlp",
+    "layer.11",
+    "layer.12.self_attn",
+    "layer.12.mlp",
+    "layer.12",
+    "layer.13.self_attn",
+    "layer.13.mlp",
+    "layer.13",
+    "layer.14.self_attn",
+    "layer.14.mlp",
+    "layer.14",
+    "layer.15.self_attn",
+    "layer.15.mlp",
+    "layer.15",
+    "layer.16.self_attn",
+    "layer.16.mlp",
+    "layer.16",
+    "layer.17.self_attn",
+    "layer.17.mlp",
+    "layer.17",
+    "layer.18.self_attn",
+    "layer.18.mlp",
+    "layer.18",
+    "layer.19.self_attn",
+    "layer.19.mlp",
+    "layer.19",
+    "layer.20.self_attn",
+    "layer.20.mlp",
+    "layer.20",
+    "layer.21.self_attn",
+    "layer.21.mlp",
+    "layer.21",
+    "layer.22.self_attn",
+    "layer.22.mlp",
+    "layer.22",
+    "layer.23.self_attn",
+    "layer.23.mlp",
+    "layer.23",
+    "layer.24.self_attn",
+    "layer.24.mlp",
+    "layer.24",
+    "layer.25.self_attn",
+    "layer.25.mlp",
+    "layer.25",
+    "layer.26.self_attn",
+    "layer.26.mlp",
+    "layer.26",
+    "layer.27.self_attn",
+    "layer.27.mlp",
+    "layer.27",
+    "layer.28.self_attn",
+    "layer.28.mlp",
+    "layer.28",
+    "layer.29.self_attn",
+    "layer.29.mlp",
+    "layer.29",
+    "final_norm"
+  ]
+}

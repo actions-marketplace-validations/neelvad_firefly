@@ -1,0 +1,550 @@
+{
+  "tolerances": {
+    "final_norm": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.0": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.0.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.0.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.1": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.1.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.1.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.10": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.10.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.10.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.11": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.11.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.11.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.12": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.12.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.12.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.13": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.13.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.13.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.14": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.14.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.14.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.15": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.15.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.15.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.16": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.16.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.16.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.17": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.17.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.17.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.18": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.18.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.18.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.19": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.19.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.19.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.2": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.2.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.2.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.20": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.20.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.20.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.21": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.21.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.21.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.22": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.22.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.22.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.23": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.23.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.23.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.24": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.24.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.24.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.25": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.25.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.25.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.26": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.26.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.26.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.27": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.27.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.27.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.28": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.28.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.28.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.29": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.29.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.29.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.3": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.3.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.3.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.4": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.4.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.4.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.5": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.5.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.5.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.6": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.6.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.6.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.7": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.7.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.7.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.8": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.8.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.8.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.9": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.9.mlp": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    },
+    "layer.9.self_attn": {
+      "atol": 1e-05,
+      "n_calibration_runs": 4,
+      "noise_floor": 0.0,
+      "source": "calibrated"
+    }
+  }
+}

@@ -29,9 +29,18 @@ references/
 candidates/
 *.safetensors
 !tests/**/*.safetensors
+!examples/quantization_demo/_artifacts/reference/*.safetensors
 
-# Demo artifacts (generated locally)
+# Demo artifacts (generated locally) — keep the reference + golden so the
+# Firefly demo workflow has something to check against; only the broken
+# model and run-time reports are regenerated locally.
 examples/**/_artifacts/
+!examples/quantization_demo/_artifacts/
+!examples/quantization_demo/_artifacts/golden.json
+!examples/quantization_demo/_artifacts/reference/
+!examples/quantization_demo/_artifacts/reference/**
+examples/quantization_demo/_artifacts/broken-smollm/
+examples/quantization_demo/_artifacts/report.json
 
 # Modal validation results
 scripts/results/
