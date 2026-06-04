@@ -152,6 +152,108 @@ def diff(
 
 
 @app.command()
+def decode_diff(
+    ref_a: Path = typer.Argument(..., help="Reference directory A (baseline, decode-mode)."),
+    ref_b: Path = typer.Argument(..., help="Reference directory B (candidate, decode-mode)."),
+    out: Path = typer.Option(
+        Path("scripts/plots/decode_diff.png"),
+        help="Output PNG path.",
+    ),
+    title: str = typer.Option("", help="Plot title override."),
+) -> None:
+    """Plot per-tap relative error per token position (prefill + decode steps).
+
+    For decode-mode references where tap names have ``@prefill`` /
+    ``@token_N`` suffixes. One semilog line per position; layer-tap
+    order on the x-axis. Lines colored cool-to-warm so propagation
+    through decode is visually obvious.
+    """
+    import matplotlib.pyplot as plt
+    import torch
+
+    from firefly.reference import read_reference
+
+    manifest_a, tensors_a = read_reference(ref_a)
+    manifest_b, tensors_b = read_reference(ref_b)
+
+    common = set(tensors_a) & set(tensors_b)
+    suffixed = [n for n in common if "@" in n]
+    if not suffixed:
+        raise SystemExit("Neither reference contains @prefill / @token_N suffixed taps.")
+
+    # Group by suffix (position); within each, sort by base name (layer order).
+    positions: dict[str, list[str]] = {}
+    for name in suffixed:
+        base, suffix = name.rsplit("@", 1)
+        positions.setdefault(suffix, []).append(name)
+    for suffix in positions:
+        positions[suffix].sort(key=_tap_order_key)
+
+    def _pos_order(s: str) -> int:
+        if s == "prefill":
+            return 0
+        if s.startswith("token_"):
+            return 1 + int(s[len("token_"):])
+        return 10**6
+
+    ordered_positions = sorted(positions.keys(), key=_pos_order)
+    n_pos = len(ordered_positions)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(13, 6))
+
+    cmap = plt.get_cmap("viridis")
+    summary = []
+    first_div_layer = None
+    for i, suffix in enumerate(ordered_positions):
+        names_at_pos = positions[suffix]
+        rel_pcts = []
+        for name in names_at_pos:
+            a = tensors_a[name].float()
+            b = tensors_b[name].float()
+            diff = (a - b).abs()
+            mean_abs = diff.mean().item()
+            ref_mag = a.abs().mean().item()
+            rel_pct = (mean_abs / ref_mag * 100) if ref_mag > 0 else 0.0
+            rel_pcts.append(rel_pct)
+        x = list(range(len(names_at_pos)))
+        plotted = [v if v > 0 else 1e-7 for v in rel_pcts]
+        color = cmap(i / max(n_pos - 1, 1))
+        ax.semilogy(x, plotted, marker=".", linewidth=1.2, color=color, label=suffix)
+
+        # Track first-divergence layer for an annotation
+        for idx, v in enumerate(rel_pcts):
+            if v > 0 and first_div_layer is None:
+                first_div_layer = idx
+                ax.axvline(idx, color="#c14d4d", linewidth=0.7, linestyle="--", alpha=0.6)
+                break
+        final_rel = rel_pcts[-1] if rel_pcts else 0
+        summary.append((suffix, sum(1 for v in rel_pcts if v > 0), final_rel))
+
+    if not title:
+        a_label = _ref_label(manifest_a)
+        b_label = _ref_label(manifest_b)
+        title = f"Per-position diff: {a_label}  vs  {b_label}"
+    ax.set_title(title)
+    ax.set_xlabel("tap (layer forward order)")
+    ax.set_ylabel("mean abs diff / ref mag (%)")
+    ax.legend(loc="lower right", title="position", ncol=2, fontsize=8)
+    ax.grid(True, alpha=0.3, which="both")
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+
+    print(f"Saved {out}")
+    print(f"  positions: {ordered_positions}")
+    print(f"{'position':<12} {'n_diff':<8} {'final_rel(%)':<14}")
+    print("-" * 40)
+    for suffix, n_diff, final_rel in summary:
+        print(f"{suffix:<12} {n_diff:<8} {final_rel:<14.4f}")
+
+    # Suppress unused-import warning when torch isn't otherwise touched.
+    _ = torch.float32
+
+
+@app.command()
 def magnitudes(
     ref: Path = typer.Argument(..., help="Reference directory."),
     out: Path = typer.Option(
