@@ -117,8 +117,8 @@ def _summarize_actual(expected, divergences, attribution, total) -> str:
 
 
 def _render_expected(expected) -> str:
-    if expected == "bit_equal":
-        return "bit_equal"
+    if isinstance(expected, str):
+        return expected
     parts = []
     if "first_divergence" in expected:
         parts.append(f"first={expected['first_divergence']}")
@@ -151,7 +151,19 @@ def _run_one_test(test: dict, project_root: Path) -> TestResult:
             notes=[f"reference_b not found: {ref_b}"],
         )
 
-    divergences, attribution, total = _diff_pair(ref_a, ref_b)
+    try:
+        divergences, attribution, total = _diff_pair(ref_a, ref_b)
+    except ValueError as e:
+        # Shape mismatch or missing tap — itself a meaningful finding.
+        # Common cause: V0 vs V1 batch differently (per-prompt vs packed).
+        return TestResult(
+            name=name, description=description,
+            passed=(expected == "shape_mismatch"),
+            actual=f"shape_mismatch: {e}",
+            expected=_render_expected(expected),
+            notes=[] if expected == "shape_mismatch" else [str(e)],
+        )
+
     passed, notes = _evaluate(expected, divergences, attribution)
     actual = _summarize_actual(expected, divergences, attribution, total)
 

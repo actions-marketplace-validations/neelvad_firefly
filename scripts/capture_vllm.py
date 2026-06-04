@@ -218,6 +218,8 @@ def _do_capture(
     engine: str = "v0",
     capture_decode: bool = False,
     max_tokens: int = 8,
+    n_prompts: int = 1,
+    speculative_tokens: int = 0,
 ) -> dict:
     if engine not in {"v0", "v1"}:
         raise ValueError(f"engine must be 'v0' or 'v1', got {engine!r}")
@@ -232,17 +234,31 @@ def _do_capture(
         f"vllm version: {vllm.__version__}  engine={engine}  "
         f"VLLM_USE_V1={os.environ.get('VLLM_USE_V1')}  "
         f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '(auto)')}  "
-        f"capture_decode={capture_decode}"
+        f"capture_decode={capture_decode}  n_prompts={n_prompts}  "
+        f"speculative_tokens={speculative_tokens}"
     )
     print(f"Loading {model_id} dtype={dtype}")
 
-    llm = LLM(
+    llm_kwargs = dict(
         model=model_id,
         dtype=dtype,
         enforce_eager=True,
         max_model_len=max_seq_len,
         gpu_memory_utilization=0.4,
     )
+    if speculative_tokens > 0:
+        # NGram-based speculative decoding: no draft model required, vLLM
+        # uses an n-gram lookup over the prompt to propose draft tokens.
+        # Under greedy sampling (temp=0) the verifier deterministically
+        # accepts/rejects, so outputs should be bit-identical to the
+        # non-spec-decode run. Any divergence is a real bug.
+        llm_kwargs["speculative_config"] = {
+            "method": "ngram",
+            "num_speculative_tokens": speculative_tokens,
+            "prompt_lookup_max": 4,
+        }
+
+    llm = LLM(**llm_kwargs)
 
     # V0 uses apply_model (worker callable receives the model). V1's
     # apply_model is broken in 0.8.5 — we use collective_rpc instead, with
@@ -272,9 +288,10 @@ def _do_capture(
     # With capture_decode=True, max_tokens controls how many decode steps
     # we record (one prefill + (max_tokens - 1) decode steps).
     effective_max_tokens = max_tokens if capture_decode else 1
-    print(f"Generating {effective_max_tokens} token(s)")
+    prompts_batch = [prompt] * max(1, n_prompts)
+    print(f"Generating {effective_max_tokens} token(s) × {len(prompts_batch)} prompt(s)")
     params = SamplingParams(temperature=0.0, max_tokens=effective_max_tokens)
-    _ = llm.generate([prompt], params)
+    _ = llm.generate(prompts_batch, params)
 
     import io
 
@@ -324,6 +341,8 @@ def _do_capture(
         "engine": engine,
         "capture_decode": capture_decode,
         "max_tokens": effective_max_tokens,
+        "n_prompts": len(prompts_batch),
+        "speculative_tokens": speculative_tokens,
         "captures": captures,
     }
 
@@ -371,10 +390,13 @@ def capture_at_v_0_7_3(
     engine: str = "v0",
     capture_decode: bool = False,
     max_tokens: int = 8,
+    n_prompts: int = 1,
+    speculative_tokens: int = 0,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
-        attention_backend, engine, capture_decode, max_tokens,
+        attention_backend, engine, capture_decode, max_tokens, n_prompts,
+        speculative_tokens,
     )
 
 
@@ -388,10 +410,13 @@ def capture_at_v_0_8_5(
     engine: str = "v0",
     capture_decode: bool = False,
     max_tokens: int = 8,
+    n_prompts: int = 1,
+    speculative_tokens: int = 0,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
-        attention_backend, engine, capture_decode, max_tokens,
+        attention_backend, engine, capture_decode, max_tokens, n_prompts,
+        speculative_tokens,
     )
 
 
@@ -418,6 +443,8 @@ def main(
     engine: str = "v0",
     capture_decode: bool = False,
     max_tokens: int = 8,
+    n_prompts: int = 1,
+    speculative_tokens: int = 0,
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -452,6 +479,7 @@ def main(
         model_id=model, prompt=prompt, dtype=dtype,
         attention_backend=attention_backend, engine=engine,
         capture_decode=capture_decode, max_tokens=max_tokens,
+        n_prompts=n_prompts, speculative_tokens=speculative_tokens,
     )
 
     vllm_version = result["vllm_version"]
@@ -465,8 +493,10 @@ def main(
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backend_tag = f"_{backend_used.lower()}" if backend_used != "auto" else ""
         decode_tag = f"_decode{max_tokens_used}" if capture_decode_used else ""
+        batch_tag = f"_x{result.get('n_prompts', 1)}" if result.get('n_prompts', 1) > 1 else ""
+        spec_tag = f"_spec{result.get('speculative_tokens', 0)}" if result.get('speculative_tokens', 0) > 0 else ""
         out = (
-            f"vllm_{vllm_version.replace('.', '_')}_{engine_used}{backend_tag}{decode_tag}_"
+            f"vllm_{vllm_version.replace('.', '_')}_{engine_used}{backend_tag}{decode_tag}{batch_tag}{spec_tag}_"
             f"{gpu.lower().replace('-', '_')}_{timestamp}"
         )
     out_dir = Path(__file__).parent / "results" / out
@@ -490,6 +520,8 @@ def main(
             "attention_backend": backend_used,
             "capture_decode": str(capture_decode_used),
             "max_tokens": str(max_tokens_used),
+            "n_prompts": str(result.get("n_prompts", 1)),
+            "speculative_tokens": str(result.get("speculative_tokens", 0)),
             "gpu": gpu,
             "prompt": prompt,
         },
