@@ -1,0 +1,61 @@
+# Reproducible vLLM parity test matrix.
+#
+# Each test declares two reference dirs to diff and an expected outcome.
+# The runner (scripts/run_vllm_suite.py) reads this file, computes the
+# diff between each pair, and reports pass/fail vs the expectation in a
+# markdown summary.
+#
+# All reference dirs were captured at:
+#   model:  HuggingFaceTB/SmolLM-135M
+#   dtype:  bfloat16
+#   prompt: "the quick brown fox jumps over the lazy dog"
+#   gpu:    A10G via Modal
+#   tool:   scripts/capture_vllm.py
+#
+# Add a new test by appending an entry. Add a new vLLM version, attention
+# backend, or engine by extending scripts/capture_vllm.py first, capturing,
+# then declaring the new pair here.
+
+suite_name: "vLLM 0.8.5 inference parity matrix (BF16, SmolLM-135M)"
+
+tests:
+  - name: "cross-version (V0, auto backend)"
+    description: "vLLM 0.7.3 vs 0.8.5 with default backend on V0 engine — V0 forward path stable across releases."
+    reference_a: scripts/results/vllm_run_a
+    reference_b: scripts/results/vllm_0_7_3
+    expected: bit_equal
+
+  - name: "cross-engine (auto backend)"
+    description: "vLLM 0.8.5 V0 vs V1 — engine architecture rewrite doesn't perturb prefill numerics on default backend."
+    reference_a: scripts/results/vllm_run_a
+    reference_b: scripts/results/vllm_0_8_5_v1
+    expected: bit_equal
+
+  - name: "cross-engine (FLASH_ATTN)"
+    description: "vLLM 0.8.5 V0 vs V1, both with FLASH_ATTN — confirms kernel choice (not engine) is the numerical variable."
+    reference_a: scripts/results/vllm_0_8_5_flash
+    reference_b: scripts/results/vllm_0_8_5_v1_flash
+    expected: bit_equal
+
+  - name: "cross-backend (FLASH_ATTN vs XFORMERS, prefill)"
+    description: "Headline divergence: same vLLM version, different attention kernel — layer.7.self_attn is the first divergent tap."
+    reference_a: scripts/results/vllm_0_8_5_flash
+    reference_b: scripts/results/vllm_0_8_5_xformers
+    expected:
+      first_divergence: layer.7.self_attn
+      n_divergent_min: 70
+
+  - name: "cross-backend (FLASH_ATTN vs XFORMERS, decode 8 tokens)"
+    description: "Decode capture: KV cache pollution moves the first divergence from layer.7 (in prefill-only mode) all the way back to layer.0.self_attn at token_0 — even layer 0 reads from a polluted cache during decode."
+    reference_a: scripts/results/vllm_v0_flash_decode8
+    reference_b: scripts/results/vllm_v0_xformers_decode8
+    expected:
+      # In forward order, every layer-0 position comes before any layer-1
+      # position. layer.0.self_attn@prefill is bit-equal (early layers don't
+      # diverge at prefill), but layer.0.self_attn@token_0 sees a polluted
+      # KV cache and is the first divergent tap.
+      first_divergence: layer.0.self_attn@token_0
+      # Lower bound — actual is ~700 of 728. Pinning a specific number
+      # would make this test brittle to upstream vLLM changes that
+      # legitimately move the boundary.
+      n_divergent_min: 600
