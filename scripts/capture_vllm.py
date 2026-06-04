@@ -134,6 +134,35 @@ def _drain_captures(model) -> dict:
     return cpu_tensors
 
 
+# V1 engine variants: collective_rpc passes a worker instead of the model
+# directly. We navigate worker → model_runner → model and reuse the same
+# hook logic. If vLLM moves this path again, the AttributeError will surface
+# the actual layout in the traceback.
+
+
+def _v1_register_capture_hooks(worker) -> int:
+    return _register_capture_hooks(worker.model_runner.model)
+
+
+def _v1_drain_captures(worker) -> bytes:
+    """V1 drain returns bytes, not a tensor dict.
+
+    vLLM's V1 ``collective_rpc`` summarizes tensor return values into their
+    dtype name string — likely to avoid shipping per-worker tensor payloads
+    over the RPC bus. The workaround is to ``torch.save`` the captures dict
+    into bytes ourselves; bytes pass through the RPC layer unscathed because
+    they don't look like tensors to V1's type-summarization layer.
+    """
+    import io
+
+    import torch
+
+    raw = _drain_captures(worker.model_runner.model)
+    buf = io.BytesIO()
+    torch.save(raw, buf)
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # Shared capture body. Lives at module level so per-version Modal functions
 # can call it; the actual vllm import happens *inside*, after VLLM_USE_V1 is
@@ -147,8 +176,11 @@ def _do_capture(
     max_seq_len: int,
     dtype: str,
     attention_backend: str = "",
+    engine: str = "v0",
 ) -> dict:
-    os.environ["VLLM_USE_V1"] = "0"
+    if engine not in {"v0", "v1"}:
+        raise ValueError(f"engine must be 'v0' or 'v1', got {engine!r}")
+    os.environ["VLLM_USE_V1"] = "0" if engine == "v0" else "1"
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
 
@@ -156,7 +188,7 @@ def _do_capture(
     from vllm import LLM, SamplingParams
 
     print(
-        f"vllm version: {vllm.__version__}  "
+        f"vllm version: {vllm.__version__}  engine={engine}  "
         f"VLLM_USE_V1={os.environ.get('VLLM_USE_V1')}  "
         f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '(auto)')}"
     )
@@ -170,7 +202,17 @@ def _do_capture(
         gpu_memory_utilization=0.4,
     )
 
-    n_hooks_raw = llm.apply_model(_register_capture_hooks)
+    # V0 uses apply_model (worker callable receives the model). V1's
+    # apply_model is broken in 0.8.5 — we use collective_rpc instead, with
+    # worker-shaped wrappers that navigate worker → model_runner → model.
+    if engine == "v0":
+        register_fn, drain_fn = _register_capture_hooks, _drain_captures
+        dispatch = llm.apply_model
+    else:
+        register_fn, drain_fn = _v1_register_capture_hooks, _v1_drain_captures
+        dispatch = llm.collective_rpc
+
+    n_hooks_raw = dispatch(register_fn)
     n_hooks = n_hooks_raw[0] if isinstance(n_hooks_raw, list) and n_hooks_raw else n_hooks_raw
     print(f"Registered {n_hooks} forward hooks")
 
@@ -179,8 +221,39 @@ def _do_capture(
     params = SamplingParams(temperature=0.0, max_tokens=1)
     _ = llm.generate([prompt], params)
 
-    captures_raw = llm.apply_model(_drain_captures)
-    captures = captures_raw[0] if isinstance(captures_raw, list) and captures_raw else captures_raw
+    import io
+
+    import torch
+
+    captures_raw = dispatch(drain_fn)
+
+    # V1 drain returns bytes (a torch.save'd dict); V0 returns the dict
+    # directly. Both come wrapped in a per-worker outer list — for TP=1
+    # we take the head.
+    payload = captures_raw[0] if isinstance(captures_raw, list) and captures_raw else captures_raw
+
+    if engine == "v1":
+        if not isinstance(payload, (bytes, bytearray)):
+            raise RuntimeError(
+                f"Expected bytes from V1 drain, got {type(payload).__name__}. "
+                "vLLM's RPC layer may have changed its return-summarization rules."
+            )
+        captures = torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
+    else:
+        captures = payload
+
+    # Defensive unwrap if values are per-worker lists (seen on some
+    # V0 + multi-worker configurations).
+    if captures and isinstance(next(iter(captures.values())), list):
+        captures = {k: v[0] for k, v in captures.items() if v}
+
+    non_tensor = [
+        k for k in list(captures)[:3]
+        if not isinstance(captures[k], torch.Tensor)
+    ]
+    if non_tensor:
+        sample = {k: type(captures[k]).__name__ for k in non_tensor}
+        raise RuntimeError(f"Captures contain non-tensor values: {sample}")
 
     print(f"\nCaptured {len(captures)} taps:")
     for name in sorted(captures.keys(), key=_tap_order_key):
@@ -193,6 +266,7 @@ def _do_capture(
         "dtype": dtype,
         "prompt": prompt,
         "attention_backend": attention_backend or "auto",
+        "engine": engine,
         "captures": captures,
     }
 
@@ -223,8 +297,9 @@ def capture_at_v_0_7_3(
     max_seq_len: int = 256,
     dtype: str = "bfloat16",
     attention_backend: str = "",
+    engine: str = "v0",
 ) -> dict:
-    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend)
+    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend, engine)
 
 
 @app.function(image=_make_image(_VLLM_VERSIONS["0.8.5"]), gpu="A10G", timeout=900, secrets=_HF_SECRETS)
@@ -234,8 +309,9 @@ def capture_at_v_0_8_5(
     max_seq_len: int = 256,
     dtype: str = "bfloat16",
     attention_backend: str = "",
+    engine: str = "v0",
 ) -> dict:
-    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend)
+    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend, engine)
 
 
 _CAPTURE_BY_TAG = {
@@ -257,6 +333,7 @@ def main(
     gpu: str = "A10G",
     dtype: str = "bfloat16",
     attention_backend: str = "",
+    engine: str = "v0",
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -269,28 +346,33 @@ def main(
             f"Unknown --vllm-tag {vllm_tag!r}. Available: {sorted(_CAPTURE_BY_TAG)}"
         )
 
+    if engine not in {"v0", "v1"}:
+        raise SystemExit(f"--engine must be 'v0' or 'v1', got {engine!r}")
+
     if _HF_TOKEN_SET:
         print("HF_TOKEN found in local env — forwarding to GPU container.")
     backend_label = attention_backend or "(auto)"
     print(
-        f"Launching {gpu} capture: vllm={vllm_tag}, model={model}, "
-        f"dtype={dtype}, attention_backend={backend_label}"
+        f"Launching {gpu} capture: vllm={vllm_tag}, engine={engine}, "
+        f"model={model}, dtype={dtype}, attention_backend={backend_label}"
     )
 
     fn = _CAPTURE_BY_TAG[vllm_tag]
     result = fn.with_options(gpu=gpu).remote(
-        model_id=model, prompt=prompt, dtype=dtype, attention_backend=attention_backend,
+        model_id=model, prompt=prompt, dtype=dtype,
+        attention_backend=attention_backend, engine=engine,
     )
 
     vllm_version = result["vllm_version"]
     backend_used = result["attention_backend"]
+    engine_used = result["engine"]
     captures: dict = result["captures"]
 
     if not out:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backend_tag = f"_{backend_used.lower()}" if backend_used != "auto" else ""
         out = (
-            f"vllm_{vllm_version.replace('.', '_')}{backend_tag}_"
+            f"vllm_{vllm_version.replace('.', '_')}_{engine_used}{backend_tag}_"
             f"{gpu.lower().replace('-', '_')}_{timestamp}"
         )
     out_dir = Path(__file__).parent / "results" / out
@@ -310,6 +392,7 @@ def main(
         env={
             "engine": "vllm",
             "vllm_version": vllm_version,
+            "vllm_engine": engine_used,
             "attention_backend": backend_used,
             "gpu": gpu,
             "prompt": prompt,
@@ -322,6 +405,6 @@ def main(
 
     print(f"\nWrote vLLM reference artifact to {out_dir}")
     print(
-        f"  {len(captures)} taps, vllm={vllm_version}, dtype={dtype}, "
-        f"attention_backend={backend_used}"
+        f"  {len(captures)} taps, vllm={vllm_version} engine={engine_used}, "
+        f"dtype={dtype}, attention_backend={backend_used}"
     )
