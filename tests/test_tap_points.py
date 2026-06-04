@@ -8,6 +8,7 @@ import torch.nn as nn
 from firefly.tap_points import (
     find_decoder_layers_path,
     select_llm_tap_points,
+    select_recsys_tap_points,
     select_tap_points,
 )
 
@@ -98,3 +99,104 @@ def test_handles_empty_module_list() -> None:
 
     with pytest.raises(ValueError):
         find_decoder_layers_path(_ZeroLayer())
+
+
+# ---- Recsys selector tests ----------------------------------------------
+
+
+class _IdentityArch(nn.Module):
+    """Stand-in for any arch sub-block; we only care about path resolution."""
+
+    def forward(self, x):
+        return x
+
+
+def test_recsys_torchrec_convention() -> None:
+    """A TorchRec-shaped model gets sparse / bottom_mlp / interaction / over_arch taps."""
+
+    class _TorchRecModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sparse_arch = _IdentityArch()
+            self.dense_arch = _IdentityArch()
+            self.interaction = _IdentityArch()
+            self.over_arch = _IdentityArch()
+
+    taps = select_recsys_tap_points(_TorchRecModel())
+    names = [t.name for t in taps]
+    assert names == ["sparse", "bottom_mlp", "interaction", "over_arch"]
+    paths = {t.name: t.module_path for t in taps}
+    assert paths["sparse"] == "sparse_arch"
+    assert paths["bottom_mlp"] == "dense_arch"
+    assert paths["over_arch"] == "over_arch"
+
+
+def test_recsys_dlrm_convention() -> None:
+    """DLRM-style naming (bot_mlp / interactions / top_mlp) resolves to the same tap names."""
+
+    class _DLRMModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embeddings = _IdentityArch()
+            self.bot_mlp = _IdentityArch()
+            self.interactions = _IdentityArch()
+            self.top_mlp = _IdentityArch()
+
+    taps = select_recsys_tap_points(_DLRMModel())
+    assert [t.name for t in taps] == ["sparse", "bottom_mlp", "interaction", "over_arch"]
+
+
+def test_recsys_dcn_convention() -> None:
+    """DCN-v2 uses cross_net for interactions; no bottom MLP."""
+
+    class _DCNModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embeddings = _IdentityArch()
+            self.cross_net = _IdentityArch()
+            self.head = _IdentityArch()
+
+    taps = select_recsys_tap_points(_DCNModel())
+    # bottom_mlp is optional; gets omitted when not present
+    assert [t.name for t in taps] == ["sparse", "interaction", "over_arch"]
+
+
+def test_recsys_preserves_forward_order() -> None:
+    """Forward order is sparse → bottom_mlp → interaction → over_arch
+    regardless of attribute declaration order on the module."""
+
+    class _ReorderedModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            # Deliberately declare in reverse order
+            self.over_arch = _IdentityArch()
+            self.interaction = _IdentityArch()
+            self.dense_arch = _IdentityArch()
+            self.sparse_arch = _IdentityArch()
+
+    taps = select_recsys_tap_points(_ReorderedModel())
+    assert [t.name for t in taps] == ["sparse", "bottom_mlp", "interaction", "over_arch"]
+
+
+def test_recsys_raises_on_unknown_architecture() -> None:
+    """A model without any recognized recsys stage raises with a hint."""
+
+    class _Empty(nn.Module):
+        pass
+
+    with pytest.raises(ValueError, match="Could not locate any recsys tap points"):
+        select_recsys_tap_points(_Empty())
+
+
+def test_recsys_via_dispatcher() -> None:
+    """select_tap_points(domain='recsys') routes to the recsys selector."""
+
+    class _Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sparse_arch = _IdentityArch()
+            self.head = _IdentityArch()
+
+    via_dispatch = [t.name for t in select_tap_points(_Model(), domain="recsys")]
+    via_direct = [t.name for t in select_recsys_tap_points(_Model())]
+    assert via_dispatch == via_direct

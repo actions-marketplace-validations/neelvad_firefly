@@ -92,9 +92,104 @@ def select_llm_tap_points(model: nn.Module) -> list[TapPoint]:
     return taps
 
 
+_RECSYS_SPARSE_PATHS = (
+    "sparse_arch",     # TorchRec
+    "embedding_arch",  # TorchRec alternative
+    "sparse",          # ad-hoc convention
+    "embeddings",      # ad-hoc convention
+)
+
+_RECSYS_INTERACTION_PATHS = (
+    "interaction",     # DLRM / generic
+    "interactions",    # DLRM alternative
+    "cross_net",       # DCN-v2
+    "fm",              # FactorizationMachine
+    "mask_block",      # MaskNet
+)
+
+_RECSYS_DENSE_PATHS = (
+    "dense_arch",      # TorchRec input/bottom
+    "bot_mlp",         # DLRM bottom MLP
+    "bottom_mlp",      # DLRM alternative naming
+    "dense",           # generic
+)
+
+_RECSYS_OVER_PATHS = (
+    "over_arch",       # TorchRec output/top
+    "top_mlp",         # DLRM top MLP
+    "top",             # generic
+    "head",            # generic
+    "predictor",       # generic
+    "classifier",      # generic
+)
+
+
+def select_recsys_tap_points(model: nn.Module) -> list[TapPoint]:
+    """Walk a recsys-style model and return its stable tap points.
+
+    Recsys models lack the per-decoder-layer regularity that HF
+    transformers have; instead we target the canonical four-stage
+    decomposition that production recsys (TorchRec, DLRM, DCN-v2)
+    converges on:
+
+        sparse      → embedding lookups for categorical features
+        bottom_mlp  → dense feature processing (optional)
+        interaction → feature crossing (DLRM dot, DCN cross-net, FM, etc.)
+        over_arch   → final tower MLPs and head
+
+    Each stage's output is a tap. Forward order is preserved so the
+    first-divergence attribution still names the earliest stage where
+    behavior changes — embedding lookup, interaction, or tower.
+
+    Naming conventions probed (in order, first match wins per stage):
+      sparse:      sparse_arch / embedding_arch / sparse / embeddings
+      bottom MLP:  dense_arch / bot_mlp / bottom_mlp / dense
+      interaction: interaction / interactions / cross_net / fm / mask_block
+      over_arch:   over_arch / top_mlp / top / head / predictor / classifier
+
+    Raises ValueError if no recognized stage is present — likely a
+    non-standard architecture that needs a hand-written tap config.
+    """
+    taps: list[TapPoint] = []
+
+    # Sparse / embedding lookups (forward-order: first stage)
+    for path in _RECSYS_SPARSE_PATHS:
+        if _try_resolve(model, path) is not None:
+            taps.append(TapPoint(name="sparse", module_path=path))
+            break
+
+    # Dense / bottom MLP (only matters when present; some architectures skip)
+    for path in _RECSYS_DENSE_PATHS:
+        if _try_resolve(model, path) is not None:
+            taps.append(TapPoint(name="bottom_mlp", module_path=path))
+            break
+
+    # Interaction / feature crossing
+    for path in _RECSYS_INTERACTION_PATHS:
+        if _try_resolve(model, path) is not None:
+            taps.append(TapPoint(name="interaction", module_path=path))
+            break
+
+    # Over-arch / top MLP / head
+    for path in _RECSYS_OVER_PATHS:
+        if _try_resolve(model, path) is not None:
+            taps.append(TapPoint(name="over_arch", module_path=path))
+            break
+
+    if not taps:
+        raise ValueError(
+            "Could not locate any recsys tap points. Tried sparse, "
+            "interaction, and dense paths under the standard TorchRec, "
+            "DLRM, and DCN-v2 conventions. For non-standard architectures, "
+            "consider exporting a hand-written tap config (planned)."
+        )
+
+    return taps
+
+
 _TAP_SELECTORS = {
     "llm": select_llm_tap_points,
-    # "recsys": select_recsys_tap_points,  # planned v2
+    "recsys": select_recsys_tap_points,
     # "cv":     select_cv_tap_points,      # planned v2
 }
 
