@@ -53,21 +53,33 @@ _HF_SECRETS = (
 # constraints in its github repo for the release tag).
 # ---------------------------------------------------------------------------
 
-_VLLM_VERSIONS: dict[str, dict[str, str]] = {
-    "0.7.3": {"vllm": "vllm==0.7.3", "transformers": "transformers==4.48.3"},
-    "0.8.5": {"vllm": "vllm==0.8.5", "transformers": "transformers==4.51.3"},
+_VLLM_VERSIONS: dict[str, dict] = {
+    "0.7.3": {
+        "vllm": "vllm==0.7.3",
+        "transformers": "transformers==4.48.3",
+        "extras": [],
+    },
+    "0.8.5": {
+        "vllm": "vllm==0.8.5",
+        "transformers": "transformers==4.51.3",
+        # flashinfer-python enables VLLM_ATTENTION_BACKEND=FLASHINFER; vLLM
+        # 0.8.5 doesn't bundle it. Adding here so the FLASHINFER capture
+        # in the parity suite has the backend available.
+        "extras": ["flashinfer-python"],
+    },
 }
 
 
-def _make_image(pins: dict[str, str]) -> modal.Image:
+def _make_image(pins: dict) -> modal.Image:
+    base_pkgs = [
+        pins["vllm"],
+        pins["transformers"],
+        "huggingface_hub>=0.24",
+        "safetensors>=0.4",
+    ]
     return (
         modal.Image.debian_slim(python_version="3.11")
-        .pip_install(
-            pins["vllm"],
-            pins["transformers"],
-            "huggingface_hub>=0.24",
-            "safetensors>=0.4",
-        )
+        .pip_install(*base_pkgs, *pins.get("extras", []))
         .add_local_python_source("firefly")
     )
 
