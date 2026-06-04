@@ -352,7 +352,7 @@ def _tap_order_key(name: str) -> tuple:
 def capture_at_v_0_7_3(
     model_id: str = "HuggingFaceTB/SmolLM-135M",
     prompt: str = "the quick brown fox jumps over the lazy dog",
-    max_seq_len: int = 256,
+    max_seq_len: int = 1024,
     dtype: str = "bfloat16",
     attention_backend: str = "",
     engine: str = "v0",
@@ -369,7 +369,7 @@ def capture_at_v_0_7_3(
 def capture_at_v_0_8_5(
     model_id: str = "HuggingFaceTB/SmolLM-135M",
     prompt: str = "the quick brown fox jumps over the lazy dog",
-    max_seq_len: int = 256,
+    max_seq_len: int = 1024,
     dtype: str = "bfloat16",
     attention_backend: str = "",
     engine: str = "v0",
@@ -398,6 +398,7 @@ def main(
     vllm_tag: str = "0.8.5",
     model: str = "HuggingFaceTB/SmolLM-135M",
     prompt: str = "the quick brown fox jumps over the lazy dog",
+    prompt_file: str = "",
     gpu: str = "A10G",
     dtype: str = "bfloat16",
     attention_backend: str = "",
@@ -418,6 +419,11 @@ def main(
 
     if engine not in {"v0", "v1"}:
         raise SystemExit(f"--engine must be 'v0' or 'v1', got {engine!r}")
+
+    # --prompt-file overrides --prompt when both are set; lets long prompts
+    # live in version-controlled files rather than CLI arg strings.
+    if prompt_file:
+        prompt = Path(prompt_file).read_text().strip()
 
     if _HF_TOKEN_SET:
         print("HF_TOKEN found in local env — forwarding to GPU container.")
