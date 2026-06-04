@@ -38,14 +38,26 @@ app = typer.Typer(add_completion=False, help="Firefly validation plots.")
 
 
 def _tap_order_key(name: str) -> tuple:
-    if name == "final_norm":
-        return (10**9, 0, name)
-    m = re.match(r"layer\.(\d+)(?:\.(self_attn|mlp))?$", name)
+    """Match capture_vllm.py's tap ordering, including @prefill / @token_N suffixes."""
+    base, suffix = (name.rsplit("@", 1) + [""])[:2] if "@" in name else (name, "")
+    if suffix == "" or suffix == "prefill":
+        suffix_key = 0
+    elif suffix.startswith("token_"):
+        try:
+            suffix_key = 1 + int(suffix[len("token_"):])
+        except ValueError:
+            suffix_key = 10**6
+    else:
+        suffix_key = 10**6
+
+    if base == "final_norm":
+        return (10**9, 0, suffix_key, name)
+    m = re.match(r"layer\.(\d+)(?:\.(self_attn|mlp))?$", base)
     if m:
         i = int(m.group(1))
         sub = m.group(2)
-        return (i, {"self_attn": 0, "mlp": 1, None: 2}[sub], name)
-    return (10**9 - 1, 0, name)
+        return (i, {"self_attn": 0, "mlp": 1, None: 2}[sub], suffix_key, name)
+    return (10**9 - 1, 0, suffix_key, name)
 
 
 @app.command()

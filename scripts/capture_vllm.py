@@ -77,34 +77,48 @@ def _make_image(pins: dict[str, str]) -> modal.Image:
 # ---------------------------------------------------------------------------
 
 
-def _register_capture_hooks(model) -> int:
+def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
     """Inside vLLM worker: install forward hooks on Firefly's tap points.
 
     Tap names follow the existing LLM-domain convention: per-layer
     ``self_attn``, ``mlp``, and full-layer (residual stream) plus a
     terminal ``final_norm``. Names match the HF reference convention so
     captures from this script are directly comparable to HF captures.
+
+    When ``capture_decode`` is False (the v1 default), only the prefill
+    forward pass is captured and tap names are unsuffixed: ``layer.7.self_attn``.
+
+    When ``capture_decode`` is True (v1.5), both prefill and per-step
+    decode forwards are captured with suffixed names:
+    ``layer.7.self_attn@prefill`` for the prompt forward,
+    ``layer.7.self_attn@token_0`` for the first decode step, etc.
+    Decode-only diffs are valuable because decode is where vLLM's
+    optimization-heavy path lives (PagedAttention, scheduler, spec decode).
     """
     import torch
 
     captures: dict[str, torch.Tensor] = {}
+    step_counters: dict[str, int] = {}
     handles: list = []
 
     def make_hook(name: str):
         def hook(_module, _input, output):
             tensor = output[0] if isinstance(output, tuple) else output
-            if not isinstance(tensor, torch.Tensor):
+            if not isinstance(tensor, torch.Tensor) or tensor.dim() < 1:
                 return
-            # vLLM's V0 engine in eager mode runs forward with leading dim =
-            # total prompt tokens during prefill, and = 1 per step during
-            # decode. We capture prefill only; decode is v1.5 work.
-            if tensor.dim() < 1 or tensor.shape[0] <= 1:
-                return
-            # First prefill call wins — dedup so a second prefill (e.g.
-            # speculative re-run) doesn't overwrite.
-            if name in captures:
-                return
-            captures[name] = tensor.detach()
+            leading = tensor.shape[0]
+            if leading > 1:
+                # prefill
+                key = f"{name}@prefill" if capture_decode else name
+                if key in captures:
+                    return
+                captures[key] = tensor.detach()
+            elif capture_decode and leading == 1:
+                # decode step
+                i = step_counters.get(name, 0)
+                step_counters[name] = i + 1
+                captures[f"{name}@token_{i}"] = tensor.detach()
+            # else: drop (e.g., decode without capture_decode)
 
         return hook
 
@@ -117,6 +131,14 @@ def _register_capture_hooks(model) -> int:
     model._firefly_captures = captures
     model._firefly_handles = handles
     return len(handles)
+
+
+def _register_capture_hooks(model) -> int:
+    return _register_capture_hooks_impl(model, capture_decode=False)
+
+
+def _register_capture_hooks_with_decode(model) -> int:
+    return _register_capture_hooks_impl(model, capture_decode=True)
 
 
 def _drain_captures(model) -> dict:
@@ -142,6 +164,10 @@ def _drain_captures(model) -> dict:
 
 def _v1_register_capture_hooks(worker) -> int:
     return _register_capture_hooks(worker.model_runner.model)
+
+
+def _v1_register_capture_hooks_with_decode(worker) -> int:
+    return _register_capture_hooks_with_decode(worker.model_runner.model)
 
 
 def _v1_drain_captures(worker) -> bytes:
@@ -177,6 +203,8 @@ def _do_capture(
     dtype: str,
     attention_backend: str = "",
     engine: str = "v0",
+    capture_decode: bool = False,
+    max_tokens: int = 8,
 ) -> dict:
     if engine not in {"v0", "v1"}:
         raise ValueError(f"engine must be 'v0' or 'v1', got {engine!r}")
@@ -190,7 +218,8 @@ def _do_capture(
     print(
         f"vllm version: {vllm.__version__}  engine={engine}  "
         f"VLLM_USE_V1={os.environ.get('VLLM_USE_V1')}  "
-        f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '(auto)')}"
+        f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '(auto)')}  "
+        f"capture_decode={capture_decode}"
     )
     print(f"Loading {model_id} dtype={dtype}")
 
@@ -205,20 +234,33 @@ def _do_capture(
     # V0 uses apply_model (worker callable receives the model). V1's
     # apply_model is broken in 0.8.5 — we use collective_rpc instead, with
     # worker-shaped wrappers that navigate worker → model_runner → model.
+    # The register fn varies by capture_decode mode; drain is uniform.
     if engine == "v0":
-        register_fn, drain_fn = _register_capture_hooks, _drain_captures
+        register_fn = (
+            _register_capture_hooks_with_decode if capture_decode
+            else _register_capture_hooks
+        )
+        drain_fn = _drain_captures
         dispatch = llm.apply_model
     else:
-        register_fn, drain_fn = _v1_register_capture_hooks, _v1_drain_captures
+        register_fn = (
+            _v1_register_capture_hooks_with_decode if capture_decode
+            else _v1_register_capture_hooks
+        )
+        drain_fn = _v1_drain_captures
         dispatch = llm.collective_rpc
 
     n_hooks_raw = dispatch(register_fn)
     n_hooks = n_hooks_raw[0] if isinstance(n_hooks_raw, list) and n_hooks_raw else n_hooks_raw
     print(f"Registered {n_hooks} forward hooks")
 
-    # max_tokens=1 keeps decode to a single step; the prefill filter in the
-    # hook drops that single-token decode forward pass anyway.
-    params = SamplingParams(temperature=0.0, max_tokens=1)
+    # With capture_decode=False, max_tokens=1 → only prefill produces a
+    # captured forward (the lone decode step is dropped by the filter).
+    # With capture_decode=True, max_tokens controls how many decode steps
+    # we record (one prefill + (max_tokens - 1) decode steps).
+    effective_max_tokens = max_tokens if capture_decode else 1
+    print(f"Generating {effective_max_tokens} token(s)")
+    params = SamplingParams(temperature=0.0, max_tokens=effective_max_tokens)
     _ = llm.generate([prompt], params)
 
     import io
@@ -267,21 +309,37 @@ def _do_capture(
         "prompt": prompt,
         "attention_backend": attention_backend or "auto",
         "engine": engine,
+        "capture_decode": capture_decode,
+        "max_tokens": effective_max_tokens,
         "captures": captures,
     }
 
 
 def _tap_order_key(name: str) -> tuple:
-    """Sort taps in forward order: self_attn < mlp < layer-level, then final_norm."""
-    if name == "final_norm":
-        return (10**9, 0, name)
-    m = re.match(r"layer\.(\d+)(?:\.(self_attn|mlp))?$", name)
+    """Sort taps in forward order:
+       self_attn < mlp < layer-level, then final_norm.
+       Within a tap: bare name (legacy prefill-only) ≡ @prefill, then @token_0..N.
+    """
+    base, suffix = (name.rsplit("@", 1) + [""])[:2] if "@" in name else (name, "")
+    if suffix == "" or suffix == "prefill":
+        suffix_key = 0
+    elif suffix.startswith("token_"):
+        try:
+            suffix_key = 1 + int(suffix[len("token_"):])
+        except ValueError:
+            suffix_key = 10**6
+    else:
+        suffix_key = 10**6
+
+    if base == "final_norm":
+        return (10**9, 0, suffix_key, name)
+    m = re.match(r"layer\.(\d+)(?:\.(self_attn|mlp))?$", base)
     if m:
         layer_idx = int(m.group(1))
         sub = m.group(2)
         within = {"self_attn": 0, "mlp": 1, None: 2}[sub]
-        return (layer_idx, within, name)
-    return (10**9 - 1, 0, name)
+        return (layer_idx, within, suffix_key, name)
+    return (10**9 - 1, 0, suffix_key, name)
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +356,13 @@ def capture_at_v_0_7_3(
     dtype: str = "bfloat16",
     attention_backend: str = "",
     engine: str = "v0",
+    capture_decode: bool = False,
+    max_tokens: int = 8,
 ) -> dict:
-    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend, engine)
+    return _do_capture(
+        model_id, prompt, max_seq_len, dtype,
+        attention_backend, engine, capture_decode, max_tokens,
+    )
 
 
 @app.function(image=_make_image(_VLLM_VERSIONS["0.8.5"]), gpu="A10G", timeout=900, secrets=_HF_SECRETS)
@@ -310,8 +373,13 @@ def capture_at_v_0_8_5(
     dtype: str = "bfloat16",
     attention_backend: str = "",
     engine: str = "v0",
+    capture_decode: bool = False,
+    max_tokens: int = 8,
 ) -> dict:
-    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend, engine)
+    return _do_capture(
+        model_id, prompt, max_seq_len, dtype,
+        attention_backend, engine, capture_decode, max_tokens,
+    )
 
 
 _CAPTURE_BY_TAG = {
@@ -334,6 +402,8 @@ def main(
     dtype: str = "bfloat16",
     attention_backend: str = "",
     engine: str = "v0",
+    capture_decode: bool = False,
+    max_tokens: int = 8,
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -354,25 +424,30 @@ def main(
     backend_label = attention_backend or "(auto)"
     print(
         f"Launching {gpu} capture: vllm={vllm_tag}, engine={engine}, "
-        f"model={model}, dtype={dtype}, attention_backend={backend_label}"
+        f"model={model}, dtype={dtype}, attention_backend={backend_label}, "
+        f"capture_decode={capture_decode}, max_tokens={max_tokens}"
     )
 
     fn = _CAPTURE_BY_TAG[vllm_tag]
     result = fn.with_options(gpu=gpu).remote(
         model_id=model, prompt=prompt, dtype=dtype,
         attention_backend=attention_backend, engine=engine,
+        capture_decode=capture_decode, max_tokens=max_tokens,
     )
 
     vllm_version = result["vllm_version"]
     backend_used = result["attention_backend"]
     engine_used = result["engine"]
     captures: dict = result["captures"]
+    capture_decode_used = result.get("capture_decode", False)
+    max_tokens_used = result.get("max_tokens", 1)
 
     if not out:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         backend_tag = f"_{backend_used.lower()}" if backend_used != "auto" else ""
+        decode_tag = f"_decode{max_tokens_used}" if capture_decode_used else ""
         out = (
-            f"vllm_{vllm_version.replace('.', '_')}_{engine_used}{backend_tag}_"
+            f"vllm_{vllm_version.replace('.', '_')}_{engine_used}{backend_tag}{decode_tag}_"
             f"{gpu.lower().replace('-', '_')}_{timestamp}"
         )
     out_dir = Path(__file__).parent / "results" / out
@@ -394,6 +469,8 @@ def main(
             "vllm_version": vllm_version,
             "vllm_engine": engine_used,
             "attention_backend": backend_used,
+            "capture_decode": str(capture_decode_used),
+            "max_tokens": str(max_tokens_used),
             "gpu": gpu,
             "prompt": prompt,
         },
@@ -406,5 +483,6 @@ def main(
     print(f"\nWrote vLLM reference artifact to {out_dir}")
     print(
         f"  {len(captures)} taps, vllm={vllm_version} engine={engine_used}, "
-        f"dtype={dtype}, attention_backend={backend_used}"
+        f"dtype={dtype}, attention_backend={backend_used}, "
+        f"capture_decode={capture_decode_used}, max_tokens={max_tokens_used}"
     )
