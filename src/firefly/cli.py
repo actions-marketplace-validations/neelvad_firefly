@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import typer
@@ -11,6 +12,47 @@ app = typer.Typer(
     help="Numerical-parity CI gate for ML model deployments.",
     no_args_is_help=True,
 )
+
+
+# Reference storage backends planned but not yet implemented. For each
+# recognized scheme we emit a clear "planned for vN" message rather than
+# letting the user discover the gap by following a broken filesystem path.
+# When a backend lands, drop its entry here and add it to the resolver.
+_PLANNED_REFERENCE_BACKENDS: dict[str, str] = {
+    "hf": "v2",
+    "huggingface": "v2",
+    "s3": "v2",
+    "gs": "v3",
+    "gcs": "v3",
+    "az": "v3",
+    "azure": "v3",
+}
+
+
+def _validate_reference_path(reference: Path) -> None:
+    """Raise a friendly error if the reference looks like a remote URI.
+
+    Local paths pass through silently. Path-like strings beginning with a
+    known scheme (``s3://``, ``hf://``, etc.) raise with the planned
+    version so the user can plan around the gap.
+    """
+    raw = str(reference)
+    # Scheme charset matches URI RFC 3986: ALPHA followed by [ALPHA / DIGIT / + / - / .].
+    # Required because schemes like 's3' contain digits, which a bare [a-z]+ misses.
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+\-.]*):", raw)
+    if not m:
+        return
+    scheme = m.group(1).lower()
+    planned_version = _PLANNED_REFERENCE_BACKENDS.get(scheme)
+    if planned_version is None:
+        return
+    raise typer.BadParameter(
+        f"Reference scheme {scheme!r} is not yet supported "
+        f"(planned for {planned_version}).\n"
+        f"For now, download your reference to a local path and pass that:\n"
+        f"  firefly check --reference ./local-reference-dir ...",
+        param_hint="--reference",
+    )
 
 
 @app.command()
@@ -54,6 +96,8 @@ def calibrate(
     """Calibrate per-tap-point tolerances by running the reference against itself."""
     from firefly.calibrate import calibrate as run_calibrate
     from firefly.noise import NoiseSpec
+
+    _validate_reference_path(reference)
 
     if noise_mode not in ("none", "synthetic", "hardware"):
         raise typer.BadParameter(
@@ -144,6 +188,8 @@ def check(
     from firefly.attribution import attribute_first_divergence
     from firefly.compare import TOLERANCES_FILE, compare_to_reference
     from firefly.report import render_human, render_markdown, write_json
+
+    _validate_reference_path(reference)
 
     if ci_format not in {"human", "markdown"}:
         raise typer.BadParameter(

@@ -1,0 +1,59 @@
+name: firefly-demo
+
+# Worked example of running Firefly against the quantization demo's
+# reference artifact. Manual-trigger only — `firefly capture` and
+# `firefly calibrate` download model weights and take a few minutes,
+# so we don't want this firing on every PR. Users copy this workflow
+# (or its `firefly check` step) into their own repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate-model:
+        description: 'HF model ID to check against the reference'
+        required: false
+        default: 'HuggingFaceTB/SmolLM-135M'
+
+jobs:
+  firefly-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Firefly
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Calibrate the demo reference (one-time bootstrap)
+        # Real users commit tolerances.json to their repo and skip this step.
+        # The demo ships only the reference + golden inputs, so we derive
+        # tolerances in-CI to keep the example self-contained.
+        run: |
+          if [ ! -f examples/quantization_demo/_artifacts/reference/tolerances.json ]; then
+            firefly calibrate \
+              --reference examples/quantization_demo/_artifacts/reference \
+              --inputs examples/quantization_demo/_artifacts/golden.json \
+              --runs 4 \
+              --noise-mode none
+          fi
+
+      - name: Firefly check
+        id: firefly
+        uses: ./
+        with:
+          reference: examples/quantization_demo/_artifacts/reference
+          candidate: ${{ inputs.candidate-model }}
+          inputs: examples/quantization_demo/_artifacts/golden.json
+
+      - name: Use Firefly outputs (example downstream consumer)
+        if: always()
+        run: |
+          echo "passed=${{ steps.firefly.outputs.passed }}"
+          echo "first-divergent-tap=${{ steps.firefly.outputs.first-divergent-tap }}"
+          echo "report-path=${{ steps.firefly.outputs.report-path }}"

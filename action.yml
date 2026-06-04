@@ -1,0 +1,107 @@
+name: 'Firefly Numerical Parity Check'
+description: >-
+  CI gate for ML model deployments. Diffs a candidate model's per-layer
+  activations against a calibrated reference, attributes the first
+  divergence to a specific tap point, and fails the build if anything
+  exceeds tolerance.
+
+inputs:
+  reference:
+    description: >-
+      Path to the Firefly reference artifact directory (must contain
+      manifest.json, weights.safetensors, and tolerances.json). Reference
+      storage backends like HF Hub / S3 / GCS / Azure are planned for v2;
+      for now this is a local path inside the workspace.
+    required: true
+  candidate:
+    description: 'HuggingFace model ID or local path to the candidate checkpoint.'
+    required: true
+  inputs:
+    description: >-
+      Path to the golden-inputs JSON file. Must be the same file used at
+      capture time (different inputs would compare against a different
+      reference trajectory).
+    required: true
+  device:
+    description: "Device for the forward pass. 'cpu' (default) or 'cuda'."
+    default: 'cpu'
+    required: false
+  max-rel-error:
+    description: >-
+      Optional global ceiling on relative error per tap. Effective atol
+      becomes max(calibrated, max-rel-error × max|ref|). 0 means no
+      ceiling — calibrated tolerances alone gate the check.
+    default: '0'
+    required: false
+  allow-fingerprint-mismatch:
+    description: >-
+      'true' to proceed even when the candidate's model weights differ
+      from what the reference manifest recorded. Default 'false' (refuse,
+      because that almost always means the reference is stale).
+    default: 'false'
+    required: false
+  python-version:
+    description: 'Python version to install before running Firefly.'
+    default: '3.11'
+    required: false
+
+outputs:
+  first-divergent-tap:
+    description: >-
+      Name of the tap where divergence first appears in forward order
+      (empty string if no divergence). Use this for downstream steps
+      (slack notifications, comment formatting, etc).
+    value: ${{ steps.check.outputs.first-divergent-tap }}
+  passed:
+    description: "'true' if all taps within tolerance, 'false' otherwise."
+    value: ${{ steps.check.outputs.passed }}
+  report-path:
+    description: 'Path to the JSON report (firefly-report.json in the workspace).'
+    value: ${{ steps.check.outputs.report-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Firefly
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "${{ github.action_path }}"
+
+    - name: Run firefly check
+      id: check
+      shell: bash
+      run: |
+        set +e
+        FLAGS=()
+        if [[ "${{ inputs.allow-fingerprint-mismatch }}" == "true" ]]; then
+          FLAGS+=(--allow-fingerprint-mismatch)
+        fi
+        firefly check \
+          --reference "${{ inputs.reference }}" \
+          --candidate "${{ inputs.candidate }}" \
+          --inputs "${{ inputs.inputs }}" \
+          --device "${{ inputs.device }}" \
+          --max-rel-error "${{ inputs.max-rel-error }}" \
+          --report-json firefly-report.json \
+          --ci-format markdown \
+          "${FLAGS[@]}" \
+          > firefly-summary.md
+        EXIT=$?
+        cat firefly-summary.md >> "$GITHUB_STEP_SUMMARY"
+        FIRST_DIV=$(python -c "import json,sys; d=json.load(open('firefly-report.json')); print(d.get('first_divergent_tap') or '')")
+        {
+          echo "first-divergent-tap=$FIRST_DIV"
+          if [[ $EXIT -eq 0 ]]; then echo "passed=true"; else echo "passed=false"; fi
+          echo "report-path=$(pwd)/firefly-report.json"
+        } >> "$GITHUB_OUTPUT"
+        exit $EXIT
+
+branding:
+  icon: 'check-circle'
+  color: 'purple'
