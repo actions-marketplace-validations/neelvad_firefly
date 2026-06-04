@@ -55,6 +55,7 @@ dev = [
     "pytest>=8",
     "ruff>=0.5",
     "modal>=0.64",
+    "matplotlib>=3.8",
 ]
 
 [[tool.uv.index]]
