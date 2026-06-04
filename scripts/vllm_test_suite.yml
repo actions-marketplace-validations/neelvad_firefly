@@ -45,6 +45,14 @@ tests:
       first_divergence: layer.7.self_attn
       n_divergent_min: 70
 
+  - name: "cross-engine (FLASH_ATTN, 300-token prompt)"
+    description: "Headline long-prompt finding. At 9 tokens V0 and V1 are bit-equal under FLASH_ATTN; at 300 tokens (past 18+ PagedAttention block boundaries) they diverge at every tap. The only variable is the engine — exactly the knob production users flip on a vLLM upgrade. A short-prompt unit test would PASS this comparison; a 300-token prompt does not."
+    reference_a: scripts/results/vllm_v0_flash_long270
+    reference_b: scripts/results/vllm_v1_flash_long270
+    expected:
+      first_divergence: layer.0.self_attn
+      n_divergent_min: 91  # all of them — strict equality is also valid
+
   - name: "cross-backend (FLASH_ATTN vs XFORMERS, decode 8 tokens)"
     description: "Decode capture: KV cache pollution moves the first divergence from layer.7 (in prefill-only mode) all the way back to layer.0.self_attn at token_0 — even layer 0 reads from a polluted cache during decode."
     reference_a: scripts/results/vllm_v0_flash_decode8
