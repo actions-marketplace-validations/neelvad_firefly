@@ -62,10 +62,11 @@ _VLLM_VERSIONS: dict[str, dict] = {
     "0.8.5": {
         "vllm": "vllm==0.8.5",
         "transformers": "transformers==4.51.3",
-        # flashinfer-python enables VLLM_ATTENTION_BACKEND=FLASHINFER; vLLM
-        # 0.8.5 doesn't bundle it. Adding here so the FLASHINFER capture
-        # in the parity suite has the backend available.
-        "extras": ["flashinfer-python"],
+        # FLASHINFER backend would need the flashinfer-python CUDA wheel
+        # installed via its custom index URL (the bare PyPI package is a
+        # stub). See memory: project_firefly_flashinfer_deferred.md for
+        # the three retry paths. Skipped for now to keep the image lean.
+        "extras": [],
     },
 }
 
