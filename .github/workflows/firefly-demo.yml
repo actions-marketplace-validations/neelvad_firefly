@@ -50,6 +50,14 @@ jobs:
           reference: examples/quantization_demo/_artifacts/reference
           candidate: ${{ inputs.candidate-model }}
           inputs: examples/quantization_demo/_artifacts/golden.json
+          # The demo reference was calibrated on a different machine than
+          # GitHub's x86 Ubuntu runners. CPU/BLAS differences produce ~1e-4
+          # absolute FP32 jitter that the same-machine calibration didn't
+          # see. A 0.1% relative ceiling absorbs that without losing
+          # sensitivity to the real bugs Firefly is meant to catch
+          # (quantization round-trips, kernel changes, etc. produce >0.1%).
+          # Real users either calibrate in CI itself, or set this knob.
+          max-rel-error: '0.001'
 
       - name: Use Firefly outputs (example downstream consumer)
         if: always()
