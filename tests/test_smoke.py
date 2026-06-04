@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -11,6 +12,18 @@ from firefly.cli import app
 
 runner = CliRunner()
 
+# typer/rich sometimes emits ANSI color codes through CliRunner (the policy
+# depends on the click/rich version + the TERM env in the runner). Colored
+# output splits the dashes off ``--option`` into separate escape-wrapped
+# spans, so a plain substring check for ``--option`` misses. Strip ANSI
+# before any text-presence assertion to make the tests robust across
+# environments.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
 
 def test_package_imports() -> None:
     assert firefly.__version__
@@ -19,16 +32,18 @@ def test_package_imports() -> None:
 def test_cli_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "capture" in result.stdout
-    assert "calibrate" in result.stdout
-    assert "check" in result.stdout
+    out = _plain(result.stdout)
+    assert "capture" in out
+    assert "calibrate" in out
+    assert "check" in out
 
 
 def test_capture_command_advertises_options() -> None:
     result = runner.invoke(app, ["capture", "--help"])
     assert result.exit_code == 0
+    out = _plain(result.stdout)
     for option in ("--model", "--inputs", "--out", "--device", "--seed"):
-        assert option in result.stdout
+        assert option in out
 
 
 def test_capture_command_errors_on_missing_required_args() -> None:
@@ -39,6 +54,7 @@ def test_capture_command_errors_on_missing_required_args() -> None:
 def test_check_command_advertises_options() -> None:
     result = runner.invoke(app, ["check", "--help"])
     assert result.exit_code == 0
+    out = _plain(result.stdout)
     for option in (
         "--reference",
         "--candidate",
@@ -47,7 +63,7 @@ def test_check_command_advertises_options() -> None:
         "--report-json",
         "--allow-fingerprint",  # truncated by narrow help-text width in CliRunner
     ):
-        assert option in result.stdout
+        assert option in out
 
 
 def test_check_command_errors_on_missing_required_args() -> None:
@@ -58,7 +74,7 @@ def test_check_command_errors_on_missing_required_args() -> None:
 def test_check_advertises_allow_default_tolerances_flag() -> None:
     result = runner.invoke(app, ["check", "--help"])
     assert result.exit_code == 0
-    assert "--allow-default-tolerances" in result.stdout
+    assert "--allow-default-tolerances" in _plain(result.stdout)
 
 
 def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> None:
@@ -77,7 +93,7 @@ def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> 
         ],
     )
     assert result.exit_code != 0
-    combined = result.output + (result.stderr or "")
+    combined = _plain(result.output + (result.stderr or ""))
     assert "planned for v2" in combined
     assert "'s3'" in combined or "s3" in combined
 
@@ -96,7 +112,7 @@ def test_calibrate_emits_planned_message_for_known_remote_scheme(tmp_path: Path)
         ],
     )
     assert result.exit_code != 0
-    combined = result.output + (result.stderr or "")
+    combined = _plain(result.output + (result.stderr or ""))
     assert "planned for v2" in combined
 
 
@@ -121,7 +137,7 @@ def test_check_refuses_without_calibration(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code != 0
-    combined = result.output + (result.stderr or "")
+    combined = _plain(result.output + (result.stderr or ""))
     assert "tolerances.json" in combined
     assert "firefly calibrate" in combined
 
@@ -129,6 +145,7 @@ def test_check_refuses_without_calibration(tmp_path: Path) -> None:
 def test_calibrate_command_advertises_options() -> None:
     result = runner.invoke(app, ["calibrate", "--help"])
     assert result.exit_code == 0
+    out = _plain(result.stdout)
     for option in (
         "--reference",
         "--inputs",
@@ -141,7 +158,7 @@ def test_calibrate_command_advertises_options() -> None:
         "--allow-tf32",
         "--device",
     ):
-        assert option in result.stdout
+        assert option in out
 
 
 def test_calibrate_command_errors_on_missing_required_args() -> None:
@@ -166,7 +183,8 @@ def test_calibrate_rejects_synthetic_without_sigma(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code != 0
-    assert "noise-sigma" in result.output.lower() or "noise-sigma" in result.stderr.lower()
+    combined = _plain(result.output + (result.stderr or "")).lower()
+    assert "noise-sigma" in combined
 
 
 def test_calibrate_rejects_unknown_noise_mode(tmp_path: Path) -> None:
