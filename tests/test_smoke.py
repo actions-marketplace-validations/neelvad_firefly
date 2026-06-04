@@ -55,6 +55,38 @@ def test_check_command_errors_on_missing_required_args() -> None:
     assert result.exit_code != 0
 
 
+def test_check_advertises_allow_default_tolerances_flag() -> None:
+    result = runner.invoke(app, ["check", "--help"])
+    assert result.exit_code == 0
+    assert "--allow-default-tolerances" in result.stdout
+
+
+def test_check_refuses_without_calibration(tmp_path: Path) -> None:
+    """If tolerances.json doesn't exist in the reference dir, refuse the gate.
+
+    We don't need a real reference here — the calibration check fires *before*
+    any artifact loading.
+    """
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    inputs = tmp_path / "x.json"
+    inputs.write_text("{}")
+
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--reference", str(ref),
+            "--candidate", "HuggingFaceTB/SmolLM-135M",
+            "--inputs", str(inputs),
+        ],
+    )
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "tolerances.json" in combined
+    assert "firefly calibrate" in combined
+
+
 def test_calibrate_command_advertises_options() -> None:
     result = runner.invoke(app, ["calibrate", "--help"])
     assert result.exit_code == 0

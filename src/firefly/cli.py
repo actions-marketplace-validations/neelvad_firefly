@@ -113,11 +113,42 @@ def check(
         "--allow-fingerprint-mismatch",
         help="Proceed even if the candidate's weights have changed since reference was captured.",
     ),
+    allow_default_tolerances: bool = typer.Option(
+        False,
+        "--allow-default-tolerances",
+        help=(
+            "Proceed without calibrated tolerances (uses a flat default atol). "
+            "Useful for testing or one-off comparisons; not recommended for CI."
+        ),
+    ),
 ) -> None:
     """Check a candidate against a reference. Exits non-zero if divergence exceeds tolerance."""
     from firefly.attribution import attribute_first_divergence
-    from firefly.compare import compare_to_reference
+    from firefly.compare import TOLERANCES_FILE, compare_to_reference
     from firefly.report import render_human, write_json
+
+    # Enforce calibration: refuse to gate without empirically derived tolerances.
+    # The flat 1e-5 default is almost certainly wrong for any non-FP32-deterministic
+    # setup and would either spam false positives or silently miss real regressions.
+    tolerances_path = reference / TOLERANCES_FILE
+    if not tolerances_path.exists() and not allow_default_tolerances:
+        typer.echo(
+            f"ERROR: {tolerances_path} not found.\n"
+            f"\n"
+            f"Firefly requires calibrated per-tap tolerances to know what counts as a\n"
+            f"real divergence vs expected noise. Run this once to set them up:\n"
+            f"\n"
+            f"  firefly calibrate --reference {reference} --inputs {inputs} --runs 8\n"
+            f"\n"
+            f"This re-runs your reference model and records the empirical noise floor\n"
+            f"per tap. Takes ~3 minutes on CPU, ~30s on GPU. Commit the resulting\n"
+            f"{tolerances_path.name} to your repo so CI picks it up.\n"
+            f"\n"
+            f"For one-off comparisons (not CI), pass --allow-default-tolerances to\n"
+            f"proceed with a flat {1e-5:.0e} atol everywhere.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     divergences = compare_to_reference(
         reference_dir=reference,
