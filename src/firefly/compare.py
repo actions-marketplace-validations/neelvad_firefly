@@ -94,6 +94,7 @@ class TapDivergence:
     mean_abs_diff: float
     tolerance: TapTolerance
     exceeds_tolerance: bool
+    effective_atol: float = 0.0  # the threshold actually applied (atol or rel-error ceiling)
 
 
 def diff_captures(
@@ -101,8 +102,17 @@ def diff_captures(
     candidate_tensors: dict[str, torch.Tensor],
     tap_order: list[str],
     tolerances: dict[str, TapTolerance] | None = None,
+    max_rel_error: float | None = None,
 ) -> list[TapDivergence]:
     """Diff two captures in the given tap order.
+
+    ``max_rel_error`` is an optional global ceiling on top of per-tap
+    calibrated tolerances. If set, a tap with very tight calibration (say
+    1e-6 atol on a tensor whose max abs is 10) effectively gets the looser
+    of ``tol.atol`` and ``max_rel_error × max|ref|`` — i.e., the user is
+    saying "I don't care about sub-X% drift anywhere, even if calibration
+    says it's outside the noise floor." Defaults off; calibrated tolerances
+    are the sole gate.
 
     Raises ``ValueError`` on missing tap or shape mismatch — those are
     structural problems with the candidate (or the reference), not numerical
@@ -129,13 +139,18 @@ def diff_captures(
         max_d = float(diff.max().item())
         mean_d = float(diff.mean().item())
         tol = tolerances.get(tap_name, _default_tolerance())
+        effective_atol = tol.atol
+        if max_rel_error is not None and max_rel_error > 0:
+            ref_max = float(ref_t.float().abs().max().item())
+            effective_atol = max(effective_atol, max_rel_error * ref_max)
         divergences.append(
             TapDivergence(
                 tap_name=tap_name,
                 max_abs_diff=max_d,
                 mean_abs_diff=mean_d,
                 tolerance=tol,
-                exceeds_tolerance=max_d > tol.atol,
+                exceeds_tolerance=max_d > effective_atol,
+                effective_atol=effective_atol,
             )
         )
 
@@ -150,6 +165,7 @@ def compare_to_reference(
     seed: int = 0,
     tolerances: dict[str, TapTolerance] | None = None,
     allow_fingerprint_mismatch: bool = False,
+    max_rel_error: float | None = None,
 ) -> list[TapDivergence]:
     """Run candidate, diff against reference, return per-tap divergences in forward order.
 
@@ -187,4 +203,5 @@ def compare_to_reference(
         candidate_tensors=candidate_tensors,
         tap_order=manifest.tap_points,
         tolerances=tolerances,
+        max_rel_error=max_rel_error,
     )

@@ -121,6 +121,15 @@ def check(
             "Useful for testing or one-off comparisons; not recommended for CI."
         ),
     ),
+    max_rel_error: float = typer.Option(
+        0.0,
+        "--max-rel-error",
+        help=(
+            "Optional global ceiling on relative error. atol becomes "
+            "max(calibrated, max_rel_error × max|ref|) per tap. 0 = no ceiling "
+            "(calibrated tolerances alone gate the check)."
+        ),
+    ),
 ) -> None:
     """Check a candidate against a reference. Exits non-zero if divergence exceeds tolerance."""
     from firefly.attribution import attribute_first_divergence
@@ -157,6 +166,7 @@ def check(
         device=device,
         seed=seed,
         allow_fingerprint_mismatch=allow_fingerprint_mismatch,
+        max_rel_error=(max_rel_error if max_rel_error > 0 else None),
     )
     result = attribute_first_divergence(divergences)
 
