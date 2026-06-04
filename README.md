@@ -10,10 +10,10 @@ where it originated.
 # .github/workflows/firefly.yml
 - uses: neelv/firefly@main
   with:
-    reference: path/to/reference/        # local for v1; HF Hub planned for v2
+    reference: hf://my-org/my-firefly-ref  # or a local path
     candidate: my-org/my-finetune-ckpt
     inputs: tests/firefly-prompts.json
-    max-rel-error: 0.001                 # cross-platform safety margin
+    max-rel-error: 0.001                   # cross-platform safety margin
 ```
 
 The action posts a markdown summary to `$GITHUB_STEP_SUMMARY` and exits
@@ -119,22 +119,22 @@ the >1% threshold where real bugs live.
 
 ## Roadmap
 
-**v1 (now):** local-filesystem reference dirs, HF transformers + vLLM
-capture paths, LLM domain. Production-ready as a one-repo, one-team
-quality gate.
+**v1 (now):** local-filesystem reference dirs, HuggingFace Hub references
+via `hf://org/repo`, HF transformers + vLLM capture paths, LLM domain.
+Production-ready as a one-repo, one-team quality gate.
 
 **v2 (planned):**
 
-- HuggingFace Hub storage backend — fetch references via `hf://org/repo`
-  (stubbed in the CLI today; the `s3://` / `gs://` / `az://` paths return
-  a clear "planned for vN" message)
+- S3 storage backend (`s3://`) for teams that host references on AWS
+  rather than HF Hub
 - Recsys domain selector — different tap-point convention for
   embedding-table + cross-net architectures
 - Comprehensive vLLM test suite — FLASHINFER, multi-request batching,
   long-context PagedAttention boundaries, speculative decoding
 
-**v3:** shadow-mode capture against production traffic (requires a custom
-op so torch.compile / CUDA-graphed inference doesn't break).
+**v3:** GCS / Azure storage backends; shadow-mode capture against
+production traffic (requires a custom op so torch.compile / CUDA-graphed
+inference doesn't break).
 
 ## Development
 

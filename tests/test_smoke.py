@@ -99,7 +99,8 @@ def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> 
 
 
 def test_calibrate_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> None:
-    """Same scheme validation should fire on calibrate."""
+    """Same scheme validation should fire on calibrate (hf:// is now
+    supported; gs:// remains stubbed)."""
     inputs = tmp_path / "x.json"
     inputs.write_text("{}")
 
@@ -107,13 +108,13 @@ def test_calibrate_emits_planned_message_for_known_remote_scheme(tmp_path: Path)
         app,
         [
             "calibrate",
-            "--reference", "hf://my-org/my-ref",
+            "--reference", "gs://my-bucket/some-ref",
             "--inputs", str(inputs),
         ],
     )
     assert result.exit_code != 0
     combined = _plain(result.output + (result.stderr or ""))
-    assert "planned for v2" in combined
+    assert "planned for v3" in combined
 
 
 def test_check_refuses_without_calibration(tmp_path: Path) -> None:

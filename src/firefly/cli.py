@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import typer
+
+from firefly.storage import resolve_reference
 
 app = typer.Typer(
     name="firefly",
@@ -14,45 +15,15 @@ app = typer.Typer(
 )
 
 
-# Reference storage backends planned but not yet implemented. For each
-# recognized scheme we emit a clear "planned for vN" message rather than
-# letting the user discover the gap by following a broken filesystem path.
-# When a backend lands, drop its entry here and add it to the resolver.
-_PLANNED_REFERENCE_BACKENDS: dict[str, str] = {
-    "hf": "v2",
-    "huggingface": "v2",
-    "s3": "v2",
-    "gs": "v3",
-    "gcs": "v3",
-    "az": "v3",
-    "azure": "v3",
-}
-
-
-def _validate_reference_path(reference: Path) -> None:
-    """Raise a friendly error if the reference looks like a remote URI.
-
-    Local paths pass through silently. Path-like strings beginning with a
-    known scheme (``s3://``, ``hf://``, etc.) raise with the planned
-    version so the user can plan around the gap.
-    """
-    raw = str(reference)
-    # Scheme charset matches URI RFC 3986: ALPHA followed by [ALPHA / DIGIT / + / - / .].
-    # Required because schemes like 's3' contain digits, which a bare [a-z]+ misses.
-    m = re.match(r"^([A-Za-z][A-Za-z0-9+\-.]*):", raw)
-    if not m:
-        return
-    scheme = m.group(1).lower()
-    planned_version = _PLANNED_REFERENCE_BACKENDS.get(scheme)
-    if planned_version is None:
-        return
-    raise typer.BadParameter(
-        f"Reference scheme {scheme!r} is not yet supported "
-        f"(planned for {planned_version}).\n"
-        f"For now, download your reference to a local path and pass that:\n"
-        f"  firefly check --reference ./local-reference-dir ...",
-        param_hint="--reference",
-    )
+def _resolve_or_exit(reference: str) -> Path:
+    """Resolve a reference URI to a local path, exiting cleanly on errors."""
+    try:
+        return resolve_reference(reference)
+    except NotImplementedError as e:
+        raise typer.BadParameter(str(e), param_hint="--reference") from e
+    except (RuntimeError, ValueError) as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=2) from e
 
 
 @app.command()
@@ -81,7 +52,17 @@ def capture(
 
 @app.command()
 def calibrate(
-    reference: Path = typer.Option(..., "--reference", "-r", help="Reference artifact directory."),
+    reference: str = typer.Option(
+        ...,
+        "--reference",
+        "-r",
+        help=(
+            "Reference artifact directory. Accepts a local path or an "
+            "hf://org/repo (optionally with @revision and /subpath) "
+            "for HF Hub-hosted references. S3/GCS/Azure are stubbed "
+            "and return a clear planned-for-vN error."
+        ),
+    ),
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
     runs: int = typer.Option(16, "--runs", "-n", help="Number of self-runs for the noise baseline."),
     safety_factor: float = typer.Option(6.0, "--safety-factor", help="atol = safety_factor × observed noise floor."),
@@ -97,7 +78,7 @@ def calibrate(
     from firefly.calibrate import calibrate as run_calibrate
     from firefly.noise import NoiseSpec
 
-    _validate_reference_path(reference)
+    resolved_reference = _resolve_or_exit(reference)
 
     if noise_mode not in ("none", "synthetic", "hardware"):
         raise typer.BadParameter(
@@ -124,9 +105,12 @@ def calibrate(
         allow_tf32=allow_tf32,
     )
 
-    typer.echo(f"Calibrating: reference={reference} runs={runs} noise_mode={noise_mode}")
+    typer.echo(
+        f"Calibrating: reference={reference} (resolved to {resolved_reference}) "
+        f"runs={runs} noise_mode={noise_mode}"
+    )
     tolerances = run_calibrate(
-        reference_dir=reference,
+        reference_dir=resolved_reference,
         inputs_path=inputs,
         runs=runs,
         safety_factor=safety_factor,
@@ -141,12 +125,22 @@ def calibrate(
         f"Calibrated {len(tolerances)} taps "
         f"({n_above_floor} above zero, max noise_floor={max_floor:.3e})"
     )
-    typer.echo(f"Wrote tolerances.json to {reference}")
+    typer.echo(f"Wrote tolerances.json to {resolved_reference}")
 
 
 @app.command()
 def check(
-    reference: Path = typer.Option(..., "--reference", "-r", help="Reference artifact directory."),
+    reference: str = typer.Option(
+        ...,
+        "--reference",
+        "-r",
+        help=(
+            "Reference artifact directory. Accepts a local path or an "
+            "hf://org/repo (optionally with @revision and /subpath) "
+            "for HF Hub-hosted references. S3/GCS/Azure are stubbed "
+            "and return a clear planned-for-vN error."
+        ),
+    ),
     candidate: str = typer.Option(..., "--candidate", "-c", help="Candidate HF model ID or checkpoint path."),
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
@@ -189,7 +183,7 @@ def check(
     from firefly.compare import TOLERANCES_FILE, compare_to_reference
     from firefly.report import render_human, render_markdown, write_json
 
-    _validate_reference_path(reference)
+    resolved_reference = _resolve_or_exit(reference)
 
     if ci_format not in {"human", "markdown"}:
         raise typer.BadParameter(
@@ -200,7 +194,7 @@ def check(
     # Enforce calibration: refuse to gate without empirically derived tolerances.
     # The flat 1e-5 default is almost certainly wrong for any non-FP32-deterministic
     # setup and would either spam false positives or silently miss real regressions.
-    tolerances_path = reference / TOLERANCES_FILE
+    tolerances_path = resolved_reference / TOLERANCES_FILE
     if not tolerances_path.exists() and not allow_default_tolerances:
         typer.echo(
             f"ERROR: {tolerances_path} not found.\n"
@@ -221,7 +215,7 @@ def check(
         raise typer.Exit(code=2)
 
     divergences = compare_to_reference(
-        reference_dir=reference,
+        reference_dir=resolved_reference,
         candidate_model_id=candidate,
         inputs_path=inputs,
         device=device,
