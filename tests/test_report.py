@@ -7,7 +7,7 @@ from pathlib import Path
 
 from firefly.attribution import AttributionResult
 from firefly.compare import TapDivergence, TapTolerance
-from firefly.report import render_human, write_json
+from firefly.report import render_human, render_markdown, write_json
 
 
 def _div(name: str, max_d: float, exceeds: bool) -> TapDivergence:
@@ -56,6 +56,39 @@ def test_render_human_includes_all_taps() -> None:
     text = render_human(_diverged_result())
     for name in ("layer.0", "layer.1.mlp", "layer.2"):
         assert name in text
+
+
+def test_render_markdown_clean_has_pass_headline() -> None:
+    text = render_markdown(_clean_result())
+    assert "✅" in text
+    assert "no divergence" in text.lower()
+
+
+def test_render_markdown_diverged_names_first_tap_in_headline() -> None:
+    text = render_markdown(_diverged_result())
+    assert "❌" in text
+    assert "`layer.1.mlp`" in text
+    assert "2 of 3" in text  # 2 of 3 taps exceeded
+
+
+def test_render_markdown_omits_passing_taps_from_table() -> None:
+    text = render_markdown(_diverged_result())
+    # only divergent taps go in the markdown table; layer.0 (clean) should not
+    assert "`layer.1.mlp`" in text
+    assert "`layer.2`" in text
+    # The clean tap should not appear as a table row
+    assert "| `layer.0` |" not in text
+
+
+def test_render_markdown_truncates_long_diverged_lists() -> None:
+    divs = [_div(f"layer.{i}", 1.0, True) for i in range(15)]
+    result = AttributionResult(
+        first_divergent_tap="layer.0",
+        any_exceeded=True,
+        divergences=divs,
+    )
+    text = render_markdown(result, max_rows=5)
+    assert "and 10 more" in text
 
 
 def test_write_json_payload_shape(tmp_path: Path) -> None:

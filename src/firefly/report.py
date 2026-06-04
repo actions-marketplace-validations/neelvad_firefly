@@ -64,3 +64,49 @@ def write_json(result: AttributionResult, path: Path) -> None:
     }
     with path.open("w") as f:
         json.dump(payload, f, indent=2)
+
+
+def render_markdown(result: AttributionResult, max_rows: int = 10) -> str:
+    """Render a PR-comment-friendly markdown summary.
+
+    Designed for GitHub PR comments and ``$GITHUB_STEP_SUMMARY``:
+    one-line headline so reviewers can read the verdict at a glance,
+    then a compact table of the first ``max_rows`` divergent taps.
+    Passing taps are omitted from the table (the count is in the footer).
+    """
+    n_total = len(result.divergences)
+    exceeded = [d for d in result.divergences if d.exceeds_tolerance]
+    n_exceeded = len(exceeded)
+
+    lines: list[str] = []
+    if result.first_divergent_tap is None:
+        lines.append(f"## ✅ Firefly: no divergence ({n_total} taps within tolerance)")
+        return "\n".join(lines) + "\n"
+
+    lines.append(
+        f"## ❌ Firefly: divergence at `{result.first_divergent_tap}`"
+    )
+    lines.append("")
+    lines.append(
+        f"**{n_exceeded} of {n_total}** taps exceeded tolerance. "
+        f"First divergent tap: **`{result.first_divergent_tap}`**."
+    )
+    lines.append("")
+    lines.append("| Tap | max \\|Δ\\| | mean \\|Δ\\| | atol applied |")
+    lines.append("| --- | ---: | ---: | ---: |")
+    for d in exceeded[:max_rows]:
+        marker = " (first)" if d.tap_name == result.first_divergent_tap else ""
+        atol = d.effective_atol if d.effective_atol else d.tolerance.atol
+        lines.append(
+            f"| `{d.tap_name}`{marker} | "
+            f"{d.max_abs_diff:.3e} | "
+            f"{d.mean_abs_diff:.3e} | "
+            f"{atol:.3e} |"
+        )
+    if n_exceeded > max_rows:
+        lines.append(f"| _… and {n_exceeded - max_rows} more_ | | | |")
+    lines.append("")
+    lines.append(
+        "_See the JSON report or run `firefly check` locally for the full per-tap table._"
+    )
+    return "\n".join(lines) + "\n"

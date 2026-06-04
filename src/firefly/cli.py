@@ -130,11 +130,26 @@ def check(
             "(calibrated tolerances alone gate the check)."
         ),
     ),
+    ci_format: str = typer.Option(
+        "human",
+        "--ci-format",
+        help=(
+            "Output format. 'human' (default) prints a rich-terminal table; "
+            "'markdown' prints a PR-comment-friendly summary suitable for "
+            "$GITHUB_STEP_SUMMARY or `gh pr comment --body-file -`."
+        ),
+    ),
 ) -> None:
     """Check a candidate against a reference. Exits non-zero if divergence exceeds tolerance."""
     from firefly.attribution import attribute_first_divergence
     from firefly.compare import TOLERANCES_FILE, compare_to_reference
-    from firefly.report import render_human, write_json
+    from firefly.report import render_human, render_markdown, write_json
+
+    if ci_format not in {"human", "markdown"}:
+        raise typer.BadParameter(
+            f"--ci-format must be 'human' or 'markdown', got {ci_format!r}",
+            param_hint="--ci-format",
+        )
 
     # Enforce calibration: refuse to gate without empirically derived tolerances.
     # The flat 1e-5 default is almost certainly wrong for any non-FP32-deterministic
@@ -170,7 +185,10 @@ def check(
     )
     result = attribute_first_divergence(divergences)
 
-    typer.echo(render_human(result))
+    if ci_format == "markdown":
+        typer.echo(render_markdown(result))
+    else:
+        typer.echo(render_human(result))
 
     if report_json is not None:
         write_json(result, report_json)
