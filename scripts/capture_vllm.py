@@ -4,6 +4,12 @@ Writes a standard Firefly reference artifact (``weights.safetensors`` +
 ``manifest.json``) so the existing ``firefly check`` / ``compare`` pipeline
 can diff two vLLM captures the same way it diffs two HF captures.
 
+Multiple vLLM versions are supported via per-version Modal functions —
+each pinned with its own image. Choose a version with ``--vllm-tag`` at
+the local entrypoint; e.g. ``--vllm-tag 0.7.3`` vs ``--vllm-tag 0.8.5``.
+Add a new version by extending ``_VLLM_VERSIONS`` and registering a new
+``@app.function`` wrapper below.
+
 Design notes (see also AGENTS.md):
 
   * Loaded with ``enforce_eager=True`` to disable CUDA graphs, otherwise
@@ -16,11 +22,11 @@ Design notes (see also AGENTS.md):
   * Prefill-only (v1). Decode capture planned for v1.5 with per-position
     indexing.
   * ``VLLM_USE_V1=0`` forces vLLM's V0 engine because V1 in 0.8.5 has a
-    broken ``apply_model`` path.
+    broken ``apply_model`` path. V0 also works in 0.7.x.
 
 Usage:
-    uv run modal run scripts/capture_vllm.py
-    uv run modal run scripts/capture_vllm.py --gpu A10G --model HuggingFaceTB/SmolLM-135M
+    uv run modal run scripts/capture_vllm.py --vllm-tag 0.8.5
+    uv run modal run scripts/capture_vllm.py --vllm-tag 0.7.3 --out vllm_run_0_7_3
 """
 
 from __future__ import annotations
@@ -32,26 +38,42 @@ import modal
 
 app = modal.App("firefly-capture-vllm")
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "vllm==0.8.5",
-        "transformers==4.51.3",
-        "huggingface_hub>=0.24",
-        "safetensors>=0.4",
-    )
-    .add_local_python_source("firefly")
-)
-
 _HF_TOKEN_SET = bool(os.environ.get("HF_TOKEN"))
 _HF_SECRETS = (
     [modal.Secret.from_local_environ(["HF_TOKEN"])] if _HF_TOKEN_SET else []
 )
 
+# ---------------------------------------------------------------------------
+# Per-version image definitions.
+#
+# vLLM's transformers requirement narrows as releases age; pin both together
+# so pip never picks an incompatible mid-resolution transformers. If a new
+# version's pip resolve breaks, the fastest fix is to set the transformers
+# pin to a version known to work with that vLLM release (check vLLM's setup
+# constraints in its github repo for the release tag).
+# ---------------------------------------------------------------------------
+
+_VLLM_VERSIONS: dict[str, dict[str, str]] = {
+    "0.7.3": {"vllm": "vllm==0.7.3", "transformers": "transformers==4.48.3"},
+    "0.8.5": {"vllm": "vllm==0.8.5", "transformers": "transformers==4.51.3"},
+}
+
+
+def _make_image(pins: dict[str, str]) -> modal.Image:
+    return (
+        modal.Image.debian_slim(python_version="3.11")
+        .pip_install(
+            pins["vllm"],
+            pins["transformers"],
+            "huggingface_hub>=0.24",
+            "safetensors>=0.4",
+        )
+        .add_local_python_source("firefly")
+    )
+
 
 # ---------------------------------------------------------------------------
 # Worker-side functions (must be top-level so they pickle to vLLM's worker).
-# Each receives the live nn.Module via ``LLM.apply_model``.
 # ---------------------------------------------------------------------------
 
 
@@ -113,24 +135,31 @@ def _drain_captures(model) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Modal function (runs on the GPU container).
+# Shared capture body. Lives at module level so per-version Modal functions
+# can call it; the actual vllm import happens *inside*, after VLLM_USE_V1 is
+# set, so the env var takes effect.
 # ---------------------------------------------------------------------------
 
 
-@app.function(gpu="A10G", image=image, timeout=900, secrets=_HF_SECRETS)
-def capture_vllm_reference(
-    model_id: str = "HuggingFaceTB/SmolLM-135M",
-    prompt: str = "the quick brown fox jumps over the lazy dog",
-    max_seq_len: int = 256,
-    dtype: str = "bfloat16",
+def _do_capture(
+    model_id: str,
+    prompt: str,
+    max_seq_len: int,
+    dtype: str,
+    attention_backend: str = "",
 ) -> dict:
-    """Load model in vLLM, hook activations during prefill, return captures."""
     os.environ["VLLM_USE_V1"] = "0"
+    if attention_backend:
+        os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
 
     import vllm
     from vllm import LLM, SamplingParams
 
-    print(f"vllm version: {vllm.__version__}  VLLM_USE_V1={os.environ.get('VLLM_USE_V1')}")
+    print(
+        f"vllm version: {vllm.__version__}  "
+        f"VLLM_USE_V1={os.environ.get('VLLM_USE_V1')}  "
+        f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '(auto)')}"
+    )
     print(f"Loading {model_id} dtype={dtype}")
 
     llm = LLM(
@@ -163,6 +192,7 @@ def capture_vllm_reference(
         "model_id": model_id,
         "dtype": dtype,
         "prompt": prompt,
+        "attention_backend": attention_backend or "auto",
         "captures": captures,
     }
 
@@ -181,16 +211,52 @@ def _tap_order_key(name: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Local entrypoint (runs on user's machine; assembles the reference artifact).
+# Per-version Modal functions. Each pins its own image; the body is shared.
+# Add new versions by appending to _VLLM_VERSIONS above and registering here.
+# ---------------------------------------------------------------------------
+
+
+@app.function(image=_make_image(_VLLM_VERSIONS["0.7.3"]), gpu="A10G", timeout=900, secrets=_HF_SECRETS)
+def capture_at_v_0_7_3(
+    model_id: str = "HuggingFaceTB/SmolLM-135M",
+    prompt: str = "the quick brown fox jumps over the lazy dog",
+    max_seq_len: int = 256,
+    dtype: str = "bfloat16",
+    attention_backend: str = "",
+) -> dict:
+    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend)
+
+
+@app.function(image=_make_image(_VLLM_VERSIONS["0.8.5"]), gpu="A10G", timeout=900, secrets=_HF_SECRETS)
+def capture_at_v_0_8_5(
+    model_id: str = "HuggingFaceTB/SmolLM-135M",
+    prompt: str = "the quick brown fox jumps over the lazy dog",
+    max_seq_len: int = 256,
+    dtype: str = "bfloat16",
+    attention_backend: str = "",
+) -> dict:
+    return _do_capture(model_id, prompt, max_seq_len, dtype, attention_backend)
+
+
+_CAPTURE_BY_TAG = {
+    "0.7.3": capture_at_v_0_7_3,
+    "0.8.5": capture_at_v_0_8_5,
+}
+
+
+# ---------------------------------------------------------------------------
+# Local entrypoint.
 # ---------------------------------------------------------------------------
 
 
 @app.local_entrypoint()
 def main(
+    vllm_tag: str = "0.8.5",
     model: str = "HuggingFaceTB/SmolLM-135M",
     prompt: str = "the quick brown fox jumps over the lazy dog",
     gpu: str = "A10G",
     dtype: str = "bfloat16",
+    attention_backend: str = "",
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -198,20 +264,35 @@ def main(
 
     from firefly.reference import ReferenceManifest, write_reference
 
+    if vllm_tag not in _CAPTURE_BY_TAG:
+        raise SystemExit(
+            f"Unknown --vllm-tag {vllm_tag!r}. Available: {sorted(_CAPTURE_BY_TAG)}"
+        )
+
     if _HF_TOKEN_SET:
         print("HF_TOKEN found in local env — forwarding to GPU container.")
-    print(f"Launching {gpu} capture for model={model} dtype={dtype}")
+    backend_label = attention_backend or "(auto)"
+    print(
+        f"Launching {gpu} capture: vllm={vllm_tag}, model={model}, "
+        f"dtype={dtype}, attention_backend={backend_label}"
+    )
 
-    result = capture_vllm_reference.with_options(gpu=gpu).remote(
-        model_id=model, prompt=prompt, dtype=dtype,
+    fn = _CAPTURE_BY_TAG[vllm_tag]
+    result = fn.with_options(gpu=gpu).remote(
+        model_id=model, prompt=prompt, dtype=dtype, attention_backend=attention_backend,
     )
 
     vllm_version = result["vllm_version"]
+    backend_used = result["attention_backend"]
     captures: dict = result["captures"]
 
     if not out:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        out = f"vllm_{vllm_version.replace('.', '_')}_{gpu.lower().replace('-', '_')}_{timestamp}"
+        backend_tag = f"_{backend_used.lower()}" if backend_used != "auto" else ""
+        out = (
+            f"vllm_{vllm_version.replace('.', '_')}{backend_tag}_"
+            f"{gpu.lower().replace('-', '_')}_{timestamp}"
+        )
     out_dir = Path(__file__).parent / "results" / out
 
     tap_points = sorted(captures.keys(), key=_tap_order_key)
@@ -229,6 +310,7 @@ def main(
         env={
             "engine": "vllm",
             "vllm_version": vllm_version,
+            "attention_backend": backend_used,
             "gpu": gpu,
             "prompt": prompt,
         },
@@ -239,4 +321,7 @@ def main(
     write_reference(out_dir, manifest, captures)
 
     print(f"\nWrote vLLM reference artifact to {out_dir}")
-    print(f"  {len(captures)} taps, vllm={vllm_version}, dtype={dtype}")
+    print(
+        f"  {len(captures)} taps, vllm={vllm_version}, dtype={dtype}, "
+        f"attention_backend={backend_used}"
+    )
