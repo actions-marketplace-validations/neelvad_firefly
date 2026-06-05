@@ -1,0 +1,4 @@
+theme: jekyll-theme-cayman
+title: "Firefly: a numerical-parity CI gate for ML"
+description: "What I found running per-layer activation diffs against vLLM."
+show_downloads: false

@@ -8,7 +8,7 @@ where it originated.
 
 ```yaml
 # .github/workflows/firefly.yml
-- uses: neelv/firefly@main
+- uses: neelvad/firefly@v0.1.0
   with:
     reference: hf://my-org/my-firefly-ref  # or a local path
     candidate: my-org/my-finetune-ckpt
