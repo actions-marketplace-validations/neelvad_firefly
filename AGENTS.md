@@ -35,9 +35,14 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 - ✅ `--dtype` flag for fp32 / bf16 / fp16 captures + calibrations
 - ✅ Modal validation script (`scripts/modal_validation.py`) — capture + 3 noise configs, runs on any NVIDIA GPU via `--gpu`
 - ✅ Activation-magnitude diagnostic (`scripts/analyze.py`)
-- ⏳ **Blog post / public writeup** — not yet started, data is ready
-- ⏳ **GitHub Pages site** — not yet started
 - ✅ **Real GPU validation at scale** — done for FP32, BF16, and FP16 (27 GPU-runs across 9 GPUs × 3 dtypes)
+- ✅ **vLLM capture** — V0 via apply_model, V1 via collective_rpc + bytes-encoded drain, prefill + decode modes, per-version Modal images
+- ✅ **CI integration** — `action.yml` GitHub Action wrapper, `--ci-format markdown` for PR comments, `--max-rel-error` for cross-platform jitter, `--allow-default-tolerances` escape hatch
+- ✅ **HF Hub storage backend** — `hf://org/repo[@rev][/subpath]`; S3/GCS/Azure stubbed with planned-for-vN errors (`src/firefly/storage.py`)
+- ✅ **Recsys domain selector** — TorchRec / DLRM / DCN-v2 conventions in `tap_points.py`
+- ✅ **Reproducible parity suite** — `scripts/vllm_test_suite.yml` + `scripts/run_vllm_suite.py`; 7 tests passing
+- ✅ **v0.1.0 tag** — annotated tag created (commit before push); pinnable via `uses: neelvad/firefly@v0.1.0`
+- ✅ **Blog post drafted** — `docs/index.md` + `docs/_config.yml`, Cayman theme, ~2300 words; 3 inline plots; ready for GH Pages + HN submission
 
 ## Architecture (load-bearing modules)
 
@@ -74,20 +79,26 @@ optional TF32 matmul. All results in `scripts/results/`. Key findings:
 
 10. **BF16 and FP16 inference are both bit-deterministic on all 9 GPUs, including with TF32 enabled.** Original hypothesis (mantissa width → noise) was wrong. Reason: `torch.backends.cuda.matmul.allow_tf32` is an *FP32-input-specific* downcast; BF16/FP16 storage takes the dedicated tensor-core path with deterministic reduction order. Verified each format actually loaded by checking that Config C atol stayed at the 1e-5 floor (vs ~7.8e+1 at layer.11.mlp in FP32). **Counterintuitive headline for blog: BF16 and FP16 are more reproducible than FP32+TF32 — and FP16 has the same 10-bit mantissa as TF32, which rules out "narrow mantissa tensor cores" as the cause. The noise is in cuBLAS's FP32-storage-with-TF32 *kernel dispatch path*, not in tensor-core arithmetic itself.**
 
-## Roadmap (ordered)
+## Roadmap (current state)
 
-1. **Blog post draft.** Likely lives at `docs/index.md` rendered via GitHub Pages on this repo. Should include:
-   - Punchline: 27 GPU-runs (9 GPUs × 3 dtypes), exactly **one** failure mode (FP32+TF32)
-   - The methodology (per-tap calibration via empirical noise floor)
-   - The 9-GPU FP32 validation + layer-11 outlier-features explanation (Dettmers 2022)
-   - The BF16 + FP16 sweeps that disambiguate: cause is cuBLAS FP32-input *dispatch path*, not mantissa width (since FP16 has same 10-bit mantissa as TF32 but is bit-stable)
-   - PyTorch 2.6/2.7 invariance (no version-induced confounder)
-   - Per-layer activation magnitude plots from `scripts/analyze.py`
-   - The "why output-level monitoring can't see this" pitch (LayerNorm rescales 32k → 56)
-2. **Plotting script** (`scripts/plot_validation.py` with matplotlib) for the writeup figures.
-3. **GitHub Pages setup** (`docs/_config.yml`, minimal Jekyll theme).
-4. **Phase 3 work** — package + GitHub Action wrapper, PyPI publish. Hold until blog post lands and we see if anyone's interested.
-5. **Recsys v2** (per `project_recsys_v2_angle.md` memory) — natural expansion using user's Meta connections. Pluggable `tap_points_recsys.py` is the architectural seam.
+v1 is **code-complete and tagged at v0.1.0**. Blog post drafted in `docs/index.md`. The remaining v1 launch steps are user-actions, not engineering:
+
+1. **Push commits and tag** (`git push && git push --tags`) — unpushed at session compact.
+2. **Enable GH Pages** in repo settings → Pages → source: branch main / folder `/docs`. URL becomes `neelvad.github.io/firefly`.
+3. **Submit to HN** (narrative-framing title from the post recommended over Show HN; Sunday evening / Monday morning US time).
+
+What's planned for v2 (do not start without explicit go-ahead):
+
+- **S3 storage backend** — already stubbed with "planned for v2" error
+- **FLASHINFER backend test** — three install paths documented in `project_firefly_flashinfer_deferred.md`; pick one deliberately
+- **Larger-model validation** (Llama-3-8B) — confirms the predicted layer-boundary shift; the post called out as not-yet-tested
+- **Long-prompt series at 1k/2k/4k** — tightens the load-bearing finding to "diverges at every length past PagedAttention block boundary"
+
+What's deferred to v3:
+
+- GCS / Azure storage backends
+- Shadow-mode capture against production traffic (needs custom op for CUDA-graph / torch.compile compat)
+- Hosted dashboard (the monetization seam; hold for actual usage signal)
 
 ## Non-obvious decisions to preserve
 
