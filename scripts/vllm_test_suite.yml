@@ -45,6 +45,12 @@ tests:
       first_divergence: layer.7.self_attn
       n_divergent_min: 70
 
+  - name: "multi-request batching (V0 vs V1, n_prompts=2)"
+    description: "V0's BatchManager packs both prompts into a single 18-token forward pass; V1's continuous-batching scheduler processes them as two separate 9-token forward passes. Firefly surfaces this via the captured tensor shape — a per-tap diff isn't even computable, which is itself the finding."
+    reference_a: scripts/results/vllm_v0_flash_x2
+    reference_b: scripts/results/vllm_v1_flash_x2
+    expected: shape_mismatch
+
   - name: "cross-engine (FLASH_ATTN, 300-token prompt)"
     description: "Headline long-prompt finding. At 9 tokens V0 and V1 are bit-equal under FLASH_ATTN; at 300 tokens (past 18+ PagedAttention block boundaries) they diverge at every tap. The only variable is the engine — exactly the knob production users flip on a vLLM upgrade. A short-prompt unit test would PASS this comparison; a 300-token prompt does not."
     reference_a: scripts/results/vllm_v0_flash_long270
