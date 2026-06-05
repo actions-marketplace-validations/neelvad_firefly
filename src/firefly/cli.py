@@ -130,6 +130,17 @@ def calibrate(
     allow_tf32: bool = typer.Option(False, "--allow-tf32", help="Allow TF32 matmul (hardware mode only)."),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
     seed: int = typer.Option(0, "--seed", help="Determinism seed."),
+    push: str | None = typer.Option(
+        None,
+        "--push",
+        help=(
+            "If set, publish the reference dir (including the freshly "
+            "written tolerances.json) to this URI after calibration "
+            "(hf://org/repo or s3://bucket/prefix). Useful when the "
+            "reference was originally pulled from the same URI: calibrate "
+            "in-place, then push the calibrated artifact back."
+        ),
+    ),
 ) -> None:
     """Calibrate per-tap-point tolerances by running the reference against itself."""
     from firefly.calibrate import calibrate as run_calibrate
@@ -183,6 +194,13 @@ def calibrate(
         f"({n_above_floor} above zero, max noise_floor={max_floor:.3e})"
     )
     typer.echo(f"Wrote tolerances.json to {resolved_reference}")
+
+    if push is not None:
+        typer.echo(f"Publishing {resolved_reference} → {push}")
+        _publish_or_exit(
+            resolved_reference, push, commit_message="Firefly calibration update"
+        )
+        typer.echo(f"Published to {push}")
 
 
 @app.command()

@@ -51,6 +51,12 @@ def test_capture_help_lists_push_flag() -> None:
     assert "--push" in _plain(result.stdout)
 
 
+def test_calibrate_help_lists_push_flag() -> None:
+    result = runner.invoke(app, ["calibrate", "--help"])
+    assert result.exit_code == 0
+    assert "--push" in _plain(result.stdout)
+
+
 def test_publish_planned_scheme_exits_cleanly(tmp_path: Path) -> None:
     """`firefly publish --to gs://...` should hit the planned-vN error path."""
     ref = tmp_path / "ref"

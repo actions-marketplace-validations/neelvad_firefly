@@ -102,6 +102,15 @@ firefly capture \
     --out reference/ \
     --push hf://my-org/my-firefly-ref
 
+# Re-publishing after recalibration works the same way — calibrate
+# writes tolerances.json into the reference dir, then `--push` ships
+# the updated artifact back. Useful when the reference itself lives
+# on Hub: calibrate in-place, then push.
+firefly calibrate \
+    --reference hf://my-org/my-firefly-ref \
+    --inputs golden.json \
+    --push hf://my-org/my-firefly-ref
+
 # S3 works the same way — boto3 uses your default AWS credential chain.
 firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
 ```
