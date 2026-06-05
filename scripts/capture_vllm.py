@@ -25,8 +25,16 @@ Design notes (see also AGENTS.md):
     broken ``apply_model`` path. V0 also works in 0.7.x.
 
 Usage:
+    # SmolLM-135M on A10G (default)
     uv run modal run scripts/capture_vllm.py --vllm-tag 0.8.5
-    uv run modal run scripts/capture_vllm.py --vllm-tag 0.7.3 --out vllm_run_0_7_3
+
+    # Llama-3-8B on A100-40GB. First run populates the shared HF-cache
+    # Volume (~5 min for 16GB); subsequent runs reuse it.
+    uv run modal run scripts/capture_vllm.py \
+        --vllm-tag 0.8.5 \
+        --model meta-llama/Llama-3.1-8B \
+        --gpu A100-40GB \
+        --gpu-memory-utilization 0.7
 """
 
 from __future__ import annotations
@@ -42,6 +50,14 @@ _HF_TOKEN_SET = bool(os.environ.get("HF_TOKEN"))
 _HF_SECRETS = (
     [modal.Secret.from_local_environ(["HF_TOKEN"])] if _HF_TOKEN_SET else []
 )
+
+# Shared HF cache across all vllm-version × GPU runs. First run downloads;
+# subsequent runs hit the cache directly. Cheap (cents/month for ~20GB)
+# relative to per-run GPU-seconds. The Volume is auto-committed at function
+# exit, so a Llama-3-8B run on Monday warms the cache for a SmolLM run on
+# Tuesday and vice-versa.
+_HF_CACHE = modal.Volume.from_name("firefly-hf-cache", create_if_missing=True)
+_HF_CACHE_MOUNT = "/root/.cache/huggingface"
 
 # ---------------------------------------------------------------------------
 # Per-version image definitions.
@@ -220,6 +236,7 @@ def _do_capture(
     max_tokens: int = 8,
     n_prompts: int = 1,
     speculative_tokens: int = 0,
+    gpu_memory_utilization: float = 0.4,
 ) -> dict:
     if engine not in {"v0", "v1"}:
         raise ValueError(f"engine must be 'v0' or 'v1', got {engine!r}")
@@ -244,7 +261,7 @@ def _do_capture(
         dtype=dtype,
         enforce_eager=True,
         max_model_len=max_seq_len,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
     if speculative_tokens > 0:
         # NGram-based speculative decoding: no draft model required, vLLM
@@ -380,7 +397,13 @@ def _tap_order_key(name: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-@app.function(image=_make_image(_VLLM_VERSIONS["0.7.3"]), gpu="A10G", timeout=900, secrets=_HF_SECRETS)
+@app.function(
+    image=_make_image(_VLLM_VERSIONS["0.7.3"]),
+    gpu="A10G",
+    timeout=1800,
+    secrets=_HF_SECRETS,
+    volumes={_HF_CACHE_MOUNT: _HF_CACHE},
+)
 def capture_at_v_0_7_3(
     model_id: str = "HuggingFaceTB/SmolLM-135M",
     prompt: str = "the quick brown fox jumps over the lazy dog",
@@ -392,15 +415,22 @@ def capture_at_v_0_7_3(
     max_tokens: int = 8,
     n_prompts: int = 1,
     speculative_tokens: int = 0,
+    gpu_memory_utilization: float = 0.4,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
-        speculative_tokens,
+        speculative_tokens, gpu_memory_utilization,
     )
 
 
-@app.function(image=_make_image(_VLLM_VERSIONS["0.8.5"]), gpu="A10G", timeout=900, secrets=_HF_SECRETS)
+@app.function(
+    image=_make_image(_VLLM_VERSIONS["0.8.5"]),
+    gpu="A10G",
+    timeout=1800,
+    secrets=_HF_SECRETS,
+    volumes={_HF_CACHE_MOUNT: _HF_CACHE},
+)
 def capture_at_v_0_8_5(
     model_id: str = "HuggingFaceTB/SmolLM-135M",
     prompt: str = "the quick brown fox jumps over the lazy dog",
@@ -412,11 +442,12 @@ def capture_at_v_0_8_5(
     max_tokens: int = 8,
     n_prompts: int = 1,
     speculative_tokens: int = 0,
+    gpu_memory_utilization: float = 0.4,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
-        speculative_tokens,
+        speculative_tokens, gpu_memory_utilization,
     )
 
 
@@ -445,6 +476,7 @@ def main(
     max_tokens: int = 8,
     n_prompts: int = 1,
     speculative_tokens: int = 0,
+    gpu_memory_utilization: float = 0.4,
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -480,6 +512,7 @@ def main(
         attention_backend=attention_backend, engine=engine,
         capture_decode=capture_decode, max_tokens=max_tokens,
         n_prompts=n_prompts, speculative_tokens=speculative_tokens,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
 
     vllm_version = result["vllm_version"]
