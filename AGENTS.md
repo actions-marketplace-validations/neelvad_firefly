@@ -38,7 +38,8 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 - ✅ **Real GPU validation at scale** — done for FP32, BF16, and FP16 (27 GPU-runs across 9 GPUs × 3 dtypes)
 - ✅ **vLLM capture** — V0 via apply_model, V1 via collective_rpc + bytes-encoded drain, prefill + decode modes, per-version Modal images
 - ✅ **CI integration** — `action.yml` GitHub Action wrapper, `--ci-format markdown` for PR comments, `--max-rel-error` for cross-platform jitter, `--allow-default-tolerances` escape hatch
-- ✅ **HF Hub storage backend** — `hf://org/repo[@rev][/subpath]`; S3/GCS/Azure stubbed with planned-for-vN errors (`src/firefly/storage.py`)
+- ✅ **HF Hub storage backend** — `hf://org/repo[@rev][/subpath]`; GCS/Azure stubbed with planned-for-vN errors (`src/firefly/storage.py`)
+- ✅ **S3 storage backend** — `s3://bucket/prefix`, boto3 default credential chain, ETag-based incremental sync into `$FIREFLY_CACHE_DIR` (v2 first item)
 - ✅ **Recsys domain selector** — TorchRec / DLRM / DCN-v2 conventions in `tap_points.py`
 - ✅ **Reproducible parity suite** — `scripts/vllm_test_suite.yml` + `scripts/run_vllm_suite.py`; 7 tests passing
 - ✅ **v0.1.0 tag** — annotated tag created (commit before push); pinnable via `uses: neelvad/firefly@v0.1.0`
@@ -87,9 +88,12 @@ v1 is **code-complete and tagged at v0.1.0**. Blog post drafted in `docs/index.m
 2. **Enable GH Pages** in repo settings → Pages → source: branch main / folder `/docs`. URL becomes `neelvad.github.io/firefly`.
 3. **Submit to HN** (narrative-framing title from the post recommended over Show HN; Sunday evening / Monday morning US time).
 
-What's planned for v2 (do not start without explicit go-ahead):
+v2 is **in progress**:
 
-- **S3 storage backend** — already stubbed with "planned for v2" error
+- ✅ **S3 storage backend** — `s3://bucket/prefix`, boto3 default credential chain, ETag-based incremental sync. Optional install via `pip install 'firefly[s3]'`.
+
+Remaining v2 items (do not start without explicit go-ahead):
+
 - **FLASHINFER backend test** — three install paths documented in `project_firefly_flashinfer_deferred.md`; pick one deliberately
 - **Larger-model validation** (Llama-3-8B) — confirms the predicted layer-boundary shift; the post called out as not-yet-tested
 - **Long-prompt series at 1k/2k/4k** — tightens the load-bearing finding to "diverges at every length past PagedAttention block boundary"

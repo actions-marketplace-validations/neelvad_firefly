@@ -78,7 +78,7 @@ def test_check_advertises_allow_default_tolerances_flag() -> None:
 
 
 def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> None:
-    """An s3:// reference path should fail with a 'planned for v2' message,
+    """A gs:// reference path should fail with a 'planned for v3' message,
     not the generic 'tolerances.json not found' error."""
     inputs = tmp_path / "x.json"
     inputs.write_text("{}")
@@ -87,15 +87,15 @@ def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> 
         app,
         [
             "check",
-            "--reference", "s3://my-bucket/some-ref",
+            "--reference", "gs://my-bucket/some-ref",
             "--candidate", "HuggingFaceTB/SmolLM-135M",
             "--inputs", str(inputs),
         ],
     )
     assert result.exit_code != 0
     combined = _plain(result.output + (result.stderr or ""))
-    assert "planned for v2" in combined
-    assert "'s3'" in combined or "s3" in combined
+    assert "planned for v3" in combined
+    assert "'gs'" in combined or "gs" in combined
 
 
 def test_calibrate_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> None:

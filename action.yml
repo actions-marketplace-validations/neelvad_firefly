@@ -8,10 +8,10 @@ description: >-
 inputs:
   reference:
     description: >-
-      Path to the Firefly reference artifact directory (must contain
-      manifest.json, weights.safetensors, and tolerances.json). Reference
-      storage backends like HF Hub / S3 / GCS / Azure are planned for v2;
-      for now this is a local path inside the workspace.
+      Reference artifact location. Accepts a local path inside the
+      workspace, an HF Hub URI (hf://org/repo[@rev][/subpath]), or an
+      S3 URI (s3://bucket/prefix — install boto3 in your runner via
+      `pip install 'firefly[s3]'`). GCS / Azure are planned for v3.
     required: true
   candidate:
     description: 'HuggingFace model ID or local path to the candidate checkpoint.'

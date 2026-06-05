@@ -117,13 +117,27 @@ the >1% threshold where real bugs live.
 | `scripts/capture_vllm.py` | vLLM-specific capture (V0 + V1 engines, prefill + decode) |
 | `scripts/plot_validation.py` | Diff and magnitude figures for the writeup |
 
+## Reference storage backends
+
+| Scheme | Use case | Install |
+| --- | --- | --- |
+| local path | Reference checked into your repo | (built-in) |
+| `hf://<org>/<repo>[@<rev>][/<subpath>]` | Reference hosted on HF Hub | (built-in) |
+| `s3://<bucket>/<prefix>` | Reference in private AWS bucket | `pip install 'firefly[s3]'` |
+
+S3 uses boto3's default credential chain — env vars, `~/.aws/credentials`,
+or an IAM role on the CI runner. Files are mirrored into
+`$FIREFLY_CACHE_DIR` (or `~/.cache/firefly/s3/<bucket>/...`) with
+ETag-based incremental sync, so re-runs on a persistent CI cache only
+re-download what changed upstream.
+
 ## Roadmap
 
 **v1 (now):** local-filesystem reference dirs, HuggingFace Hub references
 via `hf://org/repo`, HF transformers + vLLM capture paths, LLM domain.
 Production-ready as a one-repo, one-team quality gate.
 
-**v2 (planned):**
+**v2 (now):**
 
 - S3 storage backend (`s3://`) for teams that host references on AWS
   rather than HF Hub
