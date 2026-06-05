@@ -84,6 +84,40 @@ calibrated `tolerances.json` — flat default tolerances either spam
 false positives or silently miss real regressions, neither of which
 delivers product value.
 
+## Publishing a reference
+
+Small references (≤100 MB) commit cleanly to your repo. Past that —
+or if multiple repos share a reference — host it on HuggingFace Hub
+or S3 and point the action at the URI.
+
+```sh
+# After calibrating, push the reference dir to HF Hub.
+# Creates the repo if it doesn't exist (needs HF_TOKEN with write).
+firefly publish --reference reference/ --to hf://my-org/my-firefly-ref
+
+# Or fuse capture + publish in one step:
+firefly capture \
+    --model my-org/my-model-current \
+    --inputs golden.json \
+    --out reference/ \
+    --push hf://my-org/my-firefly-ref
+
+# S3 works the same way — boto3 uses your default AWS credential chain.
+firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
+```
+
+The action then reads the same URI in CI:
+
+```yaml
+- uses: neelvad/firefly@v0.1.0
+  with:
+    reference: hf://my-org/my-firefly-ref
+    candidate: my-org/my-finetune-ckpt
+    inputs: tests/firefly-prompts.json
+```
+
+For S3 references, install boto3 on the runner: `pip install 'firefly[s3]'`.
+
 ## Tolerance knobs
 
 Three axes you can tune:

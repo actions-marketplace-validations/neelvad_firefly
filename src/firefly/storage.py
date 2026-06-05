@@ -200,6 +200,130 @@ def _s3_cache_dir(bucket: str, prefix: str) -> Path:
     return _cache_root() / "s3" / bucket / safe_prefix
 
 
+def publish_reference(
+    local_path: Path,
+    uri: str,
+    *,
+    commit_message: str = "Firefly reference upload",
+) -> None:
+    """Upload a local reference directory to a remote URI.
+
+    Inverse of :func:`resolve_reference`. Supported destinations:
+
+    * ``hf://<org>/<repo>[@<revision>][/<subpath>]`` — uploads via
+      :class:`huggingface_hub.HfApi`. Creates the repo if it doesn't
+      exist (``exist_ok=True``). ``commit_message`` is forwarded to
+      the HF commit.
+    * ``s3://<bucket>/<prefix>`` — uploads each file under
+      ``local_path`` to ``<bucket>/<prefix>/<relpath>`` via boto3.
+
+    Local destinations are intentionally not supported — use
+    ``cp -r`` instead. GCS / Azure raise ``NotImplementedError`` with
+    the planned version.
+    """
+    if not local_path.exists():
+        raise FileNotFoundError(f"Reference directory does not exist: {local_path}")
+    if not local_path.is_dir():
+        raise ValueError(f"Reference path must be a directory: {local_path}")
+
+    scheme = _extract_scheme(str(uri))
+    if scheme is None:
+        raise ValueError(
+            f"Publish target {uri!r} must be a remote URI "
+            f"(e.g. hf://org/repo or s3://bucket/prefix). "
+            f"For local copies, use `cp -r {local_path} {uri}`."
+        )
+
+    if scheme in ("hf", "huggingface"):
+        return _publish_hf(local_path, uri, commit_message=commit_message)
+    if scheme == "s3":
+        return _publish_s3(local_path, uri)
+
+    planned = _PLANNED_BACKENDS.get(scheme)
+    if planned is not None:
+        raise NotImplementedError(
+            f"Publishing to scheme {scheme!r} is not yet supported "
+            f"(planned for {planned}). Use hf:// or s3://."
+        )
+    raise ValueError(f"Unknown URI scheme {scheme!r}")
+
+
+def _publish_hf(local_path: Path, uri: str, *, commit_message: str) -> None:
+    """Upload a folder to an HF Hub repo (optionally to a path_in_repo)."""
+    m = _HF_REGEX.match(uri)
+    if not m:
+        raise ValueError(
+            f"Invalid HF Hub URI {uri!r}. Expected format: "
+            f"hf://<org>/<repo>[@<revision>][/<subpath>]"
+        )
+    repo_id = m.group("repo_id")
+    revision = m.group("revision")
+    subpath = m.group("subpath") or ""
+
+    try:
+        from huggingface_hub import HfApi
+    except ImportError as e:
+        raise ImportError(
+            "huggingface_hub is required for hf:// publish but isn't "
+            "installed. Install with: pip install huggingface_hub"
+        ) from e
+
+    api = HfApi()
+    try:
+        api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
+        api.upload_folder(
+            folder_path=str(local_path),
+            repo_id=repo_id,
+            repo_type="model",
+            revision=revision,
+            path_in_repo=subpath,
+            commit_message=commit_message,
+        )
+    except Exception as e:  # noqa: BLE001 — HF raises a wide variety of types
+        raise RuntimeError(
+            f"Failed to publish to HF Hub {uri!r}: {e}\n"
+            f"Check that HF_TOKEN is set in your environment and has write "
+            f"access to {repo_id!r}."
+        ) from e
+
+
+def _publish_s3(local_path: Path, uri: str) -> None:
+    """Upload each file under local_path to s3://bucket/prefix/<relpath>."""
+    m = _S3_REGEX.match(uri)
+    if not m:
+        raise ValueError(
+            f"Invalid S3 URI {uri!r}. Expected format: "
+            f"s3://<bucket>/<prefix>"
+        )
+    bucket = m.group("bucket")
+    raw_prefix = (m.group("prefix") or "").strip("/")
+    prefix = f"{raw_prefix}/" if raw_prefix else ""
+
+    try:
+        import boto3
+        from botocore.exceptions import BotoCoreError, ClientError
+    except ImportError as e:
+        raise ImportError(
+            "boto3 is required for s3:// publish but isn't installed. "
+            "Install with: pip install 'firefly[s3]' (or pip install boto3)."
+        ) from e
+
+    client = boto3.client("s3")
+    try:
+        for file in sorted(local_path.rglob("*")):
+            if not file.is_file():
+                continue
+            relpath = file.relative_to(local_path).as_posix()
+            key = f"{prefix}{relpath}"
+            client.upload_file(str(file), bucket, key)
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(
+            f"Failed to publish to S3 {uri!r}: {e}\n"
+            f"Check that the bucket exists and your credentials have "
+            f"PutObject permission."
+        ) from e
+
+
 def _sync_s3_prefix(client, bucket: str, prefix: str, cache_dir: Path) -> None:
     """Mirror bucket/prefix into cache_dir, skipping unchanged objects."""
     cache_dir.mkdir(parents=True, exist_ok=True)

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from firefly.storage import resolve_reference
+from firefly.storage import publish_reference, resolve_reference
 
 
 def test_local_path_passes_through(tmp_path: Path) -> None:
@@ -231,3 +231,112 @@ def test_s3_missing_boto3_raises_import_error(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match="firefly\\[s3\\]"):
         resolve_reference("s3://my-bucket/refs/v1")
+
+
+# --- publish_reference ------------------------------------------------------
+
+
+def _make_reference_dir(root: Path) -> Path:
+    """Build a minimal reference dir layout for publish tests."""
+    ref = root / "reference"
+    ref.mkdir()
+    (ref / "manifest.json").write_text('{"taps": []}')
+    (ref / "weights.safetensors").write_bytes(b"\x00\x01\x02")
+    (ref / "tolerances.json").write_text("{}")
+    return ref
+
+
+def test_publish_local_path_rejected(tmp_path: Path) -> None:
+    """Publishing to a plain local path should error with a hint."""
+    ref = _make_reference_dir(tmp_path)
+    with pytest.raises(ValueError, match="cp -r"):
+        publish_reference(ref, str(tmp_path / "elsewhere"))
+
+
+def test_publish_missing_reference_dir_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        publish_reference(tmp_path / "nope", "hf://my-org/my-ref")
+
+
+def test_publish_file_instead_of_dir_raises(tmp_path: Path) -> None:
+    f = tmp_path / "f.txt"
+    f.write_text("hi")
+    with pytest.raises(ValueError, match="must be a directory"):
+        publish_reference(f, "hf://my-org/my-ref")
+
+
+def test_publish_planned_scheme_raises(tmp_path: Path) -> None:
+    ref = _make_reference_dir(tmp_path)
+    with pytest.raises(NotImplementedError, match="planned for v3"):
+        publish_reference(ref, "gs://bucket/ref")
+
+
+def test_publish_hf_calls_upload_folder(tmp_path: Path) -> None:
+    ref = _make_reference_dir(tmp_path)
+    fake_api = MagicMock()
+    with patch("huggingface_hub.HfApi", return_value=fake_api):
+        publish_reference(ref, "hf://my-org/my-ref")
+
+    fake_api.create_repo.assert_called_once_with(
+        repo_id="my-org/my-ref", repo_type="model", exist_ok=True
+    )
+    fake_api.upload_folder.assert_called_once()
+    kwargs = fake_api.upload_folder.call_args.kwargs
+    assert kwargs["folder_path"] == str(ref)
+    assert kwargs["repo_id"] == "my-org/my-ref"
+    assert kwargs["repo_type"] == "model"
+    assert kwargs["revision"] is None
+    assert kwargs["path_in_repo"] == ""
+    assert kwargs["commit_message"] == "Firefly reference upload"
+
+
+def test_publish_hf_passes_revision_and_subpath(tmp_path: Path) -> None:
+    ref = _make_reference_dir(tmp_path)
+    fake_api = MagicMock()
+    with patch("huggingface_hub.HfApi", return_value=fake_api):
+        publish_reference(
+            ref,
+            "hf://my-org/my-ref@dev/nested/dir",
+            commit_message="calibration v2",
+        )
+    kwargs = fake_api.upload_folder.call_args.kwargs
+    assert kwargs["revision"] == "dev"
+    assert kwargs["path_in_repo"] == "nested/dir"
+    assert kwargs["commit_message"] == "calibration v2"
+
+
+def test_publish_hf_wraps_errors_with_token_hint(tmp_path: Path) -> None:
+    ref = _make_reference_dir(tmp_path)
+    fake_api = MagicMock()
+    fake_api.upload_folder.side_effect = RuntimeError("401 Unauthorized")
+    with (
+        patch("huggingface_hub.HfApi", return_value=fake_api),
+        pytest.raises(RuntimeError, match="HF_TOKEN"),
+    ):
+        publish_reference(ref, "hf://my-org/my-ref")
+
+
+def test_publish_s3_uploads_each_file(tmp_path: Path) -> None:
+    ref = _make_reference_dir(tmp_path)
+    client = MagicMock()
+    with patch("boto3.client", return_value=client):
+        publish_reference(ref, "s3://my-bucket/refs/v1")
+
+    # 3 files in the reference dir → 3 upload_file calls.
+    assert client.upload_file.call_count == 3
+    keys = sorted(call.args[2] for call in client.upload_file.call_args_list)
+    assert keys == [
+        "refs/v1/manifest.json",
+        "refs/v1/tolerances.json",
+        "refs/v1/weights.safetensors",
+    ]
+
+
+def test_publish_s3_root_prefix(tmp_path: Path) -> None:
+    """``s3://bucket`` (no prefix) uploads to bucket root."""
+    ref = _make_reference_dir(tmp_path)
+    client = MagicMock()
+    with patch("boto3.client", return_value=client):
+        publish_reference(ref, "s3://my-bucket")
+    keys = sorted(call.args[2] for call in client.upload_file.call_args_list)
+    assert keys == ["manifest.json", "tolerances.json", "weights.safetensors"]

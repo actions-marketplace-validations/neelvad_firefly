@@ -6,7 +6,7 @@ from pathlib import Path
 
 import typer
 
-from firefly.storage import resolve_reference
+from firefly.storage import publish_reference, resolve_reference
 
 app = typer.Typer(
     name="firefly",
@@ -26,6 +26,17 @@ def _resolve_or_exit(reference: str) -> Path:
         raise typer.Exit(code=2) from e
 
 
+def _publish_or_exit(local_path: Path, uri: str, *, commit_message: str) -> None:
+    """Publish a reference dir to a URI, exiting cleanly on errors."""
+    try:
+        publish_reference(local_path, uri, commit_message=commit_message)
+    except NotImplementedError as e:
+        raise typer.BadParameter(str(e), param_hint="--to") from e
+    except (ImportError, RuntimeError, ValueError, FileNotFoundError) as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=2) from e
+
+
 @app.command()
 def capture(
     model: str = typer.Option(..., "--model", "-m", help="HF model ID or path to a checkpoint."),
@@ -34,6 +45,15 @@ def capture(
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
     seed: int = typer.Option(0, "--seed", help="Determinism seed."),
     dtype: str = typer.Option("fp32", "--dtype", help="Model dtype: fp32, bf16, or fp16."),
+    push: str | None = typer.Option(
+        None,
+        "--push",
+        help=(
+            "If set, publish the artifact to this URI after capture "
+            "(hf://org/repo or s3://bucket/prefix). Equivalent to running "
+            "`firefly publish` immediately after capture."
+        ),
+    ),
 ) -> None:
     """Capture a reference artifact from a model + golden inputs."""
     from firefly.capture import capture_reference, parse_dtype
@@ -48,6 +68,43 @@ def capture(
         dtype=parse_dtype(dtype),
     )
     typer.echo(f"Wrote reference artifact to {out}")
+
+    if push is not None:
+        typer.echo(f"Publishing {out} → {push}")
+        _publish_or_exit(out, push, commit_message=f"Firefly reference capture: {model}")
+        typer.echo(f"Published to {push}")
+
+
+@app.command()
+def publish(
+    reference: Path = typer.Option(
+        ...,
+        "--reference",
+        "-r",
+        help="Local reference artifact directory to upload.",
+    ),
+    to: str = typer.Option(
+        ...,
+        "--to",
+        "-t",
+        help=(
+            "Destination URI. Supported: hf://org/repo (optionally with "
+            "@revision and /subpath) or s3://bucket/prefix. HF Hub creates "
+            "the repo if it doesn't exist; both backends use ambient "
+            "credentials (HF_TOKEN for HF, AWS default credential chain for S3)."
+        ),
+    ),
+    message: str = typer.Option(
+        "Firefly reference upload",
+        "--message",
+        "-m",
+        help="Commit message (HF Hub only; ignored for S3).",
+    ),
+) -> None:
+    """Upload a local reference artifact to HF Hub or S3."""
+    typer.echo(f"Publishing {reference} → {to}")
+    _publish_or_exit(reference, to, commit_message=message)
+    typer.echo(f"Published to {to}")
 
 
 @app.command()

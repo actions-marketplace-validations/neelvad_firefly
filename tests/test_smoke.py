@@ -36,6 +36,34 @@ def test_cli_help() -> None:
     assert "capture" in out
     assert "calibrate" in out
     assert "check" in out
+    assert "publish" in out
+
+
+def test_publish_help_lists_to_flag() -> None:
+    result = runner.invoke(app, ["publish", "--help"])
+    assert result.exit_code == 0
+    assert "--to" in _plain(result.stdout)
+
+
+def test_capture_help_lists_push_flag() -> None:
+    result = runner.invoke(app, ["capture", "--help"])
+    assert result.exit_code == 0
+    assert "--push" in _plain(result.stdout)
+
+
+def test_publish_planned_scheme_exits_cleanly(tmp_path: Path) -> None:
+    """`firefly publish --to gs://...` should hit the planned-vN error path."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "manifest.json").write_text("{}")
+
+    result = runner.invoke(
+        app,
+        ["publish", "--reference", str(ref), "--to", "gs://my-bucket/ref"],
+    )
+    assert result.exit_code != 0
+    combined = _plain(result.output + (result.stderr or ""))
+    assert "planned for v3" in combined
 
 
 def test_capture_command_advertises_options() -> None:
