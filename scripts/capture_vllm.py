@@ -78,11 +78,22 @@ _VLLM_VERSIONS: dict[str, dict] = {
     "0.8.5": {
         "vllm": "vllm==0.8.5",
         "transformers": "transformers==4.51.3",
-        # FLASHINFER backend would need the flashinfer-python CUDA wheel
-        # installed via its custom index URL (the bare PyPI package is a
-        # stub). See memory: project_firefly_flashinfer_deferred.md for
-        # the three retry paths. Skipped for now to keep the image lean.
         "extras": [],
+    },
+    # FLASHINFER variant of 0.8.5. The bare `flashinfer-python` PyPI
+    # package is a stub; the real wheel ships from FlashInfer's own
+    # index, keyed by (cuda, torch) version. vLLM 0.8.5's pip resolve
+    # pulls torch 2.6 with CUDA 12.4 by default. If the install fails
+    # or VLLM_ATTENTION_BACKEND=FLASHINFER raises 'flashinfer module
+    # not found' at runtime, the next thing to try is changing the
+    # index URL to match the actually-installed torch version (check
+    # the build log) — or falling back to vllm/vllm-openai Docker
+    # image. See memory: project_firefly_flashinfer_deferred.md.
+    "0.8.5-fi": {
+        "vllm": "vllm==0.8.5",
+        "transformers": "transformers==4.51.3",
+        "extras": [],
+        "flashinfer_index": "https://flashinfer.ai/whl/cu124/torch2.6/",
     },
 }
 
@@ -94,11 +105,20 @@ def _make_image(pins: dict) -> modal.Image:
         "huggingface_hub>=0.24",
         "safetensors>=0.4",
     ]
-    return (
+    image = (
         modal.Image.debian_slim(python_version="3.11")
         .pip_install(*base_pkgs, *pins.get("extras", []))
-        .add_local_python_source("firefly")
     )
+    if pins.get("flashinfer_index"):
+        # --no-deps because flashinfer's main runtime dep (torch) is
+        # already installed by vllm above; pulling deps from the
+        # flashinfer index URL would fail since they aren't mirrored
+        # there. -i (not --extra-index-url) forces pip to skip PyPI's
+        # stub wheel for this package.
+        image = image.run_commands(
+            f"pip install --no-deps flashinfer-python -i {pins['flashinfer_index']}"
+        )
+    return image.add_local_python_source("firefly")
 
 
 # ---------------------------------------------------------------------------
@@ -451,9 +471,37 @@ def capture_at_v_0_8_5(
     )
 
 
+@app.function(
+    image=_make_image(_VLLM_VERSIONS["0.8.5-fi"]),
+    gpu="A10G",
+    timeout=1800,
+    secrets=_HF_SECRETS,
+    volumes={_HF_CACHE_MOUNT: _HF_CACHE},
+)
+def capture_at_v_0_8_5_fi(
+    model_id: str = "HuggingFaceTB/SmolLM-135M",
+    prompt: str = "the quick brown fox jumps over the lazy dog",
+    max_seq_len: int = 1024,
+    dtype: str = "bfloat16",
+    attention_backend: str = "",
+    engine: str = "v0",
+    capture_decode: bool = False,
+    max_tokens: int = 8,
+    n_prompts: int = 1,
+    speculative_tokens: int = 0,
+    gpu_memory_utilization: float = 0.4,
+) -> dict:
+    return _do_capture(
+        model_id, prompt, max_seq_len, dtype,
+        attention_backend, engine, capture_decode, max_tokens, n_prompts,
+        speculative_tokens, gpu_memory_utilization,
+    )
+
+
 _CAPTURE_BY_TAG = {
     "0.7.3": capture_at_v_0_7_3,
     "0.8.5": capture_at_v_0_8_5,
+    "0.8.5-fi": capture_at_v_0_8_5_fi,
 }
 
 
