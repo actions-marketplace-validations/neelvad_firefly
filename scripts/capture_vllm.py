@@ -80,49 +80,59 @@ _VLLM_VERSIONS: dict[str, dict] = {
         "transformers": "transformers==4.51.3",
         "extras": [],
     },
-    # FLASHINFER variant of 0.8.5. We initially tried path 1 from
-    # project_firefly_flashinfer_deferred.md (pip install from the
-    # flashinfer wheel index in our debian_slim image). The wheel
-    # installed fine but vLLM raised "CUDA_HOME environment variable
-    # is not set" at import time — flashinfer needs the CUDA toolkit
-    # (headers, nvcc), not just the runtime libs PyTorch bundles.
-    # Pivoted to path 2: vLLM's official Docker image, which has
-    # CUDA + flashinfer pre-baked and pre-wired. The image is huge
-    # (~10 GB) and slow to build the first time, but bit-equivalent
-    # to non-Docker vLLM for the actual capture math.
+    # FLASHINFER variant of 0.8.5. Path history (see also memory:
+    # project_firefly_flashinfer_deferred.md):
+    #
+    #   1. debian_slim + `pip install flashinfer-python` → failed at
+    #      vLLM init with "CUDA_HOME not set". Flashinfer's wheel
+    #      needs the CUDA toolkit, not just torch's bundled runtime.
+    #
+    #   2. from_registry("vllm/vllm-openai:v0.8.5") → failed during
+    #      image build. The image is Python 3.12; Modal's automatic
+    #      runtime-dep install resolves an aiohttp old enough to lack
+    #      a 3.12 wheel, and its C extension fails to compile against
+    #      3.12's hidden PyLongObject layout. Pre-installing a newer
+    #      aiohttp didn't stick — Modal does a downgrade pass over it.
+    #
+    #   3. Current: nvidia/cuda devel image + add_python=3.11 + we
+    #      pip-install vllm + flashinfer ourselves. CUDA toolkit at
+    #      /usr/local/cuda → flashinfer's runtime CUDA_HOME check
+    #      passes. Python 3.11 → no Modal-deps vs 3.12 collisions.
+    #      All package versions are under our control.
     "0.8.5-fi": {
-        "from_registry": "vllm/vllm-openai:v0.8.5",
+        "base_image": "nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04",
+        "vllm": "vllm==0.8.5",
+        "transformers": "transformers==4.51.3",
+        "flashinfer_index": "https://flashinfer.ai/whl/cu124/torch2.6/",
     },
 }
 
 
 def _make_image(pins: dict) -> modal.Image:
-    if pins.get("from_registry"):
-        # Image already has vllm, torch, transformers, huggingface_hub,
-        # safetensors, and flashinfer pre-installed; we only need to
-        # layer in the firefly source so the worker can import the
-        # ReferenceManifest etc.
-        #
-        # Modal's image setup invokes `python` (not `python3`); the
-        # vllm-openai image is Ubuntu-based with python3 in PATH but no
-        # `python` symlink, so we add one. /usr/local/bin/python wins
-        # in PATH over /usr/bin/python3, so this is non-invasive vs the
-        # image's existing setup.
-        return (
-            modal.Image.from_registry(
-                pins["from_registry"],
-                setup_dockerfile_commands=[
-                    "RUN ln -sf $(which python3) /usr/local/bin/python",
-                    # vllm-openai ships Python 3.12 but old system pip-resolved
-                    # aiohttp doesn't have a 3.12 wheel and its C extension
-                    # doesn't compile against the 3.12 PyLongObject layout.
-                    # Pre-install a 3.12-compatible aiohttp so Modal's
-                    # automatic dep-install step doesn't resolve the broken one.
-                    "RUN python -m pip install --upgrade pip 'aiohttp>=3.9'",
-                ],
-            )
-            .add_local_python_source("firefly")
+    if pins.get("base_image"):
+        # nvidia/cuda devel base: full CUDA toolkit at /usr/local/cuda,
+        # no Python preinstalled. add_python=3.11 gives us a clean
+        # Python under our control. CUDA_HOME export is what makes the
+        # later flashinfer import succeed.
+        base_pkgs = [
+            pins["vllm"],
+            pins["transformers"],
+            "huggingface_hub>=0.24",
+            "safetensors>=0.4",
+        ]
+        image = (
+            modal.Image.from_registry(pins["base_image"], add_python="3.11")
+            .env({"CUDA_HOME": "/usr/local/cuda"})
+            .pip_install(*base_pkgs)
         )
+        if pins.get("flashinfer_index"):
+            # --no-deps because flashinfer's main runtime dep (torch)
+            # is already installed via vllm. -i (not --extra-index-url)
+            # to force pip past PyPI's stub package for this name.
+            image = image.run_commands(
+                f"pip install --no-deps flashinfer-python -i {pins['flashinfer_index']}"
+            )
+        return image.add_local_python_source("firefly")
 
     base_pkgs = [
         pins["vllm"],
