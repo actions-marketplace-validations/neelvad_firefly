@@ -102,8 +102,19 @@ def _make_image(pins: dict) -> modal.Image:
         # safetensors, and flashinfer pre-installed; we only need to
         # layer in the firefly source so the worker can import the
         # ReferenceManifest etc.
+        #
+        # Modal's image setup invokes `python` (not `python3`); the
+        # vllm-openai image is Ubuntu-based with python3 in PATH but no
+        # `python` symlink, so we add one. /usr/local/bin/python wins
+        # in PATH over /usr/bin/python3, so this is non-invasive vs the
+        # image's existing setup.
         return (
-            modal.Image.from_registry(pins["from_registry"])
+            modal.Image.from_registry(
+                pins["from_registry"],
+                setup_dockerfile_commands=[
+                    "RUN ln -sf $(which python3) /usr/local/bin/python",
+                ],
+            )
             .add_local_python_source("firefly")
         )
 
