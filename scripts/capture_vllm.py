@@ -477,6 +477,7 @@ def main(
     n_prompts: int = 1,
     speculative_tokens: int = 0,
     gpu_memory_utilization: float = 0.4,
+    max_seq_len: int = 1024,
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -513,6 +514,7 @@ def main(
         capture_decode=capture_decode, max_tokens=max_tokens,
         n_prompts=n_prompts, speculative_tokens=speculative_tokens,
         gpu_memory_utilization=gpu_memory_utilization,
+        max_seq_len=max_seq_len,
     )
 
     vllm_version = result["vllm_version"]
