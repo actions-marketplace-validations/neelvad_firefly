@@ -113,6 +113,12 @@ def _make_image(pins: dict) -> modal.Image:
                 pins["from_registry"],
                 setup_dockerfile_commands=[
                     "RUN ln -sf $(which python3) /usr/local/bin/python",
+                    # vllm-openai ships Python 3.12 but old system pip-resolved
+                    # aiohttp doesn't have a 3.12 wheel and its C extension
+                    # doesn't compile against the 3.12 PyLongObject layout.
+                    # Pre-install a 3.12-compatible aiohttp so Modal's
+                    # automatic dep-install step doesn't resolve the broken one.
+                    "RUN python -m pip install --upgrade pip 'aiohttp>=3.9'",
                 ],
             )
             .add_local_python_source("firefly")
