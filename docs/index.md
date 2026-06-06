@@ -16,11 +16,14 @@ This post is about what fell out of running it against vLLM.
 The most useful finding, before any setup:
 
 > **vLLM 0.8.5 V0 → V1 is bit-equal at 9-token prompts and diverges at
-> every single layer at 300-token prompts**, with the *exact same
-> attention kernel on both sides.* A unit test that uses short prompts
-> would pass this comparison. Production would silently change.
+> every single layer past the first PagedAttention block boundary**,
+> with the *exact same attention kernel on both sides.* On
+> Llama-3.1-8B, divergence saturates at ~2.8% final-layer relative
+> error from 1k tokens through 4k tokens — it's a step function, not
+> a slope. A unit test that uses short prompts would pass this
+> comparison. Production would silently change.
 
-![V0 vs V1 at 300 tokens — diverges at every tap](plots/v0_vs_v1_long_prompt.png)
+![Llama-3.1-8B V0 vs V1 + FLASH_ATTN — per-tap rel error at 9, 1k, 2k, 4k tokens](plots/llama_v0_vs_v1_length_curve.png)
 
 The rest of this post is how I got here.
 
@@ -232,14 +235,26 @@ percent-of-scale*. An eval that thresholds at 1% accuracy delta passes
 this comparison at token 0 and might keep passing for 50 tokens before
 the accumulated drift crosses the threshold.
 
-## Finding 3: The same engine swap that's safe at 9 tokens is broken at 300
+## Finding 3: The same engine swap that's safe at 9 tokens is broken at 1k — and stays broken
 
 This is the load-bearing finding. The plot at the top of the post.
 
 Same vLLM 0.8.5. Same FLASH_ATTN. Only difference: the V0 engine vs the
-V1 engine. At 9 tokens, every tap is bit-equal. At 300 tokens
-(constructed by repeating the prompt 30 times), every one of the 91
-taps diverges, with the first divergence right at `layer.0.self_attn`.
+V1 engine. I ran the comparison at four prompt lengths on
+Llama-3.1-8B (A100-40GB, BF16):
+
+| prompt length | taps diverging | first divergence | final-norm rel error |
+| --- | --- | --- | --- |
+| 9 tokens | **0 / 97** (bit-equal) | — | 0% |
+| 1k tokens | 97 / 97 | `layer.0.self_attn` | **2.84%** |
+| 2k tokens | 97 / 97 | `layer.0.self_attn` | **2.62%** |
+| 4k tokens | 97 / 97 | `layer.0.self_attn` | **2.86%** |
+
+I expected "monotonically growing with length." That's *not* what
+happens. **The curve is a step function**: bit-equal at very short
+prompts, immediately maxed-out divergence past the first PagedAttention
+block boundary, and roughly flat from 1k tokens onward. Length isn't
+the threshold; block-count is.
 
 Why? V0 uses flat attention — compute the full $QK^T \to \text{softmax}
 \to V$ product in one go. V1 uses PagedAttention, which is vLLM's
@@ -250,27 +265,30 @@ order is *different*. BF16 makes the difference visible.
 
 At 9 tokens, only one block is involved. Single-block PagedAttention is
 arithmetically identical to flat attention — same reduction order, same
-bit pattern. At 300 tokens, 18+ block boundaries are crossed. The
-block-wise online-softmax merge produces a different bit pattern from
-the flat reduction.
+bit pattern. At 1k tokens, 60+ block boundaries are crossed and the
+online-softmax merge has accumulated enough rounding error that *every*
+tap is past tolerance. Crossing from 1k to 4k adds more block
+boundaries but the per-element error from the merge is already
+saturated.
 
 The implication for the product story is:
 
 - **Short-prompt unit tests pass.** Anyone testing their vLLM upgrade
   with the typical 8-to-30-token prompts you find in test fixtures
   would see "V0 → V1 is bit-equal" and call the upgrade safe.
-- **Production-typical prompts diverge at every tap.** 300 tokens is
-  small for real serving (most production prompts are 1k–8k). The
-  divergence almost certainly grows with context length.
+- **Any realistic production prompt is in the divergent regime.** 1k
+  tokens is below most production prompt lengths. Whatever length you
+  test at past the block boundary, you see the same ~2.8% final-norm
+  drift.
 - **The kernel is literally identical.** This is not a kernel-swap bug;
   it's a *blocking strategy* bug. The argument "FLASH_ATTN on V0 and
   FLASH_ATTN on V1 are doing the same math" turns out to be true only
-  at trivially-short context.
+  at trivially-short context — below the block-boundary threshold.
 
 This is the finding I'd want a CI gate to catch — quietly,
 automatically, before deploy. A short-prompt unit test would not. A
 benchmark eval might or might not, depending on how sensitive the eval
-metric is to ~10% absolute internal drift that final_norm rescales down.
+metric is to ~3% absolute internal drift that final_norm rescales down.
 
 ## What I think this means for ML CI
 
@@ -347,38 +365,58 @@ referenced here aren't in the repo (they need a GPU to produce), but
 test suite YAML at `scripts/vllm_test_suite.yml` declares each
 (reference_a, reference_b, expected) tuple so you can regenerate them.
 
-The headline 300-token comparison is two commands of ~$0.05 each on a
-Modal A10G:
+The headline length-curve comparison is eight commands on Modal
+A100-40GB, ~$2–5 total. A single 9-token + 1k pair is enough to see
+the step-function behavior if you want to skip 2k / 4k:
 
 ```sh
+# 9-token bit-equal baseline
 uv run modal run scripts/capture_vllm.py \
   --vllm-tag 0.8.5 --engine v0 --attention-backend FLASH_ATTN \
-  --prompt-file scripts/prompts/long_270.txt \
-  --out vllm_v0_flash_long270
+  --model meta-llama/Llama-3.1-8B --gpu A100-40GB --gpu-memory-utilization 0.7 \
+  --out llama_v0_flash_short
 
 uv run modal run scripts/capture_vllm.py \
   --vllm-tag 0.8.5 --engine v1 --attention-backend FLASH_ATTN \
-  --prompt-file scripts/prompts/long_270.txt \
-  --out vllm_v1_flash_long270
+  --model meta-llama/Llama-3.1-8B --gpu A100-40GB --gpu-memory-utilization 0.7 \
+  --out llama_v1_flash_short
+
+# 1k-token divergent regime
+uv run modal run scripts/capture_vllm.py \
+  --vllm-tag 0.8.5 --engine v0 --attention-backend FLASH_ATTN \
+  --model meta-llama/Llama-3.1-8B --gpu A100-40GB --gpu-memory-utilization 0.7 \
+  --prompt-file scripts/prompts/long_1k.txt --max-seq-len 1100 \
+  --out llama_v0_flash_long1k
+
+uv run modal run scripts/capture_vllm.py \
+  --vllm-tag 0.8.5 --engine v1 --attention-backend FLASH_ATTN \
+  --model meta-llama/Llama-3.1-8B --gpu A100-40GB --gpu-memory-utilization 0.7 \
+  --prompt-file scripts/prompts/long_1k.txt --max-seq-len 1100 \
+  --out llama_v1_flash_long1k
 ```
 
-Then `uv run python scripts/plot_validation.py diff scripts/results/vllm_v0_flash_long270 scripts/results/vllm_v1_flash_long270` produces the headline plot.
+`uv run python scripts/plot_validation.py diff scripts/results/llama_v0_flash_long1k scripts/results/llama_v1_flash_long1k` produces the per-tap curve at 1k tokens. The full overlay (9 / 1k / 2k / 4k on one chart) needs the 2k and 4k pairs as well; swap the prompt file and `--max-seq-len` accordingly.
 
 ## What's next
 
 The two things I'd actually like to know:
 
-1. **Does the 300-token V0 vs V1 divergence widen at 2k / 4k / 8k tokens
-   the way I'd predict?** If yes, this is a "every realistic prompt
-   length is divergent" finding rather than "some prompt lengths are."
-   Cheap experiment, ~$5 of Modal time. Will probably do this next.
-
-2. **Does the layer-7 universality extend across model families?**
+1. **Does the layer-7 universality extend across model families?**
    Finding 1.5 confirms it across model scale (135M → 8B, both Meta).
    The natural next check is Qwen-7B or Mistral-7B — different
    tokenizer, different layer-norm placement, different MLP topology.
    If layer-7 still holds, the claim sharpens from "robust on Meta
    architectures" to "property of the attention kernels themselves."
+
+2. **What about FLASHINFER?** vLLM's third backend, used by Together,
+   Fireworks, and DeepSeek's production serving stacks. The bare
+   `flashinfer-python` PyPI package is a stub requiring a CUDA-specific
+   wheel from a custom index URL; my install attempts have been brittle.
+   Worth a deliberate retry against vLLM's official Docker image, where
+   the CUDA wheels are pre-baked. If FLASHINFER bit-equals FLASH_ATTN at
+   prefill, that's a positive CI claim. If it diverges, it's a Finding
+   1.5-style result on a *production-deployed* kernel rather than a
+   reference one.
 
 If you've hit numerical-regression bugs in serving stacks and want to
 compare notes, or if you'd find Firefly useful for your own CI and want
