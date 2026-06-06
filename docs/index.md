@@ -126,10 +126,69 @@ So "first divergence at layer 7" is really *"first layer where the
 kernel-rounding difference exceeds the precision representable
 threshold."* Firefly is correctly attributing to a *coupling of three
 things* — kernel difference × activation magnitude × precision-format
-floor. Same comparison on a model with larger early-layer magnitudes, or
-in FP16 vs BF16, would shift the boundary.
+floor.
 
-This was the finding I expected to get. The next two surprised me.
+I expected the boundary to move on a model with larger early-layer
+activations. The next section is the experiment I ran to test that
+prediction, and the result that made me rewrite this paragraph.
+
+## Finding 1.5: I tried to break the layer-7 finding on Llama-3.1-8B. It didn't budge.
+
+The cleanest stress test of the mechanism above is to rerun the
+comparison on a much bigger model. A 7-8B model has ~7× wider residual
+streams than SmolLM-135M, presumably hits the BF16-visible regime
+earlier, and should move the first-divergence layer.
+
+I ran FLASH_ATTN vs XFORMERS on `meta-llama/Llama-3.1-8B` on an
+A100-40GB — same vLLM 0.8.5 V0, same BF16, same 10-token prompt. The
+result:
+
+![Llama-3.1-8B FLASH_ATTN vs XFORMERS, per-tap relative error in forward order](plots/llama_8b_flash_vs_xformers.png)
+
+|  | SmolLM-135M | Llama-3.1-8B |
+| --- | --- | --- |
+| first divergent tap | `layer.7.self_attn` | `layer.7.self_attn` |
+| taps diverging | 70/91 (77%) | 76/97 (78%) |
+| final-norm relative error | ~1.4% | ~0.96% |
+| hidden dim | 576 | 4096 |
+| layers | 30 | 32 |
+
+**First divergence at layer 7 — on a 60× larger model with a 7× wider
+residual stream.** Same layer index. Similar fraction of taps diverging.
+Similar overall divergence curve shape.
+
+Plotting per-layer activation magnitudes explains why my prediction was
+wrong:
+
+![Per-layer activation magnitudes — Llama-3.1-8B](plots/magnitudes_llama_8b.png)
+
+Early-layer magnitudes are comparable across both models (~2-4). The
+residual stream is initialized from an embedding lookup that's roughly
+unit-norm regardless of hidden dimension; the model-specific
+activation-growth patterns only kick in after a handful of layers.
+Llama's MLP output eventually grows to ~40 (vs SmolLM's ~14), but by
+then we are well past the rounding-threshold crossover.
+
+So the *mechanism* in Finding 1 was right but the prediction at the end
+of it was wrong. The corrected story:
+
+- The FLASH_ATTN vs XFORMERS kernel-reduction-order difference is
+  scale-invariant per element.
+- Early-layer activation magnitudes are similar across model scales
+  because of how embeddings initialize the residual stream.
+- BF16's representable threshold is a property of mantissa width, not of
+  the model.
+- The product (early-layer-magnitude × kernel-diff) crosses BF16's
+  representable threshold at roughly the same depth in both networks.
+
+This makes the finding *stronger* than I thought it was. "First
+divergence at `layer.7.self_attn`" isn't a SmolLM-135M quirk; it's a
+property of how these two attention kernels compose in BF16, robust
+across 60× model scale. Same diagnostic, two architectures, same first
+divergent tap — and the per-layer attribution made the universality
+visible in one plot.
+
+These next two findings still surprised me.
 
 ## Finding 2: Decode capture exposes that layer 0 itself diverges, via KV cache pollution
 
@@ -253,12 +312,11 @@ will miss most real upgrade-time bugs.
 
 ## Limitations I should flag
 
-- **One model size, one model family.** Everything is SmolLM-135M. The
-  Dettmers outlier-features behavior generalizes to other models but
-  the layer at which divergence becomes BF16-visible would shift.
-  Larger models have larger activation magnitudes earlier, so the
-  layer-7 boundary might move to layer 3 on a 7B+ model. I haven't
-  tested this.
+- **Two model sizes, one model family.** SmolLM-135M and Llama-3.1-8B,
+  both Meta-architecture. The layer-7 universality I show in Finding 1.5
+  is N=2; a non-Meta architecture (Qwen, Mistral, Gemma) would tighten
+  the claim from "robust on two Meta models" to "robust across model
+  family." I haven't run that yet.
 - **One precision format primarily.** Most of my runs are BF16; the
   earlier validation work showed FP32 is bit-deterministic on the same
   setup, and FP16 behaves like BF16 from a reproducibility standpoint
@@ -315,10 +373,12 @@ The two things I'd actually like to know:
    length is divergent" finding rather than "some prompt lengths are."
    Cheap experiment, ~$5 of Modal time. Will probably do this next.
 
-2. **Does the layer-7 boundary in the kernel-swap comparison shift on
-   larger models?** A 7B model has wider residuals and presumably hits
-   the BF16-visible regime earlier. Worth running on Llama-3-8B if I
-   can get a Hopper GPU cheaply.
+2. **Does the layer-7 universality extend across model families?**
+   Finding 1.5 confirms it across model scale (135M → 8B, both Meta).
+   The natural next check is Qwen-7B or Mistral-7B — different
+   tokenizer, different layer-norm placement, different MLP topology.
+   If layer-7 still holds, the claim sharpens from "robust on Meta
+   architectures" to "property of the attention kernels themselves."
 
 If you've hit numerical-regression bugs in serving stacks and want to
 compare notes, or if you'd find Firefly useful for your own CI and want
