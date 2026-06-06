@@ -290,6 +290,75 @@ automatically, before deploy. A short-prompt unit test would not. A
 benchmark eval might or might not, depending on how sensitive the eval
 metric is to ~3% absolute internal drift that final_norm rescales down.
 
+## Finding 4: FLASHINFER diverges at layer 0 — and its error grows with length
+
+vLLM ships three attention backends — FLASH_ATTN, XFORMERS, and
+FLASHINFER. FLASHINFER is the one production stacks at Together,
+Fireworks, and DeepSeek actually use, because its split-K
+parallelization beats FlashAttention 2 for single-query decode.
+Getting it installed on Modal was annoying — `flashinfer-python` on
+PyPI is a stub requiring a CUDA-specific wheel; attempts on
+`debian_slim` failed with "CUDA_HOME not set", on the
+`vllm/vllm-openai` Docker image with a Python 3.12 aiohttp ABI
+collision, and finally worked on a clean `nvidia/cuda` devel base
+with explicit pip-install of vLLM and flashinfer.
+
+Once it was working, the result:
+
+![Llama-3.1-8B V0 + FLASH_ATTN vs FLASHINFER — per-tap rel error at 9 and 1k tokens](plots/llama_flash_vs_flashinfer_length_curve.png)
+
+| comparison | length | first divergent tap | early-layer rel | final-norm rel |
+| --- | --- | --- | --- | --- |
+| **SmolLM-135M FLASH vs FLASHINFER** | 9 tokens | `layer.0.self_attn` | 0.0519% | 2.49% |
+| **Llama-3.1-8B FLASH vs FLASHINFER** | 9 tokens | `layer.0.self_attn` | 0.0516% | 1.31% |
+| **Llama-3.1-8B FLASH vs FLASHINFER** | 1k tokens | `layer.0.self_attn` | 0.0749% | **3.29%** |
+
+Two new things relative to the earlier findings:
+
+**1. Layer 0, not layer 7 — and universal across model scale.** The
+FLASHINFER vs FLASH_ATTN per-element kernel-difference is much larger
+than XFORMERS vs FLASH_ATTN's: ~0.05% relative at layer 0 versus
+~0.0001% at layer 0 for XFORMERS. The bigger per-element diff crosses
+BF16's representable threshold *immediately* in early-layer
+activations, instead of needing the magnitude growth through layers 0
+through 6 that XFORMERS required. And the first-divergence layer is
+the same on SmolLM-135M (0.0519%) and Llama-3.1-8B (0.0516%) — exactly
+the cross-scale universality Finding 1.5 predicted, just at a different
+layer index because the kernel changed.
+
+**2. The length curve is monotonic, not a step function.** Final-norm
+relative error grows from 1.31% at 9 tokens to 3.29% at 1k — a 2.5×
+increase. That's a different shape than the V0 vs V1 length curve in
+Finding 3, which plateaus from 1k through 4k. The explanation is that
+FLASHINFER has two superimposed sources of difference:
+
+- The per-attention-kernel reduction-order diff (visible at 9 tokens,
+  baseline ~1.3% final).
+- An additional length-dependent diff from FLASHINFER's own paging /
+  block-merge strategy (compounds as more attention positions
+  participate in each token's computation).
+
+V0 vs V1 with the *same* FLASH_ATTN kernel only had the second source,
+and that source saturated past one block. FLASH vs FLASHINFER has
+both, and they sum.
+
+**Synthesis.** Firefly's per-layer attribution distinguishes three
+distinct failure modes that all look like "model output drifted" at
+the eval level:
+
+| failure mode | example | first divergent tap | length curve |
+| --- | --- | --- | --- |
+| kernel reduction-order (small) | FLASH vs XFORMERS | `layer.7.self_attn` | unknown |
+| kernel reduction-order (large) | FLASH vs FLASHINFER | `layer.0.self_attn` | monotonic growth |
+| blocking strategy | V0 vs V1, same kernel | bit-equal short, `layer.0.self_attn` long | step function |
+
+Same attribution tool, three different signatures. Useful in
+production: an SRE seeing "Firefly says first divergence is
+layer.0.self_attn and the rel error grew between 1k and 4k" knows the
+kernel itself changed; "first divergence is layer.7" knows it's a
+subtler kernel swap; "bit-equal at short and divergent at long" knows
+it's a blocking-strategy change.
+
 ## What I think this means for ML CI
 
 A few unromantic takeaways:
@@ -399,24 +468,19 @@ uv run modal run scripts/capture_vllm.py \
 
 ## What's next
 
-The two things I'd actually like to know:
-
-1. **Does the layer-7 universality extend across model families?**
-   Finding 1.5 confirms it across model scale (135M → 8B, both Meta).
-   The natural next check is Qwen-7B or Mistral-7B — different
-   tokenizer, different layer-norm placement, different MLP topology.
-   If layer-7 still holds, the claim sharpens from "robust on Meta
+1. **Does the layer-7 (XFORMERS) / layer-0 (FLASHINFER) universality
+   extend across model families?** Findings 1.5 and 4 confirm both
+   across model scale (135M → 8B, both Meta). The natural next check
+   is Qwen-7B or Mistral-7B — different tokenizer, different
+   layer-norm placement, different MLP topology. If both layer
+   indices still hold, the claim sharpens from "robust on Meta
    architectures" to "property of the attention kernels themselves."
 
-2. **What about FLASHINFER?** vLLM's third backend, used by Together,
-   Fireworks, and DeepSeek's production serving stacks. The bare
-   `flashinfer-python` PyPI package is a stub requiring a CUDA-specific
-   wheel from a custom index URL; my install attempts have been brittle.
-   Worth a deliberate retry against vLLM's official Docker image, where
-   the CUDA wheels are pre-baked. If FLASHINFER bit-equals FLASH_ATTN at
-   prefill, that's a positive CI claim. If it diverges, it's a Finding
-   1.5-style result on a *production-deployed* kernel rather than a
-   reference one.
+2. **Does FLASHINFER vs FLASH_ATTN keep growing past 1k?** Finding 4
+   shows 1.31% at 9 tokens, 3.29% at 1k. V0 vs V1 saturated past 1k
+   so I'd expect FLASHINFER to also saturate eventually, but I haven't
+   tested 2k and 4k yet. Two more captures on Llama-3.1-8B
+   ($0.50-$1.00 of Modal time) would resolve it.
 
 If you've hit numerical-regression bugs in serving stacks and want to
 compare notes, or if you'd find Firefly useful for your own CI and want
