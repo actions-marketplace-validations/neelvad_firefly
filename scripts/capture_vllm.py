@@ -80,45 +80,44 @@ _VLLM_VERSIONS: dict[str, dict] = {
         "transformers": "transformers==4.51.3",
         "extras": [],
     },
-    # FLASHINFER variant of 0.8.5. The bare `flashinfer-python` PyPI
-    # package is a stub; the real wheel ships from FlashInfer's own
-    # index, keyed by (cuda, torch) version. vLLM 0.8.5's pip resolve
-    # pulls torch 2.6 with CUDA 12.4 by default. If the install fails
-    # or VLLM_ATTENTION_BACKEND=FLASHINFER raises 'flashinfer module
-    # not found' at runtime, the next thing to try is changing the
-    # index URL to match the actually-installed torch version (check
-    # the build log) — or falling back to vllm/vllm-openai Docker
-    # image. See memory: project_firefly_flashinfer_deferred.md.
+    # FLASHINFER variant of 0.8.5. We initially tried path 1 from
+    # project_firefly_flashinfer_deferred.md (pip install from the
+    # flashinfer wheel index in our debian_slim image). The wheel
+    # installed fine but vLLM raised "CUDA_HOME environment variable
+    # is not set" at import time — flashinfer needs the CUDA toolkit
+    # (headers, nvcc), not just the runtime libs PyTorch bundles.
+    # Pivoted to path 2: vLLM's official Docker image, which has
+    # CUDA + flashinfer pre-baked and pre-wired. The image is huge
+    # (~10 GB) and slow to build the first time, but bit-equivalent
+    # to non-Docker vLLM for the actual capture math.
     "0.8.5-fi": {
-        "vllm": "vllm==0.8.5",
-        "transformers": "transformers==4.51.3",
-        "extras": [],
-        "flashinfer_index": "https://flashinfer.ai/whl/cu124/torch2.6/",
+        "from_registry": "vllm/vllm-openai:v0.8.5",
     },
 }
 
 
 def _make_image(pins: dict) -> modal.Image:
+    if pins.get("from_registry"):
+        # Image already has vllm, torch, transformers, huggingface_hub,
+        # safetensors, and flashinfer pre-installed; we only need to
+        # layer in the firefly source so the worker can import the
+        # ReferenceManifest etc.
+        return (
+            modal.Image.from_registry(pins["from_registry"])
+            .add_local_python_source("firefly")
+        )
+
     base_pkgs = [
         pins["vllm"],
         pins["transformers"],
         "huggingface_hub>=0.24",
         "safetensors>=0.4",
     ]
-    image = (
+    return (
         modal.Image.debian_slim(python_version="3.11")
         .pip_install(*base_pkgs, *pins.get("extras", []))
+        .add_local_python_source("firefly")
     )
-    if pins.get("flashinfer_index"):
-        # --no-deps because flashinfer's main runtime dep (torch) is
-        # already installed by vllm above; pulling deps from the
-        # flashinfer index URL would fail since they aren't mirrored
-        # there. -i (not --extra-index-url) forces pip to skip PyPI's
-        # stub wheel for this package.
-        image = image.run_commands(
-            f"pip install --no-deps flashinfer-python -i {pins['flashinfer_index']}"
-        )
-    return image.add_local_python_source("firefly")
 
 
 # ---------------------------------------------------------------------------
