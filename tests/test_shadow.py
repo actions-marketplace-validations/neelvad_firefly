@@ -350,6 +350,140 @@ def _wait_for_lines(path: Path, expected: int, timeout: float = 2.0) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# CUDA-graph-mode capture (API surface tests — run on CPU)
+#
+# The actual Triton kernel launch + CUDA-graph capture-and-replay test
+# lives in scripts/spike_cuda_graph.py and runs on Modal GPU. These tests
+# cover the surface that's exercisable without CUDA: op registration,
+# StaticTapper bookkeeping, tap_static decorator dispatch, drain flow on
+# fake counter values.
+# ---------------------------------------------------------------------------
+
+
+def test_capture_static_op_is_registered() -> None:
+    """The op exists in the dispatcher. Actual kernel execution requires CUDA;
+    that's covered by scripts/spike_cuda_graph.py running on Modal."""
+    assert hasattr(torch.ops.firefly, "capture_static")
+    # The op's schema can be queried — verifies registration was clean.
+    schema = torch.ops.firefly.capture_static.default._schema
+    assert "Tensor x" in str(schema)
+    assert "Tensor(a1!) stats_buf" in str(schema)
+    assert "Tensor(a2!) counter" in str(schema)
+
+
+def test_static_tapper_writes_tap_index_json(tmp_path: Path) -> None:
+    names = {0: "layer.0.mlp", 7: "layer.7.self_attn"}
+    # Force CPU device so the Tapper doesn't try to touch CUDA.
+    tapper = shadow.StaticTapper(tmp_path / "logs", names, device="cpu")
+    tap_index = json.loads((tmp_path / "logs" / "tap_index.json").read_text())
+    # JSON keys are strings; compare as such.
+    assert tap_index == {"0": "layer.0.mlp", "7": "layer.7.self_attn"}
+    assert tapper.stats_buf.shape == (10_000, 5)
+    assert tapper.counter.shape == (1,)
+
+
+def test_static_tapper_is_not_reentrant(tmp_path: Path) -> None:
+    t = shadow.StaticTapper(tmp_path / "logs", {0: "tap_a"}, device="cpu")
+    with (
+        t,
+        pytest.raises(RuntimeError, match="not re-entrant"),
+        shadow.StaticTapper(tmp_path / "logs2", {0: "tap_b"}, device="cpu"),
+    ):
+        pass
+
+
+def test_static_tapper_drains_synthetic_rows_to_sink(tmp_path: Path) -> None:
+    """End-to-end on CPU: fake the GPU kernel by directly writing buffer
+    rows + bumping the counter, then verify the drain produces correct
+    JSONL records with names re-attached via the index_to_name map."""
+    names = {0: "layer.0.mlp", 7: "layer.7.self_attn"}
+    with shadow.StaticTapper(
+        tmp_path / "logs", names, buffer_size=100, drain_interval_s=0.01, device="cpu"
+    ) as t:
+        # Fake 3 captures: tap 0, tap 7, tap 0. Buffer layout per row:
+        # [mean, abs_mean, abs_max, std, tap_idx]
+        t.stats_buf[0] = torch.tensor([0.1, 0.2, 0.5, 0.05, 0.0])
+        t.stats_buf[1] = torch.tensor([1.0, 1.1, 2.0, 0.30, 7.0])
+        t.stats_buf[2] = torch.tensor([0.0, 0.1, 0.4, 0.02, 0.0])
+        t.counter[0] = 3
+        # Wait for drain to flush.
+        _wait_for_lines(tmp_path / "logs" / "stats.jsonl", expected=3)
+
+    # Outside the with-block: tapper has cleaned up and flushed.
+    lines = (tmp_path / "logs" / "stats.jsonl").read_text().splitlines()
+    records = [json.loads(line) for line in lines]
+    assert len(records) == 3
+    names_seen = [r["tap_name"] for r in records]
+    assert names_seen == ["layer.0.mlp", "layer.7.self_attn", "layer.0.mlp"]
+    # Verify the stats round-tripped correctly.
+    assert records[0]["stats"]["abs_max"] == pytest.approx(0.5)
+    assert records[1]["stats"]["mean"] == pytest.approx(1.0)
+
+
+def test_static_tapper_handles_buffer_wraparound(tmp_path: Path) -> None:
+    """If the counter advances by more than buffer_size between drains,
+    we lose data — but the drain shouldn't crash, and the next drain
+    should pick up cleanly."""
+    names = {0: "tap"}
+    t = shadow.StaticTapper(
+        tmp_path / "logs", names, buffer_size=10, device="cpu"
+    )
+    # Manually drive the drain without entering the context manager so
+    # we can step through wraparound scenarios deterministically.
+    # Pre-write 10 rows (full buffer) and bump counter to 25 (15 lost).
+    for i in range(10):
+        t.stats_buf[i] = torch.tensor([float(i), 0.0, 0.0, 0.0, 0.0])
+    t.counter[0] = 25
+    n_drained = t._drain_once()
+    # Drain returns the buffer-size cap, not 25.
+    assert n_drained == 10
+    t.sink.close()
+
+
+def test_tap_static_decorator_is_noop_without_active_tapper() -> None:
+    """The decorator must not crash if the model is called outside a
+    StaticTapper context (so the same instrumented model works both ways)."""
+
+    class M(nn.Module):
+        @shadow.tap_static(idx=0, name="tap")
+        def forward(self, x):
+            return x * 2
+
+    m = M()
+    # No StaticTapper active. The decorator should pass through to fn().
+    y = m(torch.ones(3))
+    assert y.tolist() == [2.0, 2.0, 2.0]
+
+
+def test_tap_static_decorator_registers_name_lazily(tmp_path: Path, monkeypatch) -> None:
+    """If the user passes ``name`` and that idx isn't in the Tapper's
+    map yet, the decorator should register it lazily on first call.
+
+    The op execution itself requires CUDA, so we patch the op call to
+    a no-op pass-through. The name-registration behavior is pure Python
+    state and testable on CPU.
+    """
+
+    class M(nn.Module):
+        @shadow.tap_static(idx=42, name="layer.42.mlp")
+        def forward(self, x):
+            return x * 2
+
+    tapper = shadow.StaticTapper(
+        tmp_path / "logs", {}, buffer_size=10, device="cpu"
+    )
+
+    def _noop_capture_static(x, _stats_buf, _counter, _idx):
+        return x
+
+    monkeypatch.setattr(torch.ops.firefly, "capture_static", _noop_capture_static)
+    with tapper:
+        m = M()
+        m(torch.ones(3))
+    assert tapper.index_to_name[42] == "layer.42.mlp"
+
+
 # Silence the re-import-of-shadow-via-firefly bookkeeping check: torch's
 # custom_op registry is global, so re-importing the module would attempt
 # to re-register the op and raise. Importing once at module scope (above)

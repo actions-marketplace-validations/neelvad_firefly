@@ -458,3 +458,318 @@ def stop_sink(handle: SinkHandle) -> None:
     handle.drain.stop()
     handle.drain.join(timeout=5.0)
     handle.sink.close()
+
+
+# ---------------------------------------------------------------------------
+# CUDA-graph-mode capture (Spike 2 — see project_firefly_shadow_mode_design)
+#
+# The eager / torch.compile path above does CPU-side Python in its op body
+# (regex match, queue push). CUDA graphs capture a fixed sequence of GPU
+# kernel launches and replay them with zero CPU work between launches —
+# so the CPU-side body never runs during replay, and shadow data goes
+# silent the moment the model enters CUDA-graph replay mode.
+#
+# The CUDA-graph-mode capture op routes the work through a Triton kernel
+# that runs entirely on GPU: compute stats, atomically increment a counter,
+# write to buffer[idx]. The kernel launch gets captured into the graph and
+# re-executes on every replay. A separate CPU-side drain thread polls the
+# GPU buffer between replays and writes to the sink.
+#
+# Two key design differences from the eager path:
+#  1. Buffers are pre-allocated GPU tensors with fixed lifetime, not a
+#     Python queue. Their pointers are captured into the graph.
+#  2. Tap-name filter logic moves from "regex match inside the op" to
+#     "compile-time decision about which sites get instrumented." The
+#     instrumented sites pass an integer `tap_idx`; the sidecar JSON maps
+#     idx → name at drain time.
+# ---------------------------------------------------------------------------
+
+
+# Lazy Triton import — keeps the module importable on CPU-only machines.
+# The CUDA-graph path requires Triton at runtime but not at import time.
+def _import_triton():
+    try:
+        import triton
+        import triton.language as tl
+    except ImportError as e:
+        raise ImportError(
+            "triton is required for CUDA-graph-mode shadow capture but isn't "
+            "installed. On Linux/CUDA, triton is bundled with torch — if it's "
+            "missing, your torch install may be CPU-only."
+        ) from e
+    return triton, tl
+
+
+# Triton kernel + Python wrapper, both lazily constructed at first use so
+# the import-time cost is zero on CPU-only machines.
+_STATS_KERNEL = None
+
+
+def _get_stats_kernel():
+    """Lazily JIT-compile and cache the Triton stats kernel."""
+    global _STATS_KERNEL
+    if _STATS_KERNEL is not None:
+        return _STATS_KERNEL
+
+    triton, tl = _import_triton()
+
+    @triton.jit
+    def _shadow_stats_kernel(
+        x_ptr,                       # input tensor
+        stats_buf_ptr,               # [N, 5] stats buffer (4 stats + tap_idx)
+        counter_ptr,                 # [1] int32 atomic counter
+        tap_idx,                     # int — which tap this call is for
+        n_elements,                  # numel(x)
+        BLOCK_SIZE: tl.constexpr,    # power-of-2 >= n_elements
+    ):
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+        x_f = x.to(tl.float32)
+        s_mean = tl.sum(x_f, axis=0) / n_elements
+        abs_x = tl.abs(x_f)
+        s_abs_mean = tl.sum(abs_x, axis=0) / n_elements
+        s_abs_max = tl.max(abs_x, axis=0)
+        diff = x_f - s_mean
+        s_std = tl.sqrt(tl.sum(diff * diff, axis=0) / n_elements)
+
+        idx = tl.atomic_add(counter_ptr, 1)
+
+        tl.store(stats_buf_ptr + idx * 5 + 0, s_mean)
+        tl.store(stats_buf_ptr + idx * 5 + 1, s_abs_mean)
+        tl.store(stats_buf_ptr + idx * 5 + 2, s_abs_max)
+        tl.store(stats_buf_ptr + idx * 5 + 3, s_std)
+        tl.store(stats_buf_ptr + idx * 5 + 4, tap_idx.to(tl.float32))
+
+    _STATS_KERNEL = _shadow_stats_kernel
+    return _shadow_stats_kernel
+
+
+# Custom op for CUDA-graph mode. ``mutates_args`` tells Dynamo /
+# torch.compile that stats_buf and counter are written, so the op
+# survives both ``torch.compile`` AND ``torch.cuda.CUDAGraph`` capture.
+@torch.library.custom_op(
+    "firefly::capture_static",
+    mutates_args=("stats_buf", "counter"),
+)
+def capture_static(
+    x: torch.Tensor,
+    stats_buf: torch.Tensor,
+    counter: torch.Tensor,
+    tap_idx: int,
+) -> torch.Tensor:
+    """CUDA-graph-safe pass-through capture.
+
+    Writes 4 stats + the tap_idx to ``stats_buf[counter]`` and atomically
+    increments ``counter``. Returns ``x`` unchanged. All work happens
+    on-device; the Triton kernel launch is captureable into a CUDA graph.
+    """
+    triton, _ = _import_triton()
+    kernel = _get_stats_kernel()
+    n = x.numel()
+    BLOCK = triton.next_power_of_2(n)
+    kernel[(1,)](x, stats_buf, counter, tap_idx, n, BLOCK_SIZE=BLOCK)
+    return x.clone()
+
+
+@capture_static.register_fake
+def _capture_static_fake(
+    x: torch.Tensor,
+    stats_buf: torch.Tensor,
+    counter: torch.Tensor,
+    tap_idx: int,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+# Note: no autograd formula. ``mutates_args`` and ``register_autograd`` are
+# mutually exclusive in torch.library — mutating ops can't have backward
+# formulas because backward through a mutation needs the pre-mutation
+# state. CUDA-graph-mode shadow capture is inference-only by design, so
+# this is fine; the eager ``capture`` op above keeps its pass-through
+# gradient for the (rarer) training-time debugging case.
+
+
+# ---------------------------------------------------------------------------
+# StaticTapper: holds GPU buffers + drain thread for CUDA-graph mode
+# ---------------------------------------------------------------------------
+
+
+class StaticTapper:
+    """CUDA-graph-mode counterpart to :class:`Tapper`.
+
+    Pre-allocates GPU buffers (stats + counter) whose pointers get
+    captured into a CUDA graph. The Triton kernel inside
+    :func:`capture_static` writes to these buffers on every replay. A
+    CPU-side drain thread periodically reads the GPU stats and writes
+    to the local log sink, re-attaching tap names via the index → name
+    map this Tapper holds.
+
+    Usage::
+
+        names = {0: "layer.0.mlp", 1: "layer.7.self_attn"}
+        with StaticTapper(log_dir, names) as tapper:
+            # Build the CUDA graph using tapper.stats_buf / tapper.counter
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                out = model(static_input, tapper.stats_buf, tapper.counter)
+            for _ in range(N):
+                g.replay()
+
+    The user is responsible for inserting ``capture_static`` calls in
+    their model and passing ``tapper.stats_buf`` and ``tapper.counter``
+    through. See :func:`tap_static` for a decorator that does this via
+    a thread-local active StaticTapper.
+    """
+
+    def __init__(
+        self,
+        log_dir: str | Path,
+        index_to_name: dict[int, str],
+        buffer_size: int = 10_000,
+        drain_interval_s: float = 0.1,
+        device: str = "cuda",
+    ) -> None:
+        self.log_dir = Path(log_dir)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        # Persist the index → name map so the drain can re-attach names.
+        self.index_to_name = dict(index_to_name)
+        (self.log_dir / "tap_index.json").write_text(
+            json.dumps(self.index_to_name, indent=2, sort_keys=True)
+        )
+
+        self.buffer_size = buffer_size
+        self.drain_interval_s = drain_interval_s
+        self.stats_buf = torch.zeros((buffer_size, 5), device=device, dtype=torch.float32)
+        self.counter = torch.zeros((1,), device=device, dtype=torch.int32)
+
+        self.sink = LocalLogSink(self.log_dir)
+        self._drained_count = 0
+        self._drain_thread: _StaticDrainThread | None = None
+
+    def __enter__(self) -> StaticTapper:
+        if _active_static_tapper() is not None:
+            raise RuntimeError("StaticTapper is not re-entrant within a thread.")
+        _TLS.static_tapper = self
+        self._drain_thread = _StaticDrainThread(self)
+        self._drain_thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        _TLS.static_tapper = None
+        if self._drain_thread is not None:
+            self._drain_thread.stop()
+            self._drain_thread.join(timeout=5.0)
+        # Final drain pass to flush remaining captures.
+        self._drain_once()
+        self.sink.close()
+
+    def _drain_once(self) -> int:
+        """Copy any new stats rows from GPU to CPU, write to sink.
+
+        Returns the number of rows drained.
+        """
+        current = int(self.counter.item())
+        if current <= self._drained_count:
+            return 0
+        n_to_drain = current - self._drained_count
+        # If we've lost data (n_to_drain > buffer_size), advance the
+        # drained-count to recover whatever's still in the buffer.
+        if n_to_drain > self.buffer_size:
+            self._drained_count = current - self.buffer_size
+            n_to_drain = self.buffer_size
+        # Read n_to_drain rows starting at start_slot, with wraparound.
+        start_slot = self._drained_count % self.buffer_size
+        if start_slot + n_to_drain <= self.buffer_size:
+            slots = self.stats_buf[start_slot : start_slot + n_to_drain].cpu().tolist()
+        else:
+            first_chunk = self.stats_buf[start_slot:].cpu().tolist()
+            n_remaining = n_to_drain - len(first_chunk)
+            slots = first_chunk + self.stats_buf[:n_remaining].cpu().tolist()
+        for row in slots:
+            tap_idx = int(row[4])
+            self.sink.write(
+                _Event(
+                    request_id=None,
+                    tap_name=self.index_to_name.get(tap_idx, f"tap_{tap_idx}"),
+                    step=0,
+                    stats={
+                        "shape": [],          # not captured in CUDA-graph mode
+                        "dtype": "float32",
+                        "mean": row[0],
+                        "abs_mean": row[1],
+                        "abs_max": row[2],
+                        "std": row[3],
+                    },
+                    tensor=None,
+                    timestamp=time.time(),
+                )
+            )
+        self._drained_count = current
+        return len(slots)
+
+
+def _active_static_tapper() -> StaticTapper | None:
+    return getattr(_TLS, "static_tapper", None)
+
+
+class _StaticDrainThread(threading.Thread):
+    """Polls the GPU counter, copies new stats rows to CPU, writes to sink."""
+
+    def __init__(self, tapper: StaticTapper) -> None:
+        super().__init__(daemon=True, name="firefly-static-drain")
+        self._tapper = tapper
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            self._tapper._drain_once()
+            self._stop_event.wait(self._tapper.drain_interval_s)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def tap_static(idx: int, name: str | None = None):
+    """Decorator for CUDA-graph mode capture.
+
+    Wraps an ``nn.Module.forward`` to call :func:`capture_static` with the
+    active :class:`StaticTapper`'s buffers. If no StaticTapper is active,
+    the decorator is a no-op pass-through (so the instrumented model can
+    also be called outside of CUDA-graph mode).
+
+    Usage::
+
+        class MyLayer(nn.Module):
+            @firefly.shadow.tap_static(idx=7, name="layer.7.mlp")
+            def forward(self, x):
+                return self.mlp(x)
+
+    The ``name`` argument is optional and is used to populate the active
+    Tapper's ``index_to_name`` map at decoration time (so the user
+    doesn't have to maintain it separately).
+    """
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            out = fn(self, *args, **kwargs)
+            t = _active_static_tapper()
+            if t is None:
+                return out
+            # Register name lazily on first call if not yet known.
+            if name is not None and idx not in t.index_to_name:
+                t.index_to_name[idx] = name
+            if isinstance(out, torch.Tensor):
+                return torch.ops.firefly.capture_static(out, t.stats_buf, t.counter, idx)
+            if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
+                head = torch.ops.firefly.capture_static(
+                    out[0], t.stats_buf, t.counter, idx
+                )
+                return (head, *out[1:])
+            return out
+
+        return wrapper
+
+    return decorator
