@@ -339,13 +339,14 @@ with explicit pip-install of vLLM and flashinfer.
 
 Once it was working, the result:
 
-![Llama-3.1-8B V0 + FLASH_ATTN vs FLASHINFER — per-tap rel error at 9 and 1k tokens](plots/llama_flash_vs_flashinfer_length_curve.png)
+![Llama-3.1-8B V0 + FLASH_ATTN vs FLASHINFER — per-tap rel error at 9, 1k, 2k, 4k tokens](plots/llama_flash_vs_flashinfer_length_curve_4.png)
 
-| comparison | length | first divergent tap | early-layer rel | final-norm rel |
-| --- | --- | --- | --- | --- |
-| **SmolLM-135M FLASH vs FLASHINFER** | 9 tokens | `layer.0.self_attn` | 0.0519% | 2.49% |
-| **Llama-3.1-8B FLASH vs FLASHINFER** | 9 tokens | `layer.0.self_attn` | 0.0516% | 1.31% |
-| **Llama-3.1-8B FLASH vs FLASHINFER** | 1k tokens | `layer.0.self_attn` | 0.0749% | **3.29%** |
+| length | first divergent tap | layer-0 rel | final-norm rel |
+| --- | --- | --- | --- |
+| 9 tokens | `layer.0.self_attn` | 0.0516% | 1.31% |
+| 1k tokens | `layer.0.self_attn` | 0.0749% | 3.29% |
+| 2k tokens | `layer.0.self_attn` | 0.0722% | **2.92%** |
+| 4k tokens | `layer.0.self_attn` | 0.0693% | **2.96%** |
 
 Two new things relative to the earlier findings:
 
@@ -393,21 +394,32 @@ vLLM model**, regardless of numerical drift. For a production stack
 that needs to serve Phi-3-class architectures, this constraint is more
 load-bearing than the layer-0 numerical drift finding.
 
-**2. The length curve is monotonic, not a step function.** Final-norm
-relative error grows from 1.31% at 9 tokens to 3.29% at 1k — a 2.5×
-increase. That's a different shape than the V0 vs V1 length curve in
-Finding 3, which plateaus from 1k through 4k. The explanation is that
-FLASHINFER has two superimposed sources of difference:
+**2. The length curve is *also* a step-up-then-plateau, just at a
+higher plateau than V0 vs V1.** I initially thought FLASHINFER's
+length curve was monotonic (the original 9 → 1k jump was 2.5×, which
+read like growth in progress). Adding 2k and 4k tokens shows the
+plateau: 1k = 3.29%, 2k = 2.92%, 4k = 2.96%. The 1k number is even
+slightly higher than 2k and 4k — measurement noise within the
+saturated regime, not a trend.
 
-- The per-attention-kernel reduction-order diff (visible at 9 tokens,
-  baseline ~1.3% final).
-- An additional length-dependent diff from FLASHINFER's own paging /
-  block-merge strategy (compounds as more attention positions
-  participate in each token's computation).
+So both length curves saturate past ~1k tokens — they just saturate
+at different *heights*:
 
-V0 vs V1 with the *same* FLASH_ATTN kernel only had the second source,
-and that source saturated past one block. FLASH vs FLASHINFER has
-both, and they sum.
+| | 9 tokens | 1k+ plateau |
+| --- | --- | --- |
+| V0 vs V1, same FLASH_ATTN | bit-equal | ~2.8% |
+| FLASH_ATTN vs FLASHINFER | **1.31%** | **~3.0%** |
+
+The explanation matches: FLASHINFER has two superimposed sources of
+difference:
+
+- A constant kernel-level reduction-order diff (visible at 9 tokens,
+  baseline ~1.3% final). V0 vs V1 doesn't have this — same kernel.
+- A length-dependent paging diff that compounds once you cross the
+  first PagedAttention block boundary, then saturates because the
+  per-block error doesn't keep compounding to first order. This is
+  the same mechanism V0 vs V1 has, at the same plateau height
+  (~1.6-1.7% of additional final-norm rel).
 
 **Synthesis.** Firefly's per-layer attribution distinguishes three
 distinct failure modes that all look like "model output drifted" at
@@ -415,9 +427,9 @@ the eval level:
 
 | failure mode | example | first divergent tap | length curve |
 | --- | --- | --- | --- |
-| kernel reduction-order (small) | FLASH vs XFORMERS | `layer.7.self_attn` | unknown |
-| kernel reduction-order (large) | FLASH vs FLASHINFER | `layer.0.self_attn` | monotonic growth |
-| blocking strategy | V0 vs V1, same kernel | bit-equal short, `layer.0.self_attn` long | step function |
+| kernel reduction-order (small) | FLASH vs XFORMERS | `layer.7.self_attn` (Meta) / `layer.0` or `layer.2` (others) | unknown |
+| kernel reduction-order (large) | FLASH vs FLASHINFER | `layer.0.self_attn` | step-up to ~3% then plateau |
+| blocking strategy | V0 vs V1, same kernel | bit-equal short, `layer.0.self_attn` long | step-up to ~2.8% then plateau |
 
 Same attribution tool, three different signatures. Useful in
 production: an SRE seeing "Firefly says first divergence is
