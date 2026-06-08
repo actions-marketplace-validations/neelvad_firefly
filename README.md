@@ -167,11 +167,12 @@ the >1% threshold where real bugs live.
 | local path | Reference checked into your repo | (built-in) |
 | `hf://<org>/<repo>[@<rev>][/<subpath>]` | Reference hosted on HF Hub | (built-in) |
 | `s3://<bucket>/<prefix>` | Reference in private AWS bucket | `pip install 'firefly[s3]'` |
+| `gs://<bucket>/<prefix>` | Reference in private GCS bucket | `pip install 'firefly[gcs]'` |
 
-S3 uses boto3's default credential chain — env vars, `~/.aws/credentials`,
-or an IAM role on the CI runner. Files are mirrored into
-`$FIREFLY_CACHE_DIR` (or `~/.cache/firefly/s3/<bucket>/...`) with
-ETag-based incremental sync, so re-runs on a persistent CI cache only
+Both S3 and GCS use their library's default credential chain — env
+vars, local credential files, or instance/runner metadata. Files are
+mirrored into `$FIREFLY_CACHE_DIR` (or `~/.cache/firefly/<scheme>/<bucket>/...`)
+with ETag-based incremental sync, so re-runs on a persistent CI cache only
 re-download what changed upstream.
 
 ## Roadmap
@@ -188,10 +189,17 @@ Production-ready as a one-repo, one-team quality gate.
   embedding-table + cross-net architectures
 - Comprehensive vLLM test suite — FLASHINFER, multi-request batching,
   long-context PagedAttention boundaries, speculative decoding
+- Cross-family validation — Qwen-2.5-7B and Mistral-7B-v0.1
+  alongside SmolLM-135M and Llama-3.1-8B (sharpens or refutes
+  per-finding universality claims; see the blog)
 
-**v3:** GCS / Azure storage backends; shadow-mode capture against
-production traffic (requires a custom op so torch.compile / CUDA-graphed
-inference doesn't break).
+**v3 (in progress):**
+
+- GCS storage backend (`gs://`) — done; same ETag-based incremental
+  sync pattern as S3
+- Azure storage backend (`az://`) — planned
+- Shadow-mode capture against production traffic — requires a custom
+  op so torch.compile / CUDA-graphed inference doesn't break
 
 ## Development
 

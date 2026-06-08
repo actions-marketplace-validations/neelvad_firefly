@@ -8,11 +8,14 @@ Supported:
 - HuggingFace Hub: ``hf://<org>/<repo>[@<revision>][/<subpath>]``
 - S3: ``s3://<bucket>/<prefix>/`` (requires ``boto3``; uses default
   credential chain — env vars, ``~/.aws/credentials``, IAM roles)
+- GCS: ``gs://<bucket>/<prefix>/`` (requires ``google-cloud-storage``;
+  uses Application Default Credentials — ``GOOGLE_APPLICATION_CREDENTIALS``,
+  ``gcloud auth application-default login``, or GCE/GKE metadata server)
 
-Planned: GCS / Azure (v3). Each unsupported-but-recognized scheme
-raises ``NotImplementedError`` with a clear message and the planned
-version, so users hitting them get a useful pointer rather than a
-generic "file not found" later in the pipeline.
+Planned: Azure (v3). Unsupported-but-recognized schemes raise
+``NotImplementedError`` with a clear message and the planned version,
+so users hitting them get a useful pointer rather than a generic
+"file not found" later in the pipeline.
 """
 
 from __future__ import annotations
@@ -23,8 +26,6 @@ import re
 from pathlib import Path
 
 _PLANNED_BACKENDS: dict[str, str] = {
-    "gs": "v3",
-    "gcs": "v3",
     "az": "v3",
     "azure": "v3",
 }
@@ -47,16 +48,24 @@ _S3_REGEX = re.compile(
 )
 
 
+_GCS_REGEX = re.compile(
+    r"^(?:gs|gcs)://"
+    r"(?P<bucket>[^/]+)"
+    r"(?:/(?P<prefix>.*))?$",
+    re.IGNORECASE,
+)
+
+
 def resolve_reference(uri: str | Path) -> Path:
     """Resolve a reference URI to a local filesystem path.
 
     Local paths pass through unchanged. ``hf://`` URIs are downloaded
-    via ``huggingface_hub.snapshot_download``. ``s3://`` URIs are
-    mirrored into a local cache via boto3. In both remote cases the
-    local path is returned and cached on subsequent calls.
+    via ``huggingface_hub.snapshot_download``. ``s3://`` and ``gs://``
+    URIs are mirrored into a local cache via boto3 / google-cloud-storage.
+    In remote cases the local path is returned and cached on subsequent calls.
 
     Raises ``NotImplementedError`` for recognized-but-unimplemented
-    schemes (GCS, Azure) with the planned version.
+    schemes (Azure) with the planned version.
     """
     raw = str(uri)
 
@@ -70,12 +79,15 @@ def resolve_reference(uri: str | Path) -> Path:
     if scheme == "s3":
         return _resolve_s3(raw)
 
+    if scheme in ("gs", "gcs"):
+        return _resolve_gcs(raw)
+
     planned = _PLANNED_BACKENDS.get(scheme)
     if planned is not None:
         raise NotImplementedError(
             f"Reference scheme {scheme!r} is not yet supported "
             f"(planned for {planned}). Use a local path, hf://<org>/<repo>, "
-            f"or s3://<bucket>/<prefix>."
+            f"s3://<bucket>/<prefix>, or gs://<bucket>/<prefix>."
         )
 
     # Unknown scheme — treat as a path (matches Path's permissive behavior).
@@ -200,6 +212,95 @@ def _s3_cache_dir(bucket: str, prefix: str) -> Path:
     return _cache_root() / "s3" / bucket / safe_prefix
 
 
+def _resolve_gcs(uri: str) -> Path:
+    """Mirror a GCS prefix to a local cache, return the cache path.
+
+    ETag-based incremental sync, same shape as :func:`_resolve_s3`. Uses
+    Application Default Credentials (``GOOGLE_APPLICATION_CREDENTIALS``,
+    ``gcloud auth application-default login``, or GCE/GKE metadata).
+    """
+    m = _GCS_REGEX.match(uri)
+    if not m:
+        raise ValueError(
+            f"Invalid GCS URI {uri!r}. Expected format: "
+            f"gs://<bucket>/<prefix>"
+        )
+    bucket_name = m.group("bucket")
+    raw_prefix = (m.group("prefix") or "").strip("/")
+    prefix = f"{raw_prefix}/" if raw_prefix else ""
+
+    try:
+        from google.api_core.exceptions import GoogleAPICallError
+        from google.cloud import storage as gcs_storage
+    except ImportError as e:
+        raise ImportError(
+            "google-cloud-storage is required for gs:// references but "
+            "isn't installed. Install with: pip install 'firefly[gcs]' "
+            "(or pip install google-cloud-storage)."
+        ) from e
+
+    cache_dir = _gcs_cache_dir(bucket_name, raw_prefix)
+    client = gcs_storage.Client()
+
+    try:
+        _sync_gcs_prefix(client, bucket_name, prefix, cache_dir)
+    except GoogleAPICallError as e:
+        raise RuntimeError(
+            f"Failed to sync GCS reference {uri!r}: {e}\n"
+            f"Check that the bucket exists and your credentials are set "
+            f"(GOOGLE_APPLICATION_CREDENTIALS, `gcloud auth application-default "
+            f"login`, or a GCE/GKE service account)."
+        ) from e
+
+    return cache_dir
+
+
+def _gcs_cache_dir(bucket: str, prefix: str) -> Path:
+    """Cache directory for a given GCS (bucket, prefix) pair."""
+    safe_prefix = prefix.replace("/", "_") if prefix else "_root"
+    return _cache_root() / "gcs" / bucket / safe_prefix
+
+
+def _sync_gcs_prefix(client, bucket_name: str, prefix: str, cache_dir: Path) -> None:
+    """Mirror bucket/prefix into cache_dir, skipping unchanged objects."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = cache_dir / "_manifest.json"
+    old_manifest: dict[str, str] = {}
+    if manifest_path.exists():
+        old_manifest = json.loads(manifest_path.read_text())
+
+    new_manifest: dict[str, str] = {}
+    bucket = client.bucket(bucket_name)
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        key = blob.name
+        etag = blob.etag
+        # GCS sometimes returns directory-marker blobs (0-byte, key ending in /).
+        if key.endswith("/"):
+            continue
+        relpath = key[len(prefix):] if prefix and key.startswith(prefix) else key
+        if not relpath:
+            continue
+        new_manifest[key] = etag
+        local_path = cache_dir / relpath
+        if old_manifest.get(key) == etag and local_path.exists():
+            continue
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(local_path))
+
+    # Remove objects that disappeared upstream.
+    for stale_key in set(old_manifest) - set(new_manifest):
+        relpath = (
+            stale_key[len(prefix):]
+            if prefix and stale_key.startswith(prefix)
+            else stale_key
+        )
+        stale_path = cache_dir / relpath
+        if stale_path.exists():
+            stale_path.unlink()
+
+    manifest_path.write_text(json.dumps(new_manifest, indent=2, sort_keys=True))
+
+
 def publish_reference(
     local_path: Path,
     uri: str,
@@ -216,10 +317,13 @@ def publish_reference(
       the HF commit.
     * ``s3://<bucket>/<prefix>`` — uploads each file under
       ``local_path`` to ``<bucket>/<prefix>/<relpath>`` via boto3.
+    * ``gs://<bucket>/<prefix>`` — uploads each file under
+      ``local_path`` to ``<bucket>/<prefix>/<relpath>`` via
+      google-cloud-storage.
 
     Local destinations are intentionally not supported — use
-    ``cp -r`` instead. GCS / Azure raise ``NotImplementedError`` with
-    the planned version.
+    ``cp -r`` instead. Azure raises ``NotImplementedError`` with the
+    planned version.
     """
     if not local_path.exists():
         raise FileNotFoundError(f"Reference directory does not exist: {local_path}")
@@ -238,12 +342,14 @@ def publish_reference(
         return _publish_hf(local_path, uri, commit_message=commit_message)
     if scheme == "s3":
         return _publish_s3(local_path, uri)
+    if scheme in ("gs", "gcs"):
+        return _publish_gcs(local_path, uri)
 
     planned = _PLANNED_BACKENDS.get(scheme)
     if planned is not None:
         raise NotImplementedError(
             f"Publishing to scheme {scheme!r} is not yet supported "
-            f"(planned for {planned}). Use hf:// or s3://."
+            f"(planned for {planned}). Use hf://, s3://, or gs://."
         )
     raise ValueError(f"Unknown URI scheme {scheme!r}")
 
@@ -321,6 +427,45 @@ def _publish_s3(local_path: Path, uri: str) -> None:
             f"Failed to publish to S3 {uri!r}: {e}\n"
             f"Check that the bucket exists and your credentials have "
             f"PutObject permission."
+        ) from e
+
+
+def _publish_gcs(local_path: Path, uri: str) -> None:
+    """Upload each file under local_path to gs://bucket/prefix/<relpath>."""
+    m = _GCS_REGEX.match(uri)
+    if not m:
+        raise ValueError(
+            f"Invalid GCS URI {uri!r}. Expected format: "
+            f"gs://<bucket>/<prefix>"
+        )
+    bucket_name = m.group("bucket")
+    raw_prefix = (m.group("prefix") or "").strip("/")
+    prefix = f"{raw_prefix}/" if raw_prefix else ""
+
+    try:
+        from google.api_core.exceptions import GoogleAPICallError
+        from google.cloud import storage as gcs_storage
+    except ImportError as e:
+        raise ImportError(
+            "google-cloud-storage is required for gs:// publish but isn't "
+            "installed. Install with: pip install 'firefly[gcs]' "
+            "(or pip install google-cloud-storage)."
+        ) from e
+
+    client = gcs_storage.Client()
+    try:
+        bucket = client.bucket(bucket_name)
+        for file in sorted(local_path.rglob("*")):
+            if not file.is_file():
+                continue
+            relpath = file.relative_to(local_path).as_posix()
+            key = f"{prefix}{relpath}"
+            bucket.blob(key).upload_from_filename(str(file))
+    except GoogleAPICallError as e:
+        raise RuntimeError(
+            f"Failed to publish to GCS {uri!r}: {e}\n"
+            f"Check that the bucket exists and your service account has "
+            f"storage.objects.create permission."
         ) from e
 
 

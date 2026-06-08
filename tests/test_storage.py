@@ -18,11 +18,6 @@ def test_relative_path_passes_through() -> None:
     assert resolve_reference("./reference") == Path("./reference")
 
 
-def test_planned_gcs_scheme_raises_with_version() -> None:
-    with pytest.raises(NotImplementedError, match="planned for v3"):
-        resolve_reference("gs://my-bucket/ref")
-
-
 def test_planned_azure_scheme_raises_with_version() -> None:
     with pytest.raises(NotImplementedError, match="planned for v3"):
         resolve_reference("az://my-container/ref")
@@ -268,7 +263,7 @@ def test_publish_file_instead_of_dir_raises(tmp_path: Path) -> None:
 def test_publish_planned_scheme_raises(tmp_path: Path) -> None:
     ref = _make_reference_dir(tmp_path)
     with pytest.raises(NotImplementedError, match="planned for v3"):
-        publish_reference(ref, "gs://bucket/ref")
+        publish_reference(ref, "az://container/ref")
 
 
 def test_publish_hf_calls_upload_folder(tmp_path: Path) -> None:
@@ -340,3 +335,151 @@ def test_publish_s3_root_prefix(tmp_path: Path) -> None:
         publish_reference(ref, "s3://my-bucket")
     keys = sorted(call.args[2] for call in client.upload_file.call_args_list)
     assert keys == ["manifest.json", "tolerances.json", "weights.safetensors"]
+
+
+# --- GCS backend ------------------------------------------------------------
+
+
+def _fake_gcs_client(objects: dict[str, tuple[str, bytes]]) -> MagicMock:
+    """Build a MagicMock GCS client backed by an in-memory object map.
+
+    ``objects`` maps blob_name -> (etag, body). Tracks two counters on
+    the client itself for tests to inspect:
+
+    * ``client.downloads`` — list of (key, local_path) tuples written
+      by ``download_to_filename``.
+    * ``client.uploads`` — list of (key, local_path) tuples written by
+      ``bucket(...).blob(key).upload_from_filename``.
+    """
+    client = MagicMock()
+    client.downloads = []
+    client.uploads = []
+
+    def make_blob(name: str, etag: str, body: bytes) -> MagicMock:
+        blob = MagicMock()
+        blob.name = name
+        blob.etag = etag
+
+        def download_to_filename(local_path: str) -> None:
+            Path(local_path).write_bytes(body)
+            client.downloads.append((name, local_path))
+
+        blob.download_to_filename.side_effect = download_to_filename
+        return blob
+
+    def list_blobs(_bucket, prefix: str = ""):
+        return [
+            make_blob(name, etag, body)
+            for name, (etag, body) in objects.items()
+            if name.startswith(prefix)
+        ]
+
+    client.list_blobs.side_effect = list_blobs
+
+    bucket_mock = MagicMock()
+
+    def blob(key: str) -> MagicMock:
+        bl = MagicMock()
+
+        def upload_from_filename(local_path: str) -> None:
+            client.uploads.append((key, local_path))
+
+        bl.upload_from_filename.side_effect = upload_from_filename
+        return bl
+
+    bucket_mock.blob.side_effect = blob
+    client.bucket.return_value = bucket_mock
+    return client
+
+
+def test_gcs_uri_mirrors_prefix_to_cache(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    objects = {
+        "refs/v1/tap_index.json": ("etag-a", b'{"taps": []}'),
+        "refs/v1/activations.safetensors": ("etag-b", b"binary-blob"),
+        "refs/v1/nested/extra.json": ("etag-c", b"{}"),
+    }
+    client = _fake_gcs_client(objects)
+
+    with patch("google.cloud.storage.Client", return_value=client):
+        result = resolve_reference("gs://my-bucket/refs/v1")
+
+    assert (result / "tap_index.json").read_bytes() == b'{"taps": []}'
+    assert (result / "activations.safetensors").read_bytes() == b"binary-blob"
+    assert (result / "nested" / "extra.json").read_bytes() == b"{}"
+    assert (result / "_manifest.json").exists()
+
+
+def test_gcs_uri_skips_redownload_when_etag_matches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    objects = {"refs/v1/file.json": ("etag-a", b"{}")}
+
+    client1 = _fake_gcs_client(objects)
+    with patch("google.cloud.storage.Client", return_value=client1):
+        resolve_reference("gs://my-bucket/refs/v1")
+
+    client2 = _fake_gcs_client(objects)
+    with patch("google.cloud.storage.Client", return_value=client2):
+        resolve_reference("gs://my-bucket/refs/v1")
+
+    assert len(client1.downloads) == 1, "first resolve should download once"
+    assert len(client2.downloads) == 0, "second resolve should skip download (ETag match)"
+
+
+def test_gcs_uri_redownloads_when_etag_changes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    with patch(
+        "google.cloud.storage.Client",
+        return_value=_fake_gcs_client({"refs/v1/file.json": ("etag-a", b'{"v": 1}')}),
+    ):
+        result = resolve_reference("gs://my-bucket/refs/v1")
+        assert (result / "file.json").read_bytes() == b'{"v": 1}'
+
+    with patch(
+        "google.cloud.storage.Client",
+        return_value=_fake_gcs_client({"refs/v1/file.json": ("etag-b", b'{"v": 2}')}),
+    ):
+        result = resolve_reference("gs://my-bucket/refs/v1")
+        assert (result / "file.json").read_bytes() == b'{"v": 2}'
+
+
+def test_gcs_uri_alias_long_scheme_works(tmp_path: Path, monkeypatch) -> None:
+    """Both ``gs://`` and ``gcs://`` should resolve."""
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    objects = {"file.json": ("etag-a", b"{}")}
+    client = _fake_gcs_client(objects)
+    with patch("google.cloud.storage.Client", return_value=client):
+        resolve_reference("gcs://my-bucket")
+    client.list_blobs.assert_called()
+
+
+def test_publish_gcs_uploads_each_file(tmp_path: Path) -> None:
+    ref = _make_reference_dir(tmp_path)
+    client = _fake_gcs_client({})
+    with patch("google.cloud.storage.Client", return_value=client):
+        publish_reference(ref, "gs://my-bucket/refs/v1")
+
+    # 3 files in the reference dir → 3 uploads under the prefix.
+    keys = sorted(key for key, _local in client.uploads)
+    assert keys == [
+        "refs/v1/manifest.json",
+        "refs/v1/tolerances.json",
+        "refs/v1/weights.safetensors",
+    ]
+    client.bucket.assert_called_once_with("my-bucket")
+
+
+def test_gcs_missing_library_raises_import_error(monkeypatch) -> None:
+    """Helpful error pointing at the install command when the library isn't installed."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("google.cloud") or name.startswith("google.api_core"):
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ImportError, match=r"firefly\[gcs\]"):
+        resolve_reference("gs://my-bucket/refs/v1")
