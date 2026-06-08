@@ -355,6 +355,12 @@ def _do_capture(
         enforce_eager=True,
         max_model_len=max_seq_len,
         gpu_memory_utilization=gpu_memory_utilization,
+        # Some HF model repos (e.g., MPT) ship custom modeling code; vLLM
+        # needs trust_remote_code=True to instantiate them. Always-on is
+        # fine here because (a) this script runs in an isolated Modal
+        # container, not on the local machine, and (b) model IDs are
+        # explicit CLI args, not arbitrary inputs.
+        trust_remote_code=True,
     )
     if speculative_tokens > 0:
         # NGram-based speculative decoding: no draft model required, vLLM
