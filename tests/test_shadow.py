@@ -128,6 +128,45 @@ def test_full_tensor_policy_default_never_records_full() -> None:
         assert p.should_record_full(step) is False
 
 
+def test_full_tensor_policy_on_alert_only_with_flag() -> None:
+    """on_alert=True records when alerting is set; doesn't record otherwise."""
+    p = shadow.FullTensorPolicy(on_alert=True)
+    assert p.should_record_full(0, alerting=False) is False
+    assert p.should_record_full(100, alerting=False) is False
+    assert p.should_record_full(0, alerting=True) is True
+    assert p.should_record_full(100, alerting=True) is True
+
+
+def test_full_tensor_policy_on_alert_false_ignores_flag() -> None:
+    """on_alert=False (default) → alerting flag is ignored entirely."""
+    p = shadow.FullTensorPolicy(on_alert=False)
+    assert p.should_record_full(0, alerting=True) is False
+    assert p.should_record_full(100, alerting=True) is False
+
+
+def test_tapper_set_alert_drives_blob_capture() -> None:
+    """Toggle the alert flag mid-loop; only captures during alert get blobs."""
+    buf = shadow._Buffer(max_size=100)
+    policy = shadow.FullTensorPolicy(on_alert=True)
+    with shadow.Tapper(buf, full_tensor=policy) as t:
+        # 2 captures with no alert
+        torch.ops.firefly.capture(torch.ones(2), "tap")
+        torch.ops.firefly.capture(torch.ones(2), "tap")
+        # Toggle alert on, 2 captures
+        t.set_alert(True)
+        torch.ops.firefly.capture(torch.ones(2), "tap")
+        torch.ops.firefly.capture(torch.ones(2), "tap")
+        # Clear alert, 1 more capture
+        t.set_alert(False)
+        torch.ops.firefly.capture(torch.ones(2), "tap")
+
+    events = _drain(buf)
+    assert len(events) == 5
+    has_blob = [e.tensor is not None for e in events]
+    # Captures 0,1: no alert → no blob; 2,3: alert → blob; 4: cleared → no blob
+    assert has_blob == [False, False, True, True, False]
+
+
 def test_tapper_records_full_tensor_per_policy() -> None:
     buf = shadow._Buffer(max_size=100)
     policy = shadow.FullTensorPolicy(first_n_steps=2)
@@ -284,6 +323,76 @@ def test_aggregate_records_full_tensor_blobs(tmp_path: Path) -> None:
 
     agg = shadow.aggregate(tmp_path / "logs")
     assert len(agg["layer.0"].full_tensor_blobs) == 2
+
+
+def test_aggregate_handles_sharded_jsonl_layout(tmp_path: Path) -> None:
+    """Cloud-streaming sinks write stats-00000.jsonl, stats-00001.jsonl, ...
+    aggregate() should read all shards in lex order and produce the same
+    result as the singleton path."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    # Two shards, three records each.
+    def _line(tap, mean, abs_mean, abs_max):
+        return json.dumps({
+            "request_id": None,
+            "tap_name": tap,
+            "step": 0,
+            "stats": {"mean": mean, "abs_mean": abs_mean, "abs_max": abs_max, "std": 0.0},
+            "timestamp": 0.0,
+        }) + "\n"
+
+    (log_dir / "stats-00000.jsonl").write_text(
+        _line("layer.0", 0.1, 1.0, 2.0)
+        + _line("layer.1", 0.2, 2.0, 3.0)
+        + _line("layer.0", 0.3, 3.0, 4.0)
+    )
+    (log_dir / "stats-00001.jsonl").write_text(
+        _line("layer.0", 0.4, 4.0, 5.0)
+        + _line("layer.1", 0.5, 5.0, 6.0)
+        + _line("layer.1", 0.6, 6.0, 7.0)
+    )
+
+    agg = shadow.aggregate(log_dir)
+    assert set(agg.keys()) == {"layer.0", "layer.1"}
+    assert agg["layer.0"].n_events == 3
+    assert agg["layer.1"].n_events == 3
+    # abs_mean values for layer.0 across shards: [1.0, 3.0, 4.0]; max = 4.0
+    assert agg["layer.0"].abs_mean_max == pytest.approx(4.0)
+    assert agg["layer.1"].abs_mean_max == pytest.approx(6.0)
+
+
+def test_aggregate_prefers_shards_when_both_present(tmp_path: Path) -> None:
+    """If a legacy stats.jsonl exists alongside new shards, shards win."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    def _line(tap, abs_mean):
+        return json.dumps({
+            "tap_name": tap, "step": 0,
+            "stats": {"abs_mean": abs_mean, "abs_max": abs_mean, "mean": 0, "std": 0},
+            "timestamp": 0.0,
+        }) + "\n"
+
+    (log_dir / "stats.jsonl").write_text(_line("OLD", 99.0))
+    (log_dir / "stats-00000.jsonl").write_text(_line("NEW", 1.0))
+
+    agg = shadow.aggregate(log_dir)
+    # Shards win; the singleton's "OLD" tap is ignored.
+    assert "NEW" in agg
+    assert "OLD" not in agg
+
+
+def test_load_tap_index_reads_sidecar(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "tap_index.json").write_text(json.dumps({"0": "layer.0", "7": "layer.7"}))
+    idx = shadow.load_tap_index(log_dir)
+    assert idx == {0: "layer.0", 7: "layer.7"}
+
+
+def test_load_tap_index_returns_empty_when_missing(tmp_path: Path) -> None:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    assert shadow.load_tap_index(log_dir) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +784,31 @@ def test_static_full_tensor_policy_explicit_n_blob_slots(tmp_path: Path) -> None
         tmp_path / "logs", {0: "t"}, full_tensor_policy=policy, device="cpu"
     )
     assert t.blob_buf.shape == (32, 128)
+
+
+def test_static_full_tensor_policy_on_alert_allocates_blob_buffers(tmp_path: Path) -> None:
+    """on_alert=True alone (no first_n / every_n) still allocates blob buffers."""
+    policy = shadow.StaticFullTensorPolicy(on_alert=True, max_blob_numel=64)
+    t = shadow.StaticTapper(
+        tmp_path / "logs", {0: "t"}, full_tensor_policy=policy, device="cpu"
+    )
+    # Auto-sized to 16 (since first_n=0 and on_alert is active).
+    assert t.blob_buf.shape == (16, 64)
+
+
+def test_static_tapper_set_alert_writes_gpu_flag(tmp_path: Path) -> None:
+    """StaticTapper.set_alert updates the GPU-resident alert_flag tensor."""
+    t = shadow.StaticTapper(
+        tmp_path / "logs",
+        {0: "t"},
+        full_tensor_policy=shadow.StaticFullTensorPolicy(on_alert=True),
+        device="cpu",
+    )
+    assert t.alert_flag[0].item() == 0
+    t.set_alert(True)
+    assert t.alert_flag[0].item() == 1
+    t.set_alert(False)
+    assert t.alert_flag[0].item() == 0
 
 
 def test_static_drain_attaches_blob_tensors_when_first_n_policy_fires(tmp_path: Path) -> None:

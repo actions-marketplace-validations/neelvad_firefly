@@ -113,12 +113,15 @@ class FullTensorPolicy:
     every_n_steps: int = 0
     """Record full tensors every Nth step. 0 = disabled."""
     on_alert: bool = False
-    """Reserved for alert-driven full-tensor capture (not yet implemented)."""
+    """If True, record full tensors whenever the active Tapper's
+    ``alerting`` flag is set. Caller toggles via :meth:`Tapper.set_alert`."""
 
-    def should_record_full(self, step: int) -> bool:
+    def should_record_full(self, step: int, alerting: bool = False) -> bool:
         if step < self.first_n_steps:
             return True
-        return self.every_n_steps > 0 and step % self.every_n_steps == 0
+        if self.every_n_steps > 0 and step % self.every_n_steps == 0:
+            return True
+        return self.on_alert and alerting
 
 
 @dataclass
@@ -154,6 +157,17 @@ class Tapper:
         self._full_tensor = full_tensor or FullTensorPolicy()
         self._request_id = request_id
         self._step_by_tap: dict[str, _TapState] = {}
+        self._alerting = False
+
+    def set_alert(self, alerting: bool) -> None:
+        """Toggle the alert flag.
+
+        When the policy has ``on_alert=True``, every subsequent capture
+        records a full tensor as long as this flag is set. Caller is
+        responsible for clearing the flag (e.g. after N seconds of
+        recording, or after the underlying alert condition clears).
+        """
+        self._alerting = alerting
 
     def __enter__(self) -> Tapper:
         if _active_tapper() is not None:
@@ -172,7 +186,7 @@ class Tapper:
             return
 
         state = self._step_by_tap.setdefault(name, _TapState())
-        record_full = self._full_tensor.should_record_full(state.step)
+        record_full = self._full_tensor.should_record_full(state.step, self._alerting)
         stats = _summary_stats(x)
         full_tensor = x.detach().cpu().contiguous() if record_full else None
         self._buffer.push(
@@ -658,6 +672,16 @@ class TapAggregate:
 def aggregate(shadow_log_dir: str | Path) -> dict[str, TapAggregate]:
     """Read a shadow log directory, group by tap, compute per-tap distributions.
 
+    Handles two on-disk layouts:
+
+    * Single-file (eager-mode / local sink default): ``stats.jsonl``
+    * Sharded (cloud-streaming sink default): ``stats-00000.jsonl``,
+      ``stats-00001.jsonl``, ...
+
+    Shards are read in lexical order so events stay in capture order
+    within each shard; cross-shard ordering preserves the wall-clock
+    order the drain wrote them in.
+
     For each tap name observed, returns a :class:`TapAggregate` with
     p50 / p95 / max of the abs-mean and abs-max series, plus the list
     of full-tensor blobs available for that tap. Downstream code can
@@ -671,17 +695,13 @@ def aggregate(shadow_log_dir: str | Path) -> dict[str, TapAggregate]:
     """
     path = Path(shadow_log_dir)
     by_tap: dict[str, dict[str, list]] = {}
-    with (path / "stats.jsonl").open() as f:
-        for line in f:
-            rec = json.loads(line)
-            t = rec["tap_name"]
-            slot = by_tap.setdefault(
-                t, {"abs_mean": [], "abs_max": [], "blobs": []}
-            )
-            slot["abs_mean"].append(rec["stats"]["abs_mean"])
-            slot["abs_max"].append(rec["stats"]["abs_max"])
-            if "blob_path" in rec:
-                slot["blobs"].append(rec["blob_path"])
+    for rec in _iter_jsonl_records(path):
+        t = rec["tap_name"]
+        slot = by_tap.setdefault(t, {"abs_mean": [], "abs_max": [], "blobs": []})
+        slot["abs_mean"].append(rec["stats"]["abs_mean"])
+        slot["abs_max"].append(rec["stats"]["abs_max"])
+        if "blob_path" in rec:
+            slot["blobs"].append(rec["blob_path"])
 
     out: dict[str, TapAggregate] = {}
     for tap_name, slot in by_tap.items():
@@ -702,6 +722,55 @@ def aggregate(shadow_log_dir: str | Path) -> dict[str, TapAggregate]:
             full_tensor_blobs=sorted(slot["blobs"]),
         )
     return out
+
+
+def _iter_jsonl_records(path: Path):
+    """Yield JSONL records from a shadow-log directory.
+
+    Layout dispatch:
+    * ``stats.jsonl`` present → read it as a single stream
+    * ``stats-NNNNN.jsonl`` shards → read them in lexical order
+
+    If both are present (e.g. legacy + new-style cohabiting), the
+    sharded stream is preferred and the singleton is logged as
+    skipped.
+    """
+    shards = sorted(path.glob("stats-*.jsonl"))
+    if shards:
+        if (path / "stats.jsonl").exists():
+            import sys
+            print(
+                f"[firefly] aggregate: both stats.jsonl and shards present in "
+                f"{path}; reading shards, ignoring singleton.",
+                file=sys.stderr,
+            )
+        for shard in shards:
+            with shard.open() as f:
+                for line in f:
+                    yield json.loads(line)
+        return
+    # No shards. Fall back to single file.
+    stats_path = path / "stats.jsonl"
+    if stats_path.exists():
+        with stats_path.open() as f:
+            for line in f:
+                yield json.loads(line)
+
+
+def load_tap_index(shadow_log_dir: str | Path) -> dict[int, str]:
+    """Read the ``tap_index.json`` sidecar a :class:`StaticTapper` writes.
+
+    Returns an empty dict if no sidecar is present (eager-mode logs
+    don't write one — the tap names live directly in each event).
+    Useful for downstream tools that want to enumerate all known taps
+    without scanning the whole stats stream.
+    """
+    path = Path(shadow_log_dir) / "tap_index.json"
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    # JSON keys are strings; restore to int.
+    return {int(k): v for k, v in raw.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -813,8 +882,10 @@ def _get_stats_kernel():
         blob_buf_ptr,                     # [n_blob_slots, max_blob_numel]
         blob_meta_ptr,                    # [n_blob_slots, 2] int32 (numel, global_idx)
         blob_counter_ptr,                 # [1] int32 blob-ring-buffer atomic counter
+        alert_flag_ptr,                   # [1] int32 — CPU-toggled alert flag
         first_n_steps,                    # int — record blob if idx < this
         every_n_steps,                    # int — record blob if idx % this == 0; 0 disables
+        on_alert_enabled,                 # int — 1: consult alert_flag; 0: ignore
         n_blob_slots,                     # int — ring buffer capacity
         max_blob_numel,                   # int — per-slot blob capacity
         n_elements,                       # numel(x)
@@ -845,10 +916,16 @@ def _get_stats_kernel():
         # releases.
         tl.store(stats_buf_ptr + idx * 5 + 4, tap_idx * 1.0)
 
-        # Blob recording decision (composable first_n + every_n).
+        # Blob recording decision (composable first_n + every_n + on_alert).
+        # The alert flag is GPU-resident and CPU-toggled. Each kernel call
+        # reads the current value; the captured graph references the
+        # tensor by pointer, so subsequent CPU writes between replays are
+        # visible (modulo memcpy ordering — see StaticTapper.set_alert).
         record_first_n = (first_n_steps > 0) & (idx < first_n_steps)
         record_every_n = (every_n_steps > 0) & ((idx % every_n_steps) == 0)
-        should_record_blob = record_first_n | record_every_n
+        alert_now = tl.load(alert_flag_ptr) != 0
+        record_alert = (on_alert_enabled != 0) & alert_now
+        should_record_blob = record_first_n | record_every_n | record_alert
 
         # Atomic blob-slot allocation, gated by should_record. When the
         # mask is off, the atomic_add is skipped (its return value is
@@ -890,20 +967,21 @@ def capture_static(
     blob_buf: torch.Tensor,
     blob_meta: torch.Tensor,
     blob_counter: torch.Tensor,
+    alert_flag: torch.Tensor,
     first_n_steps: int,
     every_n_steps: int,
+    on_alert_enabled: int,
 ) -> torch.Tensor:
     """CUDA-graph-safe pass-through capture.
 
     Always writes summary stats to ``stats_buf[counter]`` and atomically
     increments ``counter``. Conditionally writes the full tensor to a
-    ring-buffer slot ``blob_buf[blob_counter % n_blob_slots]`` when
-    either ``first_n_steps`` or ``every_n_steps`` policy fires. Returns
-    ``x`` unchanged. All work happens on-device; the Triton kernel
-    launch is captureable into a CUDA graph.
+    ring-buffer slot ``blob_buf[blob_counter % n_blob_slots]`` when any
+    of three policies fires: ``first_n_steps``, ``every_n_steps``, or
+    ``on_alert_enabled & alert_flag[0]``. Returns ``x`` unchanged.
 
     To opt out of full-tensor recording, pass 1x1 placeholder
-    ``blob_buf`` / ``blob_meta`` buffers and both step counts at 0;
+    ``blob_buf`` / ``blob_meta`` buffers and all three policy ints at 0;
     the kernel runs but all blob writes are masked off. The
     :class:`StaticTapper` handles this setup automatically.
     """
@@ -915,8 +993,9 @@ def capture_static(
     max_blob_numel = blob_buf.shape[1]
     kernel[(1,)](
         x, stats_buf, counter, tap_idx,
-        blob_buf, blob_meta, blob_counter,
-        first_n_steps, every_n_steps, n_blob_slots, max_blob_numel,
+        blob_buf, blob_meta, blob_counter, alert_flag,
+        first_n_steps, every_n_steps, on_alert_enabled,
+        n_blob_slots, max_blob_numel,
         n, BLOCK_SIZE=BLOCK,
     )
     return x.clone()
@@ -931,8 +1010,10 @@ def _capture_static_fake(
     blob_buf: torch.Tensor,
     blob_meta: torch.Tensor,
     blob_counter: torch.Tensor,
+    alert_flag: torch.Tensor,
     first_n_steps: int,
     every_n_steps: int,
+    on_alert_enabled: int,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
@@ -979,17 +1060,24 @@ class StaticFullTensorPolicy:
 
     first_n_steps: int = 0
     every_n_steps: int = 0
+    on_alert: bool = False
+    """If True, the kernel honors :attr:`StaticTapper.alert_flag`. Caller
+    toggles via :meth:`StaticTapper.set_alert`."""
     n_blob_slots: int = 0
     max_blob_numel: int = 200_000
 
     def is_recording(self) -> bool:
-        return self.first_n_steps > 0 or self.every_n_steps > 0
+        return self.first_n_steps > 0 or self.every_n_steps > 0 or self.on_alert
 
     def effective_n_blob_slots(self) -> int:
         """Resolve auto-sized slot counts."""
         if self.n_blob_slots > 0:
             return self.n_blob_slots
-        return max(self.first_n_steps, 16 if self.every_n_steps > 0 else 0)
+        # on_alert needs a larger ring; alerts can fire many times consecutively.
+        return max(
+            self.first_n_steps,
+            16 if (self.every_n_steps > 0 or self.on_alert) else 0,
+        )
 
 
 class StaticTapper:
@@ -1064,12 +1152,31 @@ class StaticTapper:
             self.blob_meta = torch.zeros((1, 2), device=device, dtype=torch.int32)
             self.n_blob_slots = 1
         self.blob_counter = torch.zeros((1,), device=device, dtype=torch.int32)
+        # Alert flag: CPU toggles via :meth:`set_alert`, kernel reads each
+        # call. Lives on GPU so it's accessible to the captured kernel.
+        self.alert_flag = torch.zeros((1,), device=device, dtype=torch.int32)
 
         # (sink already constructed above; only the blob/stats GPU buffers
         # had to wait for the policy decision.)
         self._drained_count = 0
         self._drained_blob_count = 0
         self._drain_thread: _StaticDrainThread | None = None
+
+    def set_alert(self, alerting: bool) -> None:
+        """Toggle the GPU-resident alert flag.
+
+        When the policy has ``on_alert=True``, the kernel reads this flag
+        every call and records a full tensor while it's set. Caller is
+        responsible for clearing the flag (e.g. after the alert source
+        clears, or after recording the desired number of post-alert frames).
+
+        Note on CUDA-graph synchronization: ``alert_flag.fill_(...)`` is an
+        async memcpy. Between setting the flag from CPU and the next
+        ``g.replay()`` there is normally enough latency for the write to
+        land; in tight loops, call ``torch.cuda.synchronize()`` between
+        ``set_alert`` and ``g.replay()`` to guarantee visibility.
+        """
+        self.alert_flag.fill_(1 if alerting else 0)
 
     def __enter__(self) -> StaticTapper:
         if _active_static_tapper() is not None:
@@ -1224,17 +1331,18 @@ def tap_static(idx: int, name: str | None = None):
                 t.index_to_name[idx] = name
             first_n = t.full_tensor_policy.first_n_steps
             every_n = t.full_tensor_policy.every_n_steps
+            on_alert_enabled = 1 if t.full_tensor_policy.on_alert else 0
             if isinstance(out, torch.Tensor):
                 return torch.ops.firefly.capture_static(
                     out, t.stats_buf, t.counter, idx,
-                    t.blob_buf, t.blob_meta, t.blob_counter,
-                    first_n, every_n,
+                    t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                    first_n, every_n, on_alert_enabled,
                 )
             if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
                 head = torch.ops.firefly.capture_static(
                     out[0], t.stats_buf, t.counter, idx,
-                    t.blob_buf, t.blob_meta, t.blob_counter,
-                    first_n, every_n,
+                    t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                    first_n, every_n, on_alert_enabled,
                 )
                 return (head, *out[1:])
             return out
