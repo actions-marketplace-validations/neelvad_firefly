@@ -152,6 +152,52 @@ def _make_image(pins: dict) -> modal.Image:
 # ---------------------------------------------------------------------------
 
 
+def _find_model_layout(model):
+    """Probe the vLLM model's module tree and return per-layer hook anchors.
+
+    Returns: (layers, attn_attr, mlp_attr, final_norm_module)
+
+    Different model families wrap their per-decoder-layer modules
+    differently:
+
+    * Llama / Gemma / Qwen / Mistral / Yi / SmolLM / Phi-3:
+      ``model.model.layers[i].self_attn`` and ``.mlp``,
+      final norm at ``model.model.norm``.
+    * Falcon / BLOOM family: ``model.transformer.h[i].self_attention``
+      and ``.mlp``, final norm at ``model.transformer.ln_f``.
+    * MPT family: ``model.transformer.blocks[i].attn`` and ``.ffn``,
+      final norm at ``model.transformer.norm_f``.
+
+    Picks the first match. Names are normalized to ``self_attn`` /
+    ``mlp`` in the tap dictionary regardless of source family, so
+    downstream code doesn't need to special-case them.
+    """
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers, "self_attn", "mlp", model.model.norm
+
+    if hasattr(model, "transformer"):
+        t = model.transformer
+        if hasattr(t, "h"):
+            layers = t.h
+            first = layers[0]
+            attn_attr = "self_attention" if hasattr(first, "self_attention") else "attn"
+            mlp_attr = "mlp" if hasattr(first, "mlp") else "ffn"
+            norm = getattr(t, "ln_f", None) or getattr(t, "norm_f", None)
+            return layers, attn_attr, mlp_attr, norm
+        if hasattr(t, "blocks"):
+            layers = t.blocks
+            first = layers[0]
+            attn_attr = "attn" if hasattr(first, "attn") else "self_attn"
+            mlp_attr = "ffn" if hasattr(first, "ffn") else "mlp"
+            norm = getattr(t, "norm_f", None) or getattr(t, "ln_f", None)
+            return layers, attn_attr, mlp_attr, norm
+
+    raise RuntimeError(
+        f"Unknown model layout for {type(model).__name__}; "
+        f"module attrs: {[a for a in dir(model) if not a.startswith('_')][:30]}"
+    )
+
+
 def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
     """Inside vLLM worker: install forward hooks on Firefly's tap points.
 
@@ -197,11 +243,12 @@ def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
 
         return hook
 
-    for i, layer in enumerate(model.model.layers):
-        handles.append(layer.self_attn.register_forward_hook(make_hook(f"layer.{i}.self_attn")))
-        handles.append(layer.mlp.register_forward_hook(make_hook(f"layer.{i}.mlp")))
+    layers, attn_attr, mlp_attr, final_norm = _find_model_layout(model)
+    for i, layer in enumerate(layers):
+        handles.append(getattr(layer, attn_attr).register_forward_hook(make_hook(f"layer.{i}.self_attn")))
+        handles.append(getattr(layer, mlp_attr).register_forward_hook(make_hook(f"layer.{i}.mlp")))
         handles.append(layer.register_forward_hook(make_hook(f"layer.{i}")))
-    handles.append(model.model.norm.register_forward_hook(make_hook("final_norm")))
+    handles.append(final_norm.register_forward_hook(make_hook("final_norm")))
 
     model._firefly_captures = captures
     model._firefly_handles = handles
