@@ -456,6 +456,72 @@ def test_tap_static_decorator_is_noop_without_active_tapper() -> None:
     assert y.tolist() == [2.0, 2.0, 2.0]
 
 
+def test_static_full_tensor_policy_default_no_blob_buffers(tmp_path: Path) -> None:
+    """No policy → 1x1 placeholder blob buffers (negligible memory)."""
+    t = shadow.StaticTapper(tmp_path / "logs", {0: "t"}, device="cpu")
+    assert t.blob_buf.shape == (1, 1)
+    assert t.blob_meta.shape == (1,)
+
+
+def test_static_full_tensor_policy_allocates_real_blob_buffers(tmp_path: Path) -> None:
+    policy = shadow.StaticFullTensorPolicy(first_n_steps=5, max_blob_numel=128)
+    t = shadow.StaticTapper(
+        tmp_path / "logs", {0: "t"}, full_tensor_policy=policy, device="cpu"
+    )
+    assert t.blob_buf.shape == (5, 128)
+    assert t.blob_meta.shape == (5,)
+
+
+def test_static_drain_attaches_blob_tensors_when_policy_fires(tmp_path: Path) -> None:
+    """End-to-end blob drain on CPU: pre-write stats + blob rows, drain,
+    verify each blob is correctly attached to its corresponding stats event
+    and written to the sink."""
+    policy = shadow.StaticFullTensorPolicy(first_n_steps=3, max_blob_numel=10)
+    t = shadow.StaticTapper(
+        tmp_path / "logs",
+        {0: "layer.0", 7: "layer.7"},
+        buffer_size=100,
+        full_tensor_policy=policy,
+        device="cpu",
+    )
+    # 4 stats rows (3 with blob, 1 without). Stats layout: [mean, abs_mean, abs_max, std, tap_idx]
+    t.stats_buf[0] = torch.tensor([0.0, 0.0, 1.0, 0.5, 0.0])
+    t.stats_buf[1] = torch.tensor([1.0, 1.0, 2.0, 0.5, 7.0])
+    t.stats_buf[2] = torch.tensor([0.5, 0.5, 0.6, 0.1, 0.0])
+    t.stats_buf[3] = torch.tensor([2.0, 2.0, 3.0, 0.5, 0.0])  # past first_n_steps
+    # Blob layout: blob_buf[idx, :n_valid] = full tensor; blob_meta[idx] = n_valid.
+    t.blob_buf[0, :4] = torch.tensor([0.1, 0.2, 0.3, 0.4])
+    t.blob_meta[0] = 4
+    t.blob_buf[1, :3] = torch.tensor([7.0, 7.1, 7.2])
+    t.blob_meta[1] = 3
+    t.blob_buf[2, :2] = torch.tensor([0.7, 0.8])
+    t.blob_meta[2] = 2
+    # Row 3 has no blob (idx >= first_n_steps).
+    t.counter[0] = 4
+
+    n_drained = t._drain_once()
+    assert n_drained == 4
+    t.sink.close()
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "stats.jsonl").read_text().splitlines()
+    ]
+    assert len(records) == 4
+    # First three records have blob_path; last does not.
+    blobs = [r.get("blob_path") for r in records]
+    assert all(b is not None for b in blobs[:3])
+    assert blobs[3] is None
+
+    # Verify a blob round-trips with correct content + length.
+    blob0 = torch.load(tmp_path / "logs" / blobs[0], weights_only=True)
+    assert blob0.numel() == 4
+    assert blob0.tolist() == pytest.approx([0.1, 0.2, 0.3, 0.4])
+    blob1 = torch.load(tmp_path / "logs" / blobs[1], weights_only=True)
+    assert blob1.numel() == 3
+    assert blob1.tolist() == pytest.approx([7.0, 7.1, 7.2])
+
+
 def test_tap_static_decorator_registers_name_lazily(tmp_path: Path, monkeypatch) -> None:
     """If the user passes ``name`` and that idx isn't in the Tapper's
     map yet, the decorator should register it lazily on first call.
@@ -474,7 +540,7 @@ def test_tap_static_decorator_registers_name_lazily(tmp_path: Path, monkeypatch)
         tmp_path / "logs", {}, buffer_size=10, device="cpu"
     )
 
-    def _noop_capture_static(x, _stats_buf, _counter, _idx):
+    def _noop_capture_static(x, *_args):
         return x
 
     monkeypatch.setattr(torch.ops.firefly, "capture_static", _noop_capture_static)

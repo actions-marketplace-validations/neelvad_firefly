@@ -506,7 +506,18 @@ _STATS_KERNEL = None
 
 
 def _get_stats_kernel():
-    """Lazily JIT-compile and cache the Triton stats kernel."""
+    """Lazily JIT-compile and cache the Triton stats kernel.
+
+    Always writes summary stats. Conditionally writes the full tensor to
+    ``blob_buf[idx]`` when ``idx < first_n_steps`` AND ``idx < max_blob_slots``
+    AND ``blob_buf`` is non-placeholder. This implements the "first N steps"
+    mode of :class:`StaticFullTensorPolicy`. Other modes (every_n_steps,
+    on_alert) are not supported in CUDA-graph mode in this MVP.
+
+    When the caller doesn't want blob recording, they pass placeholder
+    blob_buf / blob_meta buffers and first_n_steps=0; the kernel runs but
+    the blob writes are all masked off.
+    """
     global _STATS_KERNEL
     if _STATS_KERNEL is not None:
         return _STATS_KERNEL
@@ -515,12 +526,17 @@ def _get_stats_kernel():
 
     @triton.jit
     def _shadow_stats_kernel(
-        x_ptr,                       # input tensor
-        stats_buf_ptr,               # [N, 5] stats buffer (4 stats + tap_idx)
-        counter_ptr,                 # [1] int32 atomic counter
-        tap_idx,                     # int — which tap this call is for
-        n_elements,                  # numel(x)
-        BLOCK_SIZE: tl.constexpr,    # power-of-2 >= n_elements
+        x_ptr,                            # input tensor
+        stats_buf_ptr,                    # [N, 5] stats buffer
+        counter_ptr,                      # [1] int32 atomic counter
+        tap_idx,                          # int — which tap
+        blob_buf_ptr,                     # [max_blob_slots, max_blob_numel]
+        blob_meta_ptr,                    # [max_blob_slots] int32 (numel)
+        first_n_steps,                    # int — record blob if idx < this
+        max_blob_slots,                   # int — sanity clamp on blob_idx
+        max_blob_numel,                   # int — per-slot blob capacity
+        n_elements,                       # numel(x)
+        BLOCK_SIZE: tl.constexpr,         # power-of-2 >= n_elements
     ):
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
@@ -536,40 +552,79 @@ def _get_stats_kernel():
 
         idx = tl.atomic_add(counter_ptr, 1)
 
+        # Stats write (always).
         tl.store(stats_buf_ptr + idx * 5 + 0, s_mean)
         tl.store(stats_buf_ptr + idx * 5 + 1, s_abs_mean)
         tl.store(stats_buf_ptr + idx * 5 + 2, s_abs_max)
         tl.store(stats_buf_ptr + idx * 5 + 3, s_std)
         tl.store(stats_buf_ptr + idx * 5 + 4, tap_idx.to(tl.float32))
 
+        # Conditional blob write. The mask gates the actual store; we clamp
+        # the index to keep address arithmetic safe even when the mask is
+        # off (Triton's address math is integer-only, so an out-of-bounds
+        # pointer is fine as long as nothing dereferences it).
+        record_blob = (idx < first_n_steps) & (idx < max_blob_slots)
+        safe_blob_idx = tl.minimum(idx, max_blob_slots - 1)
+
+        # Blob tensor data: write each element only if it's in range AND
+        # this call is recording AND offset is within blob's per-slot cap.
+        blob_offset_in_range = offsets < tl.minimum(n_elements, max_blob_numel)
+        blob_write_mask = record_blob & blob_offset_in_range
+        tl.store(
+            blob_buf_ptr + safe_blob_idx * max_blob_numel + offsets,
+            x_f,
+            mask=blob_write_mask,
+        )
+
+        # Blob metadata: store n_elements for this slot so the drain knows
+        # how many of the row's max_blob_numel cells are valid.
+        tl.store(blob_meta_ptr + safe_blob_idx, n_elements, mask=record_blob)
+
     _STATS_KERNEL = _shadow_stats_kernel
     return _shadow_stats_kernel
 
 
 # Custom op for CUDA-graph mode. ``mutates_args`` tells Dynamo /
-# torch.compile that stats_buf and counter are written, so the op
+# torch.compile that all four mutated buffers are written, so the op
 # survives both ``torch.compile`` AND ``torch.cuda.CUDAGraph`` capture.
 @torch.library.custom_op(
     "firefly::capture_static",
-    mutates_args=("stats_buf", "counter"),
+    mutates_args=("stats_buf", "counter", "blob_buf", "blob_meta"),
 )
 def capture_static(
     x: torch.Tensor,
     stats_buf: torch.Tensor,
     counter: torch.Tensor,
     tap_idx: int,
+    blob_buf: torch.Tensor,
+    blob_meta: torch.Tensor,
+    first_n_steps: int,
 ) -> torch.Tensor:
     """CUDA-graph-safe pass-through capture.
 
-    Writes 4 stats + the tap_idx to ``stats_buf[counter]`` and atomically
-    increments ``counter``. Returns ``x`` unchanged. All work happens
-    on-device; the Triton kernel launch is captureable into a CUDA graph.
+    Always writes summary stats to ``stats_buf[counter]`` and atomically
+    increments ``counter``. Conditionally writes the full tensor to
+    ``blob_buf[idx]`` when ``idx < first_n_steps`` AND the row fits.
+    Returns ``x`` unchanged. All work happens on-device; the Triton
+    kernel launch is captureable into a CUDA graph.
+
+    To opt out of full-tensor recording, pass small placeholder
+    ``blob_buf`` / ``blob_meta`` buffers and ``first_n_steps=0``; the
+    kernel runs but all blob writes are masked off. The
+    :class:`StaticTapper` handles this setup automatically.
     """
     triton, _ = _import_triton()
     kernel = _get_stats_kernel()
     n = x.numel()
     BLOCK = triton.next_power_of_2(n)
-    kernel[(1,)](x, stats_buf, counter, tap_idx, n, BLOCK_SIZE=BLOCK)
+    max_blob_slots = blob_buf.shape[0]
+    max_blob_numel = blob_buf.shape[1]
+    kernel[(1,)](
+        x, stats_buf, counter, tap_idx,
+        blob_buf, blob_meta,
+        first_n_steps, max_blob_slots, max_blob_numel,
+        n, BLOCK_SIZE=BLOCK,
+    )
     return x.clone()
 
 
@@ -579,6 +634,9 @@ def _capture_static_fake(
     stats_buf: torch.Tensor,
     counter: torch.Tensor,
     tap_idx: int,
+    blob_buf: torch.Tensor,
+    blob_meta: torch.Tensor,
+    first_n_steps: int,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
@@ -596,31 +654,51 @@ def _capture_static_fake(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class StaticFullTensorPolicy:
+    """CUDA-graph-mode version of :class:`FullTensorPolicy`.
+
+    Only ``first_n_steps`` is supported in this MVP — it covers the most
+    common "capture during warmup" use case and has the simplest kernel
+    integration (a single ``idx < first_n_steps`` mask). ``every_n_steps``
+    and ``on_alert`` are deferred to a follow-up; the eager-mode
+    :class:`FullTensorPolicy` supports both.
+
+    ``max_blob_numel`` is the per-slot capacity in floats. For an LLM
+    with hidden_dim=4096 and a 10-token prompt, a per-layer activation
+    is 40k floats = 160 KB. Default of 200_000 covers most production
+    LLM-size taps with headroom.
+    """
+
+    first_n_steps: int = 0
+    max_blob_numel: int = 200_000
+
+
 class StaticTapper:
     """CUDA-graph-mode counterpart to :class:`Tapper`.
 
-    Pre-allocates GPU buffers (stats + counter) whose pointers get
-    captured into a CUDA graph. The Triton kernel inside
+    Pre-allocates GPU buffers (stats + counter, optionally blob + blob_meta)
+    whose pointers get captured into a CUDA graph. The Triton kernel inside
     :func:`capture_static` writes to these buffers on every replay. A
     CPU-side drain thread periodically reads the GPU stats and writes
     to the local log sink, re-attaching tap names via the index → name
     map this Tapper holds.
 
+    Full-tensor capture is controlled by ``full_tensor_policy``. With
+    ``StaticFullTensorPolicy(first_n_steps=N)``, the first N captures
+    across the whole tapper's lifetime get their full tensors persisted
+    to ``blobs/``; later captures are stats-only.
+
     Usage::
 
         names = {0: "layer.0.mlp", 1: "layer.7.self_attn"}
-        with StaticTapper(log_dir, names) as tapper:
-            # Build the CUDA graph using tapper.stats_buf / tapper.counter
+        policy = StaticFullTensorPolicy(first_n_steps=5)
+        with StaticTapper(log_dir, names, full_tensor_policy=policy) as tapper:
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
-                out = model(static_input, tapper.stats_buf, tapper.counter)
+                out = model(static_input)
             for _ in range(N):
                 g.replay()
-
-    The user is responsible for inserting ``capture_static`` calls in
-    their model and passing ``tapper.stats_buf`` and ``tapper.counter``
-    through. See :func:`tap_static` for a decorator that does this via
-    a thread-local active StaticTapper.
     """
 
     def __init__(
@@ -629,6 +707,7 @@ class StaticTapper:
         index_to_name: dict[int, str],
         buffer_size: int = 10_000,
         drain_interval_s: float = 0.1,
+        full_tensor_policy: StaticFullTensorPolicy | None = None,
         device: str = "cuda",
     ) -> None:
         self.log_dir = Path(log_dir)
@@ -641,11 +720,29 @@ class StaticTapper:
 
         self.buffer_size = buffer_size
         self.drain_interval_s = drain_interval_s
+        self.full_tensor_policy = full_tensor_policy or StaticFullTensorPolicy()
         self.stats_buf = torch.zeros((buffer_size, 5), device=device, dtype=torch.float32)
         self.counter = torch.zeros((1,), device=device, dtype=torch.int32)
 
+        # Blob buffers: real if first_n_steps > 0, else 1x1 placeholders.
+        # Placeholders keep the op signature constant; the kernel masks off
+        # all blob writes when first_n_steps=0.
+        if self.full_tensor_policy.first_n_steps > 0:
+            self.blob_buf = torch.zeros(
+                (self.full_tensor_policy.first_n_steps, self.full_tensor_policy.max_blob_numel),
+                device=device, dtype=torch.float32,
+            )
+            self.blob_meta = torch.zeros(
+                (self.full_tensor_policy.first_n_steps,),
+                device=device, dtype=torch.int32,
+            )
+        else:
+            self.blob_buf = torch.zeros((1, 1), device=device, dtype=torch.float32)
+            self.blob_meta = torch.zeros((1,), device=device, dtype=torch.int32)
+
         self.sink = LocalLogSink(self.log_dir)
         self._drained_count = 0
+        self._drained_blob_count = 0
         self._drain_thread: _StaticDrainThread | None = None
 
     def __enter__(self) -> StaticTapper:
@@ -668,7 +765,12 @@ class StaticTapper:
     def _drain_once(self) -> int:
         """Copy any new stats rows from GPU to CPU, write to sink.
 
-        Returns the number of rows drained.
+        Also drains any new blob rows (full-tensor captures) up to
+        ``first_n_steps`` total across the tapper's lifetime; blob writes
+        are attached to the corresponding stats row's drain event via the
+        sink's ``write`` method.
+
+        Returns the number of stats rows drained.
         """
         current = int(self.counter.item())
         if current <= self._drained_count:
@@ -679,7 +781,7 @@ class StaticTapper:
         if n_to_drain > self.buffer_size:
             self._drained_count = current - self.buffer_size
             n_to_drain = self.buffer_size
-        # Read n_to_drain rows starting at start_slot, with wraparound.
+        # Read n_to_drain stats rows starting at start_slot, with wraparound.
         start_slot = self._drained_count % self.buffer_size
         if start_slot + n_to_drain <= self.buffer_size:
             slots = self.stats_buf[start_slot : start_slot + n_to_drain].cpu().tolist()
@@ -687,13 +789,37 @@ class StaticTapper:
             first_chunk = self.stats_buf[start_slot:].cpu().tolist()
             n_remaining = n_to_drain - len(first_chunk)
             slots = first_chunk + self.stats_buf[:n_remaining].cpu().tolist()
-        for row in slots:
+
+        # Blob drain. We only have blob data for the first ``first_n_steps``
+        # captures across the tapper's lifetime. Each stats row's global
+        # idx is ``self._drained_count + offset``; if that's < first_n_steps,
+        # the blob is in ``blob_buf[idx]``.
+        first_n = self.full_tensor_policy.first_n_steps
+        if first_n > 0 and self._drained_blob_count < first_n:
+            # Copy the relevant slice of blob_buf to CPU.
+            blob_start = self._drained_blob_count
+            blob_end = min(current, first_n)
+            blob_rows = self.blob_buf[blob_start:blob_end].cpu()
+            blob_lens = self.blob_meta[blob_start:blob_end].cpu().tolist()
+            self._drained_blob_count = blob_end
+        else:
+            blob_rows = None
+            blob_lens = []
+
+        for offset, row in enumerate(slots):
             tap_idx = int(row[4])
+            global_idx = self._drained_count + offset
+            tensor: torch.Tensor | None = None
+            if blob_rows is not None and global_idx < (self._drained_blob_count):
+                # Find this row's position in the blob_rows slice we copied.
+                blob_offset = global_idx - (self._drained_blob_count - len(blob_lens))
+                n_valid = blob_lens[blob_offset]
+                tensor = blob_rows[blob_offset, :n_valid].clone()
             self.sink.write(
                 _Event(
                     request_id=None,
                     tap_name=self.index_to_name.get(tap_idx, f"tap_{tap_idx}"),
-                    step=0,
+                    step=global_idx,
                     stats={
                         "shape": [],          # not captured in CUDA-graph mode
                         "dtype": "float32",
@@ -702,7 +828,7 @@ class StaticTapper:
                         "abs_max": row[2],
                         "std": row[3],
                     },
-                    tensor=None,
+                    tensor=tensor,
                     timestamp=time.time(),
                 )
             )
@@ -761,11 +887,16 @@ def tap_static(idx: int, name: str | None = None):
             # Register name lazily on first call if not yet known.
             if name is not None and idx not in t.index_to_name:
                 t.index_to_name[idx] = name
+            first_n = t.full_tensor_policy.first_n_steps
             if isinstance(out, torch.Tensor):
-                return torch.ops.firefly.capture_static(out, t.stats_buf, t.counter, idx)
+                return torch.ops.firefly.capture_static(
+                    out, t.stats_buf, t.counter, idx,
+                    t.blob_buf, t.blob_meta, first_n,
+                )
             if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
                 head = torch.ops.firefly.capture_static(
-                    out[0], t.stats_buf, t.counter, idx
+                    out[0], t.stats_buf, t.counter, idx,
+                    t.blob_buf, t.blob_meta, first_n,
                 )
                 return (head, *out[1:])
             return out
