@@ -160,13 +160,13 @@ diverging, similar overall curve shape:
 I was about to declare the layer-7 boundary universal. But then the
 cross-family check broke it.
 
-**Cross-family stress test (4 more models).** Same comparison, swap
-the model again — first to `Qwen/Qwen2.5-7B` and `mistralai/Mistral-7B-v0.1`,
-then to `microsoft/Phi-3-mini-4k-instruct` and `01-ai/Yi-1.5-9B`. All
-GQA architectures, all ought to sit in the same "production-class"
+**Cross-family stress test (5 more models).** Same comparison, swap
+the model again — to `Qwen/Qwen2.5-7B`, `mistralai/Mistral-7B-v0.1`,
+`microsoft/Phi-3-mini-4k-instruct`, `01-ai/Yi-1.5-9B`, and
+`google/gemma-2-9b`. All ought to sit in the same "production-class"
 regime as Llama-3.1-8B:
 
-![FLASH_ATTN vs XFORMERS across 6 models, 5 families, x-axis normalized to forward-order fraction](plots/cross_family_flash_vs_xformers_6.png)
+![FLASH_ATTN vs XFORMERS across 7 models, 6 architecture families, x-axis normalized to forward-order fraction](plots/cross_family_flash_vs_xformers_7.png)
 
 |  model | first divergent tap | layer-0 rel error | final-norm rel error |
 | --- | --- | --- | --- |
@@ -176,18 +176,24 @@ regime as Llama-3.1-8B:
 | **Mistral-7B-v0.1** | **`layer.0.self_attn`** | 0.0005% | 1.12% |
 | **Phi-3-mini-4k** | **`layer.0.self_attn`** | ≈0.00005% | 1.18% |
 | **Yi-1.5-9B** | **`layer.2.self_attn`** | ~0% (bit-equal) | 1.06% |
+| **Gemma-2-9B** | **`layer.0.self_attn`** | **0.1979%** | **1.89%** |
 
-Three things stand out:
+Four things stand out:
 
 1. **The layer-7 universality is real *within the Meta architecture
    lineage* (SmolLM, Llama-3) and breaks at every other family.**
-   Qwen, Mistral, and Phi-3 all shift to layer 0 with FLASH vs XFORMERS.
-2. **Yi lands at layer 2** — neither 0 (the other non-Meta models)
-   nor 7 (Meta). So the pattern isn't a clean "Meta-vs-not" dichotomy
-   either; it's per-family.
-3. **The final-norm relative errors are all in a tight 1.0%–1.4% band.**
-   Where the divergence *starts* varies by family, but the *aggregate*
-   drift by the final layer-norm doesn't.
+   Qwen, Mistral, Phi-3, and Gemma-2 all shift to layer 0 with FLASH
+   vs XFORMERS.
+2. **Yi lands at layer 2** — neither 0 (the other 4 non-Meta models)
+   nor 7 (Meta). So the pattern isn't even a clean "Meta-vs-not"
+   dichotomy; it's per-family.
+3. **Gemma-2's layer-0 rel error is the largest by ~40×** — 0.1979%
+   vs Qwen's 0.0052%. Likely because Gemma-2 uses hybrid sliding-window
+   + full attention, so XFORMERS and FLASH_ATTN dispatch through very
+   different code paths even at the first attention layer.
+4. **Final-norm relative errors fall in a 1.0%–1.9% band.** Where the
+   divergence *starts* varies by family, but the *aggregate* drift by
+   the final layer-norm doesn't.
 
 The most likely driver of the family-level variation is a
 vLLM-internal-dispatch effect. vLLM's XFORMERS backend takes different
@@ -210,9 +216,9 @@ of the universality claim:
   data points (SmolLM-135M, Llama-3.1-8B); the layer-7 boundary
   is stable.
 - **Across architecture families**: first-divergence layer
-  shifts, and the shift isn't even uniform. Four more data points
-  (Qwen-2.5, Mistral-7B, Phi-3-mini, Yi-1.5-9B); three land at
-  layer 0, one (Yi) lands at layer 2.
+  shifts, and the shift isn't even uniform. Five more data points
+  (Qwen-2.5, Mistral-7B, Phi-3-mini, Yi-1.5-9B, Gemma-2-9B); four
+  land at layer 0, one (Yi) lands at layer 2.
 - The *mechanism* of "Firefly's per-layer attribution points at the
   first BF16-visible difference" is unchanged. What that layer
   index *is* depends on the architecture-family-specific kernel
@@ -357,10 +363,10 @@ is much larger than XFORMERS vs FLASH_ATTN's: ~0.05% relative at layer
 crosses BF16's representable threshold *immediately* in early-layer
 activations. In contrast to the XFORMERS layer-7 finding that broke at
 the family boundary, the FLASHINFER layer-0 finding holds across all
-five models I tested that can run FLASHINFER — covering Meta, Qwen,
-Mistral, and 01.AI architecture lineages:
+six models I tested that can run FLASHINFER — covering Meta, Qwen,
+Mistral, 01.AI, and Google architecture lineages:
 
-![FLASH_ATTN vs FLASHINFER across 5 models, 4 families](plots/cross_family_flash_vs_flashinfer_5.png)
+![FLASH_ATTN vs FLASHINFER across 6 models, 5 families](plots/cross_family_flash_vs_flashinfer_6.png)
 
 | model | first divergent tap | layer-0 rel | final-norm rel |
 | --- | --- | --- | --- |
@@ -369,6 +375,7 @@ Mistral, and 01.AI architecture lineages:
 | Qwen-2.5-7B | `layer.0.self_attn` | 0.1332% | **22.83%** |
 | Mistral-7B-v0.1 | `layer.0.self_attn` | 0.0489% | 1.23% |
 | Yi-1.5-9B | `layer.0.self_attn` | 0.0562% | 1.32% |
+| Gemma-2-9B | `layer.0.self_attn` | 0.0380% | 2.09% |
 
 So the kernel-pair-determines-the-divergence-layer story has *some*
 universal claims and some less-universal ones. FLASHINFER's per-element
@@ -376,7 +383,7 @@ diff is large enough to cross the BF16 threshold at layer 0 regardless
 of family-specific dispatch differences; XFORMERS's smaller per-element
 diff is sensitive to those differences.
 
-The Qwen final-norm number (22.83%) is a 20× outlier vs the other four
+The Qwen final-norm number (22.83%) is a 20× outlier vs the other five
 models. That's not the universal story — that's its own finding, and
 Finding 5 below unpacks it.
 
@@ -544,14 +551,14 @@ will miss most real upgrade-time bugs.
 
 ## Limitations I should flag
 
-- **Six models, five architecture families.** SmolLM-135M and
+- **Seven models, six architecture families.** SmolLM-135M and
   Llama-3.1-8B (Meta lineage), Qwen-2.5-7B, Mistral-7B-v0.1,
-  Phi-3-mini-4k, Yi-1.5-9B. The XFORMERS layer-7 universality from
-  Finding 1.5 is within-Meta only; the Yi result (`layer.2`)
-  shows the non-Meta side isn't even uniformly layer 0. FLASHINFER's
-  layer-0 universality from Finding 4 holds across all five models
-  that support FLASHINFER (Phi-3 doesn't). Gemma-2 would be the
-  next obvious cross-family check; pending HF gate-accept.
+  Phi-3-mini-4k, Yi-1.5-9B, Gemma-2-9B. The XFORMERS layer-7
+  universality from Finding 1.5 is within-Meta only; non-Meta is
+  layer 0 on 4 of 5 (Qwen, Mistral, Phi-3, Gemma-2) with Yi as the
+  outlier at layer 2. FLASHINFER's layer-0 universality from
+  Finding 4 holds across all six models that support FLASHINFER
+  (Phi-3 doesn't, head_dim=96).
 - **One precision format primarily.** Most of my runs are BF16; the
   earlier validation work showed FP32 is bit-deterministic on the same
   setup, and FP16 behaves like BF16 from a reproducibility standpoint
@@ -625,11 +632,12 @@ uv run modal run scripts/capture_vllm.py \
    hook infrastructure already supports it, just needs an extra
    tap-point selector.
 
-2. **More cross-family models.** Phi-3 and Yi added in this pass.
-   Gemma-2-9B (pending HF gate-accept) would be the next concrete
-   next step — its hybrid sliding-window-and-full attention pattern
-   could plausibly create yet another XFORMERS first-divergence
-   shape that none of these models do.
+2. **More cross-family models.** Phi-3, Yi, and Gemma-2 added in
+   this pass. The remaining gaps are non-GQA architectures (Falcon),
+   non-Llama-style positional encodings (e.g., ALiBi), and very small
+   non-Llama models (Pythia, etc.). Each new family is a cheap
+   data point (~$1 of Modal time) once the model's HF gate is
+   accepted.
 
 3. **Does the Yi `layer.2` first-divergence reproduce or shift on
    Yi-1.5-34B?** Yi being the lone "layer 2" data point — neither
