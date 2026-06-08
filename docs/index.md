@@ -135,16 +135,17 @@ I expected the boundary to move on a model with larger early-layer
 activations. The next section is the experiment I ran to test that
 prediction, and the result that made me rewrite this paragraph.
 
-## Finding 1.5: I tried to break the layer-7 finding on Llama-3.1-8B. It didn't budge.
+## Finding 1.5: The layer-7 finding survives 60× model scale within Meta — and breaks at the family boundary
 
-The cleanest stress test of the mechanism above is to rerun the
-comparison on a much bigger model. A 7-8B model has ~7× wider residual
-streams than SmolLM-135M, presumably hits the BF16-visible regime
-earlier, and should move the first-divergence layer.
+I expected the layer-7 boundary to shift on a much bigger model, so I
+ran two stress tests of Finding 1's mechanism:
 
-I ran FLASH_ATTN vs XFORMERS on `meta-llama/Llama-3.1-8B` on an
-A100-40GB — same vLLM 0.8.5 V0, same BF16, same 10-token prompt. The
-result:
+**Within-family stress test (model scale).** Same comparison, swap the
+model from SmolLM-135M to `meta-llama/Llama-3.1-8B` on an A100-40GB —
+same vLLM 0.8.5 V0, same BF16, same 10-token prompt. **First divergence
+held at `layer.7.self_attn` on a 60× larger model with a 7× wider
+residual stream.** Same layer index, similar fraction of taps
+diverging, similar overall curve shape:
 
 ![Llama-3.1-8B FLASH_ATTN vs XFORMERS, per-tap relative error in forward order](plots/llama_8b_flash_vs_xformers.png)
 
@@ -156,42 +157,63 @@ result:
 | hidden dim | 576 | 4096 |
 | layers | 30 | 32 |
 
-**First divergence at layer 7 — on a 60× larger model with a 7× wider
-residual stream.** Same layer index. Similar fraction of taps diverging.
-Similar overall divergence curve shape.
+I was about to declare the layer-7 boundary universal. But then the
+cross-family check broke it.
 
-Plotting per-layer activation magnitudes explains why my prediction was
-wrong:
+**Cross-family stress test (Qwen + Mistral).** Same comparison, swap
+the model again to `Qwen/Qwen2.5-7B` and then `mistralai/Mistral-7B-v0.1`
+— both ~7B, both GQA architectures, both should sit in the same
+"production-class" regime as Llama-3.1-8B. The result on both:
+**first divergence at `layer.0.self_attn`, not layer 7**.
 
-![Per-layer activation magnitudes — Llama-3.1-8B](plots/magnitudes_llama_8b.png)
+![FLASH_ATTN vs XFORMERS across 4 models, x-axis normalized to forward-order fraction](plots/cross_family_flash_vs_xformers.png)
 
-Early-layer magnitudes are comparable across both models (~2-4). The
-residual stream is initialized from an embedding lookup that's roughly
-unit-norm regardless of hidden dimension; the model-specific
-activation-growth patterns only kick in after a handful of layers.
-Llama's MLP output eventually grows to ~40 (vs SmolLM's ~14), but by
-then we are well past the rounding-threshold crossover.
+|  model | first divergent tap | layer-0 rel error | final-norm rel error |
+| --- | --- | --- | --- |
+| SmolLM-135M (Meta) | `layer.7.self_attn` | ~0% (bit-equal) | 1.4% |
+| Llama-3.1-8B (Meta) | `layer.7.self_attn` | ~0% (bit-equal) | 0.96% |
+| **Qwen-2.5-7B** | **`layer.0.self_attn`** | **0.0052%** | **1.23%** |
+| **Mistral-7B-v0.1** | **`layer.0.self_attn`** | **0.0005%** | **1.12%** |
 
-So the *mechanism* in Finding 1 was right but the prediction at the end
-of it was wrong. The corrected story:
+The layer-7 universality is real *within the Meta architecture lineage*
+(SmolLM and Llama-3 are both Meta-derived). It does not survive the
+jump to a different family. On Qwen and Mistral, FLASH_ATTN vs XFORMERS
+produces a layer-0 visible difference that the Meta models don't have.
 
-- The FLASH_ATTN vs XFORMERS kernel-reduction-order difference is
-  scale-invariant per element.
-- Early-layer activation magnitudes are similar across model scales
-  because of how embeddings initialize the residual stream.
-- BF16's representable threshold is a property of mantissa width, not of
-  the model.
-- The product (early-layer-magnitude × kernel-diff) crosses BF16's
-  representable threshold at roughly the same depth in both networks.
+This is most likely a vLLM-internal-dispatch effect: vLLM's XFORMERS
+backend takes different code paths depending on the model's RoPE
+configuration (Llama-3.1 uses `theta=500000` with rope_scaling, Qwen2.5
+uses `theta=1000000`, Mistral uses `theta=10000`). Different
+inverse-frequency tables get computed and reduced differently, and BF16
+rounding makes the difference visible at the first attention layer
+rather than waiting for activation magnitudes to grow.
 
-This makes the finding *stronger* than I thought it was. "First
-divergence at `layer.7.self_attn`" isn't a SmolLM-135M quirk; it's a
-property of how these two attention kernels compose in BF16, robust
-across 60× model scale. Same diagnostic, two architectures, same first
-divergent tap — and the per-layer attribution made the universality
-visible in one plot.
+**Corrected framing.** Finding 1's mechanism (kernel-diff × activation
+magnitude × precision threshold) is the right intuition. The original
+prediction "layer-7 will shift on larger models" was wrong about the
+*scale* dimension and right about there being a *some* model-dependent
+dimension — I just had the wrong dimension in mind. The honest version
+of the universality claim:
 
-These next two findings still surprised me.
+- **Within an architecture family** (Meta-Llama lineage tested):
+  first-divergence layer is universal across model scale. Two
+  data points (SmolLM-135M, Llama-3.1-8B); the layer-7 boundary
+  is stable.
+- **Across architecture families**: first-divergence layer
+  shifts. Two more data points (Qwen-2.5, Mistral-7B); both shift
+  to layer 0 with FLASH vs XFORMERS.
+- The *mechanism* of "Firefly's per-layer attribution points at the
+  first BF16-visible difference" is unchanged. What that layer
+  index *is* depends on the architecture-family-specific kernel
+  dispatch.
+
+That's a less ambitious universality claim than I led with, but it's
+the claim the data actually supports. Forward-pointer: Finding 4 will
+return to this with FLASHINFER, where the layer-0 finding turns out to
+hold across *all* four models — different kernel pair, more robust
+universality.
+
+These next three findings still surprised me.
 
 ## Finding 2: Decode capture exposes that layer 0 itself diverges, via KV cache pollution
 
@@ -315,16 +337,35 @@ Once it was working, the result:
 
 Two new things relative to the earlier findings:
 
-**1. Layer 0, not layer 7 — and universal across model scale.** The
-FLASHINFER vs FLASH_ATTN per-element kernel-difference is much larger
-than XFORMERS vs FLASH_ATTN's: ~0.05% relative at layer 0 versus
-~0.0001% at layer 0 for XFORMERS. The bigger per-element diff crosses
-BF16's representable threshold *immediately* in early-layer
-activations, instead of needing the magnitude growth through layers 0
-through 6 that XFORMERS required. And the first-divergence layer is
-the same on SmolLM-135M (0.0519%) and Llama-3.1-8B (0.0516%) — exactly
-the cross-scale universality Finding 1.5 predicted, just at a different
-layer index because the kernel changed.
+**1. Layer 0, not layer 7 — and this one is universal across families
+too.** The FLASHINFER vs FLASH_ATTN per-element kernel-difference is
+much larger than XFORMERS vs FLASH_ATTN's: ~0.05% relative at layer 0
+versus ~0.0001% at layer 0 for XFORMERS. The bigger per-element diff
+crosses BF16's representable threshold *immediately* in early-layer
+activations. And in contrast to the XFORMERS layer-7 finding that
+broke at the family boundary, the FLASHINFER layer-0 finding holds
+across all four models I tested — including Qwen-2.5-7B and
+Mistral-7B-v0.1, the same two models where the XFORMERS layer-7
+universality failed:
+
+![FLASH_ATTN vs FLASHINFER across 4 models, x-axis normalized to forward-order fraction](plots/cross_family_flash_vs_flashinfer.png)
+
+| model | first divergent tap | layer-0 rel | final-norm rel |
+| --- | --- | --- | --- |
+| SmolLM-135M (Meta) | `layer.0.self_attn` | 0.0519% | 2.49% |
+| Llama-3.1-8B (Meta) | `layer.0.self_attn` | 0.0516% | 1.31% |
+| Qwen-2.5-7B | `layer.0.self_attn` | 0.1332% | **22.83%** |
+| Mistral-7B-v0.1 | `layer.0.self_attn` | 0.0489% | 1.23% |
+
+So the kernel-pair-determines-the-divergence-layer story has *some*
+universal claims and some less-universal ones. FLASHINFER's per-element
+diff is large enough to cross the BF16 threshold at layer 0 regardless
+of family-specific dispatch differences; XFORMERS's smaller per-element
+diff is sensitive to those differences.
+
+The Qwen final-norm number (22.83%) is a 20× outlier vs the other three
+models. That's not the universal story — that's its own finding, and
+Finding 5 below unpacks it.
 
 **2. The length curve is monotonic, not a step function.** Final-norm
 relative error grows from 1.31% at 9 tokens to 3.29% at 1k — a 2.5×
@@ -358,6 +399,63 @@ layer.0.self_attn and the rel error grew between 1k and 4k" knows the
 kernel itself changed; "first divergence is layer.7" knows it's a
 subtler kernel swap; "bit-equal at short and divergent at long" knows
 it's a blocking-strategy change.
+
+## Finding 5: Qwen-2.5-7B + FLASHINFER has a 20× catastrophic divergence at the final layer
+
+The Qwen final-norm 22.83% number from Finding 4 is *not* a
+distributed-everywhere-large-error situation. It's a single-layer
+catastrophic spike. Through layers 0-26, Qwen FLASHINFER vs FLASH_ATTN
+tracks the other three models — gradually climbing from ~0.13% at
+layer 0 to ~1.2% by layer 26, almost identical to Mistral's curve.
+Then layer 27 happens:
+
+| layer | Qwen rel error | Qwen `mean(\|activation\|)` |
+| --- | --- | --- |
+| 26 | 1.17% | 0.526 |
+| **27.self_attn** | **24.31%** | **0.989** |
+| **27.mlp** | **22.83%** | **2.066** |
+| final_norm | 22.83% | 2.066 |
+
+A 20× jump in relative error in one layer. Qwen-2.5-7B has 28 layers
+(indexed 0-27), so layer 27 is its *final transformer block*. Mistral
+(32 layers, last index 31) has no analogous jump — its final layer
+sits at 1.35%. So this is not "last layer of anything" — it's
+specifically Qwen.
+
+Looking at the activation magnitudes plot for Qwen:
+
+![Per-layer activation magnitudes — Qwen-2.5-7B](plots/magnitudes_qwen.png)
+
+Qwen's MLP outputs peak at a `max(|activation|)` of **252** — the
+largest outlier-feature magnitudes in any model I tested (Llama tops
+out at 40, SmolLM at 13). Crucially, the concentration is in the
+*late* layers. Mistral has similar peak magnitudes (~176), but they
+ramp up gradually across 32 layers; Qwen front-loads its outliers into
+the final 1-2 layers.
+
+The interaction is plausibly: FLASHINFER's larger per-element
+reduction-order difference (visible from layer 0) compounds gradually
+through the network. At Qwen's layer 27, where the activation
+magnitudes jump 4× from layer 26, the per-element diff suddenly has 4×
+more headroom to manifest in absolute terms — and the relative error
+spikes 20×.
+
+This is the kind of finding a Qwen-on-FLASHINFER serving stack would
+want to know about. The model's output drift in BF16 with FLASHINFER
+is a specific, localized, mechanistic issue concentrated in one layer
+— not a broad model-wide degradation. An eval that looks at
+final-output similarity would say "Qwen on FLASHINFER is meaningfully
+different from Qwen on FLASH_ATTN" with no further attribution.
+Firefly's per-layer attribution localizes it to `layer.27` and shows
+its mechanism (magnitude × kernel-diff overshoot) in one plot.
+
+I haven't tried to file this with vLLM or with FlashInfer upstream
+because I'm not certain it's a *bug* — it might be the BF16-correct
+behavior given Qwen's outlier-feature concentration at the final
+layer. But it's a reproducible, attributable, *production-relevant*
+numerical divergence, and the diagnostic flow it took to surface it
+(swap one knob, run one Firefly check, look at the per-layer curve)
+is exactly the workflow this tool is for.
 
 ## What I think this means for ML CI
 
@@ -399,11 +497,12 @@ will miss most real upgrade-time bugs.
 
 ## Limitations I should flag
 
-- **Two model sizes, one model family.** SmolLM-135M and Llama-3.1-8B,
-  both Meta-architecture. The layer-7 universality I show in Finding 1.5
-  is N=2; a non-Meta architecture (Qwen, Mistral, Gemma) would tighten
-  the claim from "robust on two Meta models" to "robust across model
-  family." I haven't run that yet.
+- **Four models, three architecture families.** SmolLM-135M and
+  Llama-3.1-8B (Meta lineage), Qwen-2.5-7B, Mistral-7B-v0.1. The
+  XFORMERS layer-7 universality from Finding 1.5 turned out to be
+  within-Meta only; FLASHINFER's layer-0 universality from Finding 4
+  holds across all four. Gemma, Phi, Yi etc. would be the next round
+  of cross-family checks.
 - **One precision format primarily.** Most of my runs are BF16; the
   earlier validation work showed FP32 is bit-deterministic on the same
   setup, and FP16 behaves like BF16 from a reproducibility standpoint
@@ -468,19 +567,27 @@ uv run modal run scripts/capture_vllm.py \
 
 ## What's next
 
-1. **Does the layer-7 (XFORMERS) / layer-0 (FLASHINFER) universality
-   extend across model families?** Findings 1.5 and 4 confirm both
-   across model scale (135M → 8B, both Meta). The natural next check
-   is Qwen-7B or Mistral-7B — different tokenizer, different
-   layer-norm placement, different MLP topology. If both layer
-   indices still hold, the claim sharpens from "robust on Meta
-   architectures" to "property of the attention kernels themselves."
+1. **Why exactly does Qwen layer 27 spike with FLASHINFER and not with
+   FLASH_ATTN?** Finding 5 establishes the *what*; the mechanism is
+   plausibly "outlier-feature magnitudes × FLASHINFER's reduction
+   order at the final layer" but I haven't isolated which specific
+   FLASHINFER kernel call diverges. A focused investigation would
+   compare per-head attention outputs at Qwen layer 27 — Firefly's
+   hook infrastructure already supports it, just needs an extra
+   tap-point selector.
 
-2. **Does FLASHINFER vs FLASH_ATTN keep growing past 1k?** Finding 4
-   shows 1.31% at 9 tokens, 3.29% at 1k. V0 vs V1 saturated past 1k
-   so I'd expect FLASHINFER to also saturate eventually, but I haven't
-   tested 2k and 4k yet. Two more captures on Llama-3.1-8B
-   ($0.50-$1.00 of Modal time) would resolve it.
+2. **More cross-family models.** Gemma-2-9B, Phi-3, Yi-1.5-9B —
+   different RoPE configurations, different layer-norm placements,
+   different MLP topologies. Each new model tells us whether the
+   FLASHINFER layer-0 universality keeps holding (data so far: yes
+   on 4 models, 3 families) and whether the XFORMERS layer-7
+   within-Meta pattern reappears on any non-Meta family.
+
+3. **Does FLASHINFER vs FLASH_ATTN keep growing past 1k on Llama?**
+   Finding 4 shows 1.31% at 9 tokens, 3.29% at 1k. V0 vs V1 saturated
+   past 1k so I'd expect FLASHINFER to also saturate eventually,
+   but I haven't tested 2k and 4k yet. Two more captures on
+   Llama-3.1-8B ($0.50-$1.00 of Modal time) would resolve it.
 
 If you've hit numerical-regression bugs in serving stacks and want to
 compare notes, or if you'd find Firefly useful for your own CI and want
