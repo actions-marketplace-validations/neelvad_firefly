@@ -559,7 +559,11 @@ def _get_stats_kernel():
         tl.store(stats_buf_ptr + idx * 5 + 1, s_abs_mean)
         tl.store(stats_buf_ptr + idx * 5 + 2, s_abs_max)
         tl.store(stats_buf_ptr + idx * 5 + 3, s_std)
-        tl.store(stats_buf_ptr + idx * 5 + 4, tap_idx.to(tl.float32))
+        # tap_idx arrives as a Python int (not a Triton scalar) so we
+        # coerce to float by multiplying by 1.0 — implicit type
+        # promotion is the most version-portable way across Triton
+        # releases.
+        tl.store(stats_buf_ptr + idx * 5 + 4, tap_idx * 1.0)
 
         # Blob recording decision (composable first_n + every_n).
         record_first_n = (first_n_steps > 0) & (idx < first_n_steps)
