@@ -460,22 +460,41 @@ def test_static_full_tensor_policy_default_no_blob_buffers(tmp_path: Path) -> No
     """No policy → 1x1 placeholder blob buffers (negligible memory)."""
     t = shadow.StaticTapper(tmp_path / "logs", {0: "t"}, device="cpu")
     assert t.blob_buf.shape == (1, 1)
-    assert t.blob_meta.shape == (1,)
+    assert t.blob_meta.shape == (1, 2)
 
 
-def test_static_full_tensor_policy_allocates_real_blob_buffers(tmp_path: Path) -> None:
+def test_static_full_tensor_policy_first_n_allocates_blob_buffers(tmp_path: Path) -> None:
     policy = shadow.StaticFullTensorPolicy(first_n_steps=5, max_blob_numel=128)
     t = shadow.StaticTapper(
         tmp_path / "logs", {0: "t"}, full_tensor_policy=policy, device="cpu"
     )
     assert t.blob_buf.shape == (5, 128)
-    assert t.blob_meta.shape == (5,)
+    assert t.blob_meta.shape == (5, 2)
 
 
-def test_static_drain_attaches_blob_tensors_when_policy_fires(tmp_path: Path) -> None:
-    """End-to-end blob drain on CPU: pre-write stats + blob rows, drain,
-    verify each blob is correctly attached to its corresponding stats event
-    and written to the sink."""
+def test_static_full_tensor_policy_every_n_auto_sizes_slots(tmp_path: Path) -> None:
+    """every_n_steps with no n_blob_slots → auto-size to 16 (steady-state floor)."""
+    policy = shadow.StaticFullTensorPolicy(every_n_steps=100, max_blob_numel=128)
+    t = shadow.StaticTapper(
+        tmp_path / "logs", {0: "t"}, full_tensor_policy=policy, device="cpu"
+    )
+    assert t.blob_buf.shape == (16, 128)
+
+
+def test_static_full_tensor_policy_explicit_n_blob_slots(tmp_path: Path) -> None:
+    """n_blob_slots overrides the auto-size heuristic."""
+    policy = shadow.StaticFullTensorPolicy(
+        every_n_steps=100, n_blob_slots=32, max_blob_numel=128
+    )
+    t = shadow.StaticTapper(
+        tmp_path / "logs", {0: "t"}, full_tensor_policy=policy, device="cpu"
+    )
+    assert t.blob_buf.shape == (32, 128)
+
+
+def test_static_drain_attaches_blob_tensors_when_first_n_policy_fires(tmp_path: Path) -> None:
+    """End-to-end blob drain on CPU: pre-write stats + blob rows + meta,
+    drain, verify each blob is correctly attached via global_idx matching."""
     policy = shadow.StaticFullTensorPolicy(first_n_steps=3, max_blob_numel=10)
     t = shadow.StaticTapper(
         tmp_path / "logs",
@@ -484,20 +503,22 @@ def test_static_drain_attaches_blob_tensors_when_policy_fires(tmp_path: Path) ->
         full_tensor_policy=policy,
         device="cpu",
     )
-    # 4 stats rows (3 with blob, 1 without). Stats layout: [mean, abs_mean, abs_max, std, tap_idx]
+    # 4 stats rows (3 with blob, 1 without).
     t.stats_buf[0] = torch.tensor([0.0, 0.0, 1.0, 0.5, 0.0])
     t.stats_buf[1] = torch.tensor([1.0, 1.0, 2.0, 0.5, 7.0])
     t.stats_buf[2] = torch.tensor([0.5, 0.5, 0.6, 0.1, 0.0])
     t.stats_buf[3] = torch.tensor([2.0, 2.0, 3.0, 0.5, 0.0])  # past first_n_steps
-    # Blob layout: blob_buf[idx, :n_valid] = full tensor; blob_meta[idx] = n_valid.
+    # Blob layout (ring buffer indexed by blob_count % n_slots):
+    # blob_meta[i] = (n_valid, global_idx); for first_n_steps mode the
+    # blob_count and global_idx coincide on the first 3 captures.
     t.blob_buf[0, :4] = torch.tensor([0.1, 0.2, 0.3, 0.4])
-    t.blob_meta[0] = 4
+    t.blob_meta[0] = torch.tensor([4, 0], dtype=torch.int32)
     t.blob_buf[1, :3] = torch.tensor([7.0, 7.1, 7.2])
-    t.blob_meta[1] = 3
+    t.blob_meta[1] = torch.tensor([3, 1], dtype=torch.int32)
     t.blob_buf[2, :2] = torch.tensor([0.7, 0.8])
-    t.blob_meta[2] = 2
-    # Row 3 has no blob (idx >= first_n_steps).
+    t.blob_meta[2] = torch.tensor([2, 2], dtype=torch.int32)
     t.counter[0] = 4
+    t.blob_counter[0] = 3
 
     n_drained = t._drain_once()
     assert n_drained == 4
@@ -508,18 +529,62 @@ def test_static_drain_attaches_blob_tensors_when_policy_fires(tmp_path: Path) ->
         for line in (tmp_path / "logs" / "stats.jsonl").read_text().splitlines()
     ]
     assert len(records) == 4
-    # First three records have blob_path; last does not.
     blobs = [r.get("blob_path") for r in records]
     assert all(b is not None for b in blobs[:3])
     assert blobs[3] is None
-
-    # Verify a blob round-trips with correct content + length.
     blob0 = torch.load(tmp_path / "logs" / blobs[0], weights_only=True)
-    assert blob0.numel() == 4
     assert blob0.tolist() == pytest.approx([0.1, 0.2, 0.3, 0.4])
     blob1 = torch.load(tmp_path / "logs" / blobs[1], weights_only=True)
-    assert blob1.numel() == 3
     assert blob1.tolist() == pytest.approx([7.0, 7.1, 7.2])
+
+
+def test_static_drain_attaches_sparse_blobs_via_global_idx(tmp_path: Path) -> None:
+    """every_n_steps produces blobs sparse in the stats stream — drain
+    must match by global_idx, not by stats row position."""
+    policy = shadow.StaticFullTensorPolicy(
+        every_n_steps=2, n_blob_slots=4, max_blob_numel=5
+    )
+    t = shadow.StaticTapper(
+        tmp_path / "logs",
+        {0: "tap"},
+        buffer_size=100,
+        full_tensor_policy=policy,
+        device="cpu",
+    )
+    # 5 stats rows; only global_idx in {0, 2, 4} would have blobs under
+    # every_n_steps=2 (idx % 2 == 0).
+    for i in range(5):
+        t.stats_buf[i] = torch.tensor([float(i), float(i), float(i), 0.0, 0.0])
+    t.counter[0] = 5
+    # Three blobs, ring-buffer slots 0, 1, 2 (blob_count 0..2). meta = (numel, global_idx).
+    t.blob_buf[0, :2] = torch.tensor([100.0, 100.1])
+    t.blob_meta[0] = torch.tensor([2, 0], dtype=torch.int32)
+    t.blob_buf[1, :2] = torch.tensor([102.0, 102.1])
+    t.blob_meta[1] = torch.tensor([2, 2], dtype=torch.int32)
+    t.blob_buf[2, :2] = torch.tensor([104.0, 104.1])
+    t.blob_meta[2] = torch.tensor([2, 4], dtype=torch.int32)
+    t.blob_counter[0] = 3
+
+    t._drain_once()
+    t.sink.close()
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "stats.jsonl").read_text().splitlines()
+    ]
+    assert len(records) == 5
+    blobs = [r.get("blob_path") for r in records]
+    # Records 0, 2, 4 have blobs; 1 and 3 don't.
+    assert blobs[0] is not None
+    assert blobs[1] is None
+    assert blobs[2] is not None
+    assert blobs[3] is None
+    assert blobs[4] is not None
+    # Verify the blob content matches the recorded global_idx.
+    blob0 = torch.load(tmp_path / "logs" / blobs[0], weights_only=True)
+    blob4 = torch.load(tmp_path / "logs" / blobs[4], weights_only=True)
+    assert blob0.tolist() == pytest.approx([100.0, 100.1])
+    assert blob4.tolist() == pytest.approx([104.0, 104.1])
 
 
 def test_tap_static_decorator_registers_name_lazily(tmp_path: Path, monkeypatch) -> None:

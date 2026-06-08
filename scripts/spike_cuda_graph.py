@@ -69,11 +69,13 @@ def spike() -> dict:
     def _shadow_kernel(
         x_ptr,
         stats_buf_ptr,              # [N, 4] stats
-        counter_ptr,                # [1] int32 atomic
-        blob_buf_ptr,               # [max_blob_slots, max_blob_numel]
-        blob_meta_ptr,              # [max_blob_slots] int32 (n_elements per slot)
+        counter_ptr,                # [1] int32 stats atomic
+        blob_buf_ptr,               # [n_blob_slots, max_blob_numel]
+        blob_meta_ptr,              # [n_blob_slots, 2] int32 (numel, global_idx)
+        blob_counter_ptr,           # [1] int32 blob ring-buffer atomic
         first_n_steps,              # int — record blob if idx < this
-        max_blob_slots,             # int — sanity clamp
+        every_n_steps,              # int — record blob if idx % this == 0; 0 disables
+        n_blob_slots,               # int — ring buffer capacity
         max_blob_numel,             # int — per-slot capacity
         n_elements,
         BLOCK_SIZE: tl.constexpr,
@@ -98,29 +100,40 @@ def spike() -> dict:
         tl.store(stats_buf_ptr + idx * 4 + 2, s_abs_max)
         tl.store(stats_buf_ptr + idx * 4 + 3, s_std)
 
-        # Conditional blob write. Mask gates the actual store; clamp the
-        # blob index to keep address math safe when masked off.
-        record_blob = (idx < first_n_steps) & (idx < max_blob_slots)
-        safe_blob_idx = tl.minimum(idx, max_blob_slots - 1)
+        # Composable blob recording: first_n OR every_n.
+        record_first_n = (first_n_steps > 0) & (idx < first_n_steps)
+        record_every_n = (every_n_steps > 0) & ((idx % every_n_steps) == 0)
+        should_record_blob = record_first_n | record_every_n
+
+        # Atomic blob slot (gated by mask).
+        blob_count = tl.atomic_add(blob_counter_ptr, 1, mask=should_record_blob)
+        blob_slot = blob_count % n_blob_slots
+        safe_blob_slot = tl.minimum(blob_slot, n_blob_slots - 1)
+
+        # Blob data + metadata writes.
         blob_offset_in_range = offsets < tl.minimum(n_elements, max_blob_numel)
-        blob_write_mask = record_blob & blob_offset_in_range
+        blob_write_mask = should_record_blob & blob_offset_in_range
         tl.store(
-            blob_buf_ptr + safe_blob_idx * max_blob_numel + offsets,
+            blob_buf_ptr + safe_blob_slot * max_blob_numel + offsets,
             x_f,
             mask=blob_write_mask,
         )
-        tl.store(blob_meta_ptr + safe_blob_idx, n_elements, mask=record_blob)
+        tl.store(blob_meta_ptr + safe_blob_slot * 2 + 0, n_elements, mask=should_record_blob)
+        tl.store(blob_meta_ptr + safe_blob_slot * 2 + 1, idx, mask=should_record_blob)
 
     # ------------------------------------------------------------------
     # 2. Pre-allocated buffers (lifetime = container)
     # ------------------------------------------------------------------
     BUF_SIZE = 10_000
-    FIRST_N_STEPS = 5      # record full tensors for the first 5 captures
+    FIRST_N_STEPS = 2      # record full tensors for the first 2 captures
+    EVERY_N_STEPS = 10     # AND every 10th capture
+    N_BLOB_SLOTS = 16      # ring buffer for blobs
     MAX_BLOB_NUMEL = 64    # 2-layer MLP intermediate is 32 elements; 64 has headroom
     stats_buffer = torch.zeros((BUF_SIZE, 4), device=device, dtype=torch.float32)
     counter = torch.zeros((1,), device=device, dtype=torch.int32)
-    blob_buffer = torch.zeros((FIRST_N_STEPS, MAX_BLOB_NUMEL), device=device, dtype=torch.float32)
-    blob_meta = torch.zeros((FIRST_N_STEPS,), device=device, dtype=torch.int32)
+    blob_buffer = torch.zeros((N_BLOB_SLOTS, MAX_BLOB_NUMEL), device=device, dtype=torch.float32)
+    blob_meta = torch.zeros((N_BLOB_SLOTS, 2), device=device, dtype=torch.int32)
+    blob_counter = torch.zeros((1,), device=device, dtype=torch.int32)
 
     def shadow_capture(x: torch.Tensor) -> torch.Tensor:
         """Pass-through capture: launches the Triton kernel and returns x."""
@@ -128,8 +141,8 @@ def spike() -> dict:
         BLOCK = triton.next_power_of_2(n)
         _shadow_kernel[(1,)](
             x, stats_buffer, counter,
-            blob_buffer, blob_meta,
-            FIRST_N_STEPS, FIRST_N_STEPS, MAX_BLOB_NUMEL,
+            blob_buffer, blob_meta, blob_counter,
+            FIRST_N_STEPS, EVERY_N_STEPS, N_BLOB_SLOTS, MAX_BLOB_NUMEL,
             n, BLOCK_SIZE=BLOCK,
         )
         return x
@@ -179,8 +192,14 @@ def spike() -> dict:
 
         with torch.cuda.graph(g):
             _ = model(x)
-        print(f"after graph capture: counter={counter.item()}  (1 capture pass)")
+        print(f"after graph capture: counter={counter.item()}  (record-only)")
+        # Reset all GPU state so the replay-phase verification sees only
+        # the replays' contribution. The captured kernels reference these
+        # buffers by pointer, so the resets don't break the graph.
         counter.zero_()
+        blob_counter.zero_()
+        blob_buffer.zero_()
+        blob_meta.zero_()
 
         # ----------------------------------------------------------------
         # 6. Replay N times
@@ -207,60 +226,61 @@ def spike() -> dict:
     # ------------------------------------------------------------------
     # 8. Verify blob recording
     # ------------------------------------------------------------------
-    # Each of the first FIRST_N_STEPS replays should have written:
-    #   blob_buffer[idx, :n_elements] = the actual fc1 output values
-    #   blob_meta[idx] = n_elements (32 for our 16->32 layer)
-    blob_meta_cpu = blob_meta.cpu().tolist()
-    blob_populated_meta = sum(1 for v in blob_meta_cpu if v > 0)
-    expected_n_elements = 32  # fc1 output is (1, 32) → 32 elements
-    blob_meta_correct = all(v == expected_n_elements for v in blob_meta_cpu)
-    blob_populated_data = (blob_buffer.abs().sum(dim=1) > 0).sum().item()
+    # Expected blob captures across 100 replays with FIRST_N_STEPS=2,
+    # EVERY_N_STEPS=10:
+    #   first_n fires at idx 0, 1                  → 2 captures
+    #   every_n fires at idx 0, 10, 20, ..., 90    → 10 captures
+    # OR-combined: {0, 1, 10, 20, 30, 40, 50, 60, 70, 80, 90} → 11 distinct.
+    # Each fires the atomic counter once; total blob_count = 11.
+    expected_blob_count = 11
+    final_blob_count = blob_counter.item()
 
-    print(f"populated blob_meta entries (expected {FIRST_N_STEPS}): {blob_populated_meta}")
-    print(f"populated blob_buffer rows (data > 0): {blob_populated_data}")
+    blob_meta_cpu = blob_meta.cpu().tolist()
+    blob_populated_meta = sum(1 for row in blob_meta_cpu if row[0] > 0)
+    expected_n_elements = 32  # fc1 output is (1, 32) → 32 elements
+    blob_meta_correct = all(row[0] == expected_n_elements for row in blob_meta_cpu if row[0] > 0)
+
+    print(f"blob_counter (expected {expected_blob_count}): {final_blob_count}")
+    print(f"populated blob_meta entries: {blob_populated_meta}")
     print(f"blob_meta values: {blob_meta_cpu}")
-    print(f"blob_meta all equal {expected_n_elements}: {blob_meta_correct}")
-    # All N replays use the same captured input, so all blob rows should be
-    # IDENTICAL — verify by checking row 0 and row FIRST_N_STEPS-1 match.
-    blob_row_0 = blob_buffer[0, :expected_n_elements].cpu()
-    blob_row_last = blob_buffer[FIRST_N_STEPS - 1, :expected_n_elements].cpu()
-    blob_rows_identical = torch.equal(blob_row_0, blob_row_last)
-    print(f"blob row 0 matches blob row {FIRST_N_STEPS - 1}: {blob_rows_identical}")
+    print(f"blob_meta numel all equal {expected_n_elements}: {blob_meta_correct}")
+
+    # The 11 blob captures wrote to ring-buffer slots [0..10] (since
+    # 11 < N_BLOB_SLOTS=16, no wraparound). Verify the global_idx field
+    # of blob_meta matches the expected pattern.
+    global_idxs = sorted(row[1] for row in blob_meta_cpu if row[0] > 0)
+    expected_global_idxs = [0, 1, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+    blob_global_idxs_correct = global_idxs == expected_global_idxs
+    print(f"blob global_idx values (sorted): {global_idxs}")
+    print(f"expected global_idx values:      {expected_global_idxs}")
+    print(f"global_idxs match: {blob_global_idxs_correct}")
     print()
 
-    # PASS conditions:
-    #   - counter == N_REPLAYS                                  (stats atomic)
-    #   - all N_REPLAYS stats rows populated                    (stats writes)
-    #   - stats row[N_REPLAYS] still zero                       (no off-by-ones)
-    #   - FIRST_N_STEPS blob_meta entries correctly set         (blob meta)
-    #   - FIRST_N_STEPS blob_buffer rows populated              (blob data)
-    #   - all blob rows identical (same input replayed)         (consistency)
     pass_count = final_counter == N_REPLAYS
     pass_populated = populated == N_REPLAYS
     pass_sentinel = sentinel_row_is_zero
-    pass_blob_meta = blob_meta_correct and blob_populated_meta == FIRST_N_STEPS
-    pass_blob_data = blob_populated_data == FIRST_N_STEPS
-    pass_blob_consistency = blob_rows_identical
+    pass_blob_count = final_blob_count == expected_blob_count
+    pass_blob_global_idxs = blob_global_idxs_correct
+    pass_blob_meta_numel = blob_meta_correct
 
     verdict = {
         "final_counter": final_counter,
         "expected_counter": N_REPLAYS,
         "populated_stats_rows": populated,
         "sentinel_zero": sentinel_row_is_zero,
-        "populated_blob_meta": blob_populated_meta,
-        "populated_blob_data": blob_populated_data,
-        "blob_meta_values": blob_meta_cpu,
-        "expected_blob_rows": FIRST_N_STEPS,
-        "blob_rows_identical": blob_rows_identical,
+        "final_blob_count": final_blob_count,
+        "expected_blob_count": expected_blob_count,
+        "blob_global_idxs": global_idxs,
+        "expected_global_idxs": expected_global_idxs,
         "pass_count": pass_count,
         "pass_populated": pass_populated,
         "pass_sentinel": pass_sentinel,
-        "pass_blob_meta": pass_blob_meta,
-        "pass_blob_data": pass_blob_data,
-        "pass_blob_consistency": pass_blob_consistency,
+        "pass_blob_count": pass_blob_count,
+        "pass_blob_global_idxs": pass_blob_global_idxs,
+        "pass_blob_meta_numel": pass_blob_meta_numel,
         "overall_pass": (
             pass_count and pass_populated and pass_sentinel
-            and pass_blob_meta and pass_blob_data and pass_blob_consistency
+            and pass_blob_count and pass_blob_global_idxs and pass_blob_meta_numel
         ),
         "torch_version": torch.__version__,
         "triton_version": triton.__version__,
