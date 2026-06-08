@@ -16,7 +16,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-
 # ---------------------------------------------------------------------------
 # Custom op: pass-through with a side-effecting print (stand-in for the
 # ring-buffer write the real implementation will do).
@@ -129,7 +128,7 @@ def main() -> None:
 
     break_reasons = getattr(explanation, "break_reasons", None)
     if break_reasons:
-        print(f"  break_reasons:")
+        print("  break_reasons:")
         for r in break_reasons:
             print(f"    - {r}")
     else:
