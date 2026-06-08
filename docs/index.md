@@ -160,13 +160,17 @@ diverging, similar overall curve shape:
 I was about to declare the layer-7 boundary universal. But then the
 cross-family check broke it.
 
-**Cross-family stress test (5 more models).** Same comparison, swap
-the model again — to `Qwen/Qwen2.5-7B`, `mistralai/Mistral-7B-v0.1`,
-`microsoft/Phi-3-mini-4k-instruct`, `01-ai/Yi-1.5-9B`, and
-`google/gemma-2-9b`. All ought to sit in the same "production-class"
-regime as Llama-3.1-8B:
+**Cross-family stress test (7 more models, 7 more families).** Same
+comparison, swap the model again — to `Qwen/Qwen2.5-7B`,
+`mistralai/Mistral-7B-v0.1`, `microsoft/Phi-3-mini-4k-instruct`,
+`01-ai/Yi-1.5-9B`, `google/gemma-2-9b`, `tiiuae/falcon-7b`, and
+`bigscience/bloom-7b1`. The last two test architectural axes none of
+the earlier models had: **Falcon uses multi-query attention** (single
+KV head shared across all query heads) and **BLOOM uses ALiBi
+positional encoding** (per-position bias added to attention scores)
+rather than RoPE:
 
-![FLASH_ATTN vs XFORMERS across 7 models, 6 architecture families, x-axis normalized to forward-order fraction](plots/cross_family_flash_vs_xformers_7.png)
+![FLASH_ATTN vs XFORMERS across 9 models, 8 architecture families, x-axis normalized to forward-order fraction](plots/cross_family_flash_vs_xformers_9.png)
 
 |  model | first divergent tap | layer-0 rel error | final-norm rel error |
 | --- | --- | --- | --- |
@@ -176,24 +180,32 @@ regime as Llama-3.1-8B:
 | **Mistral-7B-v0.1** | **`layer.0.self_attn`** | 0.0005% | 1.12% |
 | **Phi-3-mini-4k** | **`layer.0.self_attn`** | ≈0.00005% | 1.18% |
 | **Yi-1.5-9B** | **`layer.2.self_attn`** | ~0% (bit-equal) | 1.06% |
-| **Gemma-2-9B** | **`layer.0.self_attn`** | **0.1979%** | **1.89%** |
+| **Gemma-2-9B** | **`layer.0.self_attn`** | 0.1979% | 1.89% |
+| **Falcon-7B (MQA)** | **`layer.0.self_attn`** | 0.0012% | 1.09% |
+| **BLOOM-7B1 (ALiBi)** | **`layer.0.self_attn`** | 0.0663% | 1.08% |
 
-Four things stand out:
+Five things stand out:
 
 1. **The layer-7 universality is real *within the Meta architecture
    lineage* (SmolLM, Llama-3) and breaks at every other family.**
-   Qwen, Mistral, Phi-3, and Gemma-2 all shift to layer 0 with FLASH
-   vs XFORMERS.
-2. **Yi lands at layer 2** — neither 0 (the other 4 non-Meta models)
-   nor 7 (Meta). So the pattern isn't even a clean "Meta-vs-not"
-   dichotomy; it's per-family.
-3. **Gemma-2's layer-0 rel error is the largest by ~40×** — 0.1979%
+   Six of seven non-Meta models shift to layer 0 with FLASH vs XFORMERS.
+2. **Yi-1.5-9B remains the lone outlier at layer 2** — neither 0
+   nor 7. With Falcon and BLOOM landing at layer 0 alongside Qwen /
+   Mistral / Phi-3 / Gemma-2, the pattern isn't even a clean
+   "Meta-vs-not" dichotomy; it's per-family.
+3. **Architecture features that *don't* matter for the
+   first-divergence layer:** Falcon's MQA (single KV head) and BLOOM's
+   ALiBi (no RoPE at all) both land at the same `layer.0.self_attn`
+   as the GQA-with-RoPE non-Meta models. The earlier "vLLM XFORMERS
+   dispatches differently per RoPE config" hypothesis is partially
+   refuted by BLOOM — no RoPE, still layer 0.
+4. **Gemma-2's layer-0 rel error is the largest by ~40×** — 0.1979%
    vs Qwen's 0.0052%. Likely because Gemma-2 uses hybrid sliding-window
    + full attention, so XFORMERS and FLASH_ATTN dispatch through very
    different code paths even at the first attention layer.
-4. **Final-norm relative errors fall in a 1.0%–1.9% band.** Where the
-   divergence *starts* varies by family, but the *aggregate* drift by
-   the final layer-norm doesn't.
+5. **Final-norm relative errors all fall in a 1.0%–1.9% band.** Where
+   the divergence *starts* varies by family, but the *aggregate* drift
+   by the final layer-norm doesn't.
 
 The most likely driver of the family-level variation is a
 vLLM-internal-dispatch effect. vLLM's XFORMERS backend takes different
@@ -216,9 +228,11 @@ of the universality claim:
   data points (SmolLM-135M, Llama-3.1-8B); the layer-7 boundary
   is stable.
 - **Across architecture families**: first-divergence layer
-  shifts, and the shift isn't even uniform. Five more data points
-  (Qwen-2.5, Mistral-7B, Phi-3-mini, Yi-1.5-9B, Gemma-2-9B); four
-  land at layer 0, one (Yi) lands at layer 2.
+  shifts, and the shift isn't even uniform. Seven more data points
+  (Qwen-2.5, Mistral-7B, Phi-3-mini, Yi-1.5-9B, Gemma-2-9B,
+  Falcon-7B, BLOOM-7B1) — six land at layer 0, one (Yi) at layer 2.
+  This holds for ALiBi (BLOOM, no RoPE) and MQA (Falcon, single
+  KV head) as well as the more typical RoPE+GQA setups.
 - The *mechanism* of "Firefly's per-layer attribution points at the
   first BF16-visible difference" is unchanged. What that layer
   index *is* depends on the architecture-family-specific kernel
@@ -363,10 +377,11 @@ is much larger than XFORMERS vs FLASH_ATTN's: ~0.05% relative at layer
 crosses BF16's representable threshold *immediately* in early-layer
 activations. In contrast to the XFORMERS layer-7 finding that broke at
 the family boundary, the FLASHINFER layer-0 finding holds across all
-six models I tested that can run FLASHINFER — covering Meta, Qwen,
-Mistral, 01.AI, and Google architecture lineages:
+eight models I tested that can run FLASHINFER — covering Meta, Qwen,
+Mistral, 01.AI, Google, TII (Falcon, MQA), and BigScience (BLOOM,
+ALiBi) architecture lineages:
 
-![FLASH_ATTN vs FLASHINFER across 6 models, 5 families](plots/cross_family_flash_vs_flashinfer_6.png)
+![FLASH_ATTN vs FLASHINFER across 8 models, 7 families](plots/cross_family_flash_vs_flashinfer_8.png)
 
 | model | first divergent tap | layer-0 rel | final-norm rel |
 | --- | --- | --- | --- |
@@ -376,6 +391,8 @@ Mistral, 01.AI, and Google architecture lineages:
 | Mistral-7B-v0.1 | `layer.0.self_attn` | 0.0489% | 1.23% |
 | Yi-1.5-9B | `layer.0.self_attn` | 0.0562% | 1.32% |
 | Gemma-2-9B | `layer.0.self_attn` | 0.0380% | 2.09% |
+| Falcon-7B (MQA) | `layer.0.self_attn` | 0.1104% | 1.06% |
+| BLOOM-7B1 (ALiBi) | `layer.0.self_attn` | **21.59%** | **22.00%** |
 
 So the kernel-pair-determines-the-divergence-layer story has *some*
 universal claims and some less-universal ones. FLASHINFER's per-element
@@ -383,9 +400,9 @@ diff is large enough to cross the BF16 threshold at layer 0 regardless
 of family-specific dispatch differences; XFORMERS's smaller per-element
 diff is sensitive to those differences.
 
-The Qwen final-norm number (22.83%) is a 20× outlier vs the other five
-models. That's not the universal story — that's its own finding, and
-Finding 5 below unpacks it.
+Two of the eight final-norm numbers are outliers: Qwen at 22.83% and
+BLOOM at 22.00%. They're not the universal story, and they have
+mechanistically *different* failure modes — that's Finding 5 below.
 
 **A separate FLASHINFER finding worth flagging.** When I tried to run
 the same comparison on Microsoft's `Phi-3-mini-4k-instruct`, vLLM
@@ -445,14 +462,19 @@ kernel itself changed; "first divergence is layer.7" knows it's a
 subtler kernel swap; "bit-equal at short and divergent at long" knows
 it's a blocking-strategy change.
 
-## Finding 5: Qwen-2.5-7B + FLASHINFER has a 20× catastrophic divergence at the final layer
+## Finding 5: FLASHINFER has two catastrophic-divergence regimes — one Qwen-shaped and one BLOOM-shaped
 
-The Qwen final-norm 22.83% number from Finding 4 is *not* a
-distributed-everywhere-large-error situation. It's a single-layer
-catastrophic spike. Through layers 0-26, Qwen FLASHINFER vs FLASH_ATTN
-tracks the other three models — gradually climbing from ~0.13% at
-layer 0 to ~1.2% by layer 26, almost identical to Mistral's curve.
-Then layer 27 happens:
+The Qwen and BLOOM final-norm numbers from Finding 4 (22.83% and
+22.00%) are *both* ~20× outliers vs the other six models. They look
+similar in magnitude. They are not the same mechanism.
+
+### The Qwen regime: late-layer outlier-feature spike
+
+The Qwen 22.83% is *not* a distributed-everywhere-large-error
+situation. It's a single-layer catastrophic spike. Through layers
+0-26, Qwen FLASHINFER vs FLASH_ATTN tracks the other models —
+gradually climbing from ~0.13% at layer 0 to ~1.2% by layer 26,
+almost identical to Mistral's curve. Then layer 27 happens:
 
 | layer | Qwen rel error | Qwen `mean(\|activation\|)` |
 | --- | --- | --- |
@@ -511,6 +533,40 @@ numerical divergence, and the diagnostic flow it took to surface it
 (swap one knob, run one Firefly check, look at the per-layer curve)
 is exactly the workflow this tool is for.
 
+### The BLOOM regime: kernel-fundamental divergence from layer 0
+
+BLOOM's 22.00% looks superficially similar to Qwen's 22.83% — both
+are ~20× outliers, both surface with FLASHINFER. But the per-tap
+curve tells a different story: BLOOM hits its catastrophic regime
+*immediately at layer 0* (`layer.0.self_attn` is already at 21.59%
+rel error), and the curve stays flat at ~22% across every layer
+through final_norm. There's no gradual climb, no late-layer spike,
+no per-layer mechanism to point at. The kernel is just wrong from
+the first attention call.
+
+The plausible explanation: BLOOM uses ALiBi positional encoding —
+attention scores get a position-dependent bias added in instead of
+having Q/K rotated by RoPE. FLASHINFER's attention kernels are
+optimized around RoPE-first models; if its ALiBi path isn't
+hand-tuned (or falls back to a generic implementation) and accumulates
+the bias in a different precision than FLASH_ATTN does, the
+per-element difference is large enough that even a single-token
+prompt produces a 22% relative error at the first attention.
+
+The takeaway for the diagnostic story: Firefly's per-layer attribution
+*also* distinguishes the two catastrophic regimes from each other,
+even though they show up at the same final-norm aggregate magnitude.
+A production observability dashboard that gates on output similarity
+would lump the two together; per-layer attribution shows that one is
+a localized late-layer issue solvable by skipping FLASHINFER on
+Qwen-specifically, and the other is a kernel-wide ALiBi-vs-FLASH_ATTN
+mismatch that affects every BLOOM-class deployment uniformly.
+
+For a production stack picking attention backends, **the practical
+implication is "FLASHINFER is not a drop-in for ALiBi-positional
+models in BF16."** It's an architectural mismatch, not a per-model
+quirk.
+
 ## What I think this means for ML CI
 
 A few unromantic takeaways:
@@ -551,14 +607,15 @@ will miss most real upgrade-time bugs.
 
 ## Limitations I should flag
 
-- **Seven models, six architecture families.** SmolLM-135M and
-  Llama-3.1-8B (Meta lineage), Qwen-2.5-7B, Mistral-7B-v0.1,
-  Phi-3-mini-4k, Yi-1.5-9B, Gemma-2-9B. The XFORMERS layer-7
-  universality from Finding 1.5 is within-Meta only; non-Meta is
-  layer 0 on 4 of 5 (Qwen, Mistral, Phi-3, Gemma-2) with Yi as the
-  outlier at layer 2. FLASHINFER's layer-0 universality from
-  Finding 4 holds across all six models that support FLASHINFER
-  (Phi-3 doesn't, head_dim=96).
+- **Nine models, eight architecture families.** Meta lineage
+  (SmolLM-135M, Llama-3.1-8B), Qwen-2.5-7B, Mistral-7B-v0.1,
+  Phi-3-mini-4k, Yi-1.5-9B, Gemma-2-9B, Falcon-7B (MQA + RoPE),
+  BLOOM-7B1 (MHA + ALiBi). The XFORMERS layer-7 pattern is
+  within-Meta only; non-Meta is layer 0 on 6 of 7 with Yi as the
+  outlier at layer 2 — regardless of MQA vs GQA or RoPE vs ALiBi.
+  FLASHINFER's layer-0 universality holds across all 8 models that
+  can run FLASHINFER (Phi-3 hard-incompatible, head_dim=96; BLOOM
+  runs but produces a 22% kernel-wide ALiBi mismatch).
 - **One precision format primarily.** Most of my runs are BF16; the
   earlier validation work showed FP32 is bit-deterministic on the same
   setup, and FP16 behaves like BF16 from a reproducibility standpoint
