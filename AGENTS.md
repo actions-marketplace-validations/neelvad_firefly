@@ -97,24 +97,26 @@ v2 is **mostly done**:
 - ✅ **Llama-3.1-8B validation** — drives Finding 1.5 (within-Meta universality at layer 7) and Finding 4 (cross-model FLASHINFER at layer 0).
 - ✅ **Long-prompt series (1k/2k/4k)** — Finding 3 rewritten as a step function: bit-equal at 9 tokens, saturated at ~2.8% final-norm rel from 1k through 4k. Block-boundary > 1 is the threshold, not length.
 - ✅ **FLASHINFER backend** — drives Finding 4. **Working install path: `nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04` + `add_python="3.11"` + explicit pip-install of vllm + flashinfer**. Other paths (debian_slim, vllm-openai docker image) failed and are documented in `project_firefly_flashinfer_finding.md`.
-- ✅ **Cross-family check (Qwen + Mistral)** — drives Finding 1.5 rewrite + Finding 5. The XFORMERS layer-7 universality is within-Meta only; FLASHINFER layer-0 holds across all 4 models, 3 families; Qwen-2.5-7B + FLASHINFER has a localized 20× catastrophic divergence at its final layer 27.
-
-Remaining v2 nice-to-haves (small):
-
-- **More cross-family models** (Gemma-2-9B, Phi-3, Yi-1.5-9B) — extend the 4-model table to 5+.
-- **2k/4k Llama FLASHINFER captures** — does the monotonic-growth curve saturate eventually? Two captures, ~$1.
-- **Reproducibility re-capture of Qwen+FLASHINFER** — currently N=1 on the 22.83% number; one more capture resolves the "is it a fluke" objection.
-- **Extend `scripts/vllm_test_suite.yml`** with the Qwen + Mistral cross-family comparisons.
+- ✅ **Cross-family check (9 models, 8 families)** — drives Finding 1.5 rewrite + Finding 5. SmolLM, Llama (Meta), Qwen, Mistral, Phi-3, Yi, Gemma-2, Falcon-7B (MQA+RoPE), BLOOM-7B1 (MHA+ALiBi). XFORMERS layer-7 within-Meta only; non-Meta is layer 0 on 6 of 7 (Yi is the lone layer-2 outlier) regardless of MQA-vs-GQA or RoPE-vs-ALiBi. FLASHINFER layer-0 universality holds across all 8 supported models. **BLOOM+FLASHINFER is a SECOND catastrophic outlier** (22% from layer 0, flat through network — kernel-fundamental ALiBi mismatch, different mechanism from Qwen's layer-27 spike). Qwen+FLASHINFER 22.83% spike reproduces bit-identically (N=2). Phi-3 hard-incompatible with FLASHINFER (head_dim=96). MPT was attempted as second ALiBi point but mosaicml/mpt-7b returns 404 (Mosaic acquired by Databricks, model deprecated).
+- ✅ **Llama 2k/4k FLASHINFER captures** — Finding 4 length curve now 4 points (9/1k/2k/4k). Plateaus past 1k just like V0 vs V1, but at a higher plateau (~3% vs ~2.8%).
+- ✅ **Cross-family entries in `scripts/vllm_test_suite.yml`** — 12 tests total (7 original SmolLM + 5 cross-family Qwen/Mistral).
+- ✅ **Model-layout probe** — `scripts/capture_vllm.py:_find_model_layout` handles Llama/Gemma/Qwen/Mistral/Yi (model.model.layers), Falcon/BLOOM (model.transformer.h), MPT (model.transformer.blocks) without special-casing.
+- ✅ **`trust_remote_code=True` in vLLM init** — required for MPT-class repos; safe because the script runs in an isolated Modal container with explicit model IDs.
 
 v3 is **in progress**:
 
 - ✅ **GCS storage backend** — `gs://bucket/prefix` (or `gcs://`), Application Default Credentials, ETag-based incremental sync. Optional install via `pip install 'firefly[gcs]'`.
 - ✅ **Azure Blob storage backend** — `az://account/container/prefix`, `AZURE_STORAGE_CONNECTION_STRING` or `DefaultAzureCredential` (managed identity / az CLI / env vars). Optional install via `pip install 'firefly[azure]'`.
+- 🚧 **Shadow-mode capture against production traffic** — **designed 2026-06-08**, ready to start. See `project_firefly_shadow_mode_design.md` memory for the full architecture sketch and decisions baked in (pass-through op semantics, summary stats always + full tensors on alert/periodic, user tap-regex filter, mutex-protected ring buffer, local log sink for prototype). Eager + torch.compile MVP scope; CUDA graphs deferred to v1.1. **First concrete step: 1-day spike on `torch.library.Library.define` + `torch.compile` — does a noop pass-through custom op survive Dynamo tracing without graph breaks?** If yes, the rest is normal Python work. If no, the architecture pivots.
 
 v3 deferred (multi-session):
 
-- **Shadow-mode capture against production traffic** — needs custom op for CUDA-graph / torch.compile compat. Weeks, not days.
 - **Hosted dashboard** — the monetization seam; hold for actual usage signal.
+
+v3.5+ (separate features, not part of shadow-mode):
+
+- **Embedding-table / ID-drift monitoring** — recsys-leaning. Snapshot + diff at training time, not streaming during inference. Adjacent to shadow-mode but a different mechanism.
+- **Per-head attention capture** — would let us diagnose the Qwen layer-27 spike mechanistically rather than speculating. Refinement of CI-time tooling.
 
 ## Non-obvious decisions to preserve
 
