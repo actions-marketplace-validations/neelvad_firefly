@@ -337,6 +337,191 @@ def _drain(buf: shadow._Buffer) -> list:
     return events
 
 
+# ---------------------------------------------------------------------------
+# Cloud streaming sinks
+# ---------------------------------------------------------------------------
+
+
+def test_make_sink_dispatches_local_path(tmp_path: Path) -> None:
+    sink = shadow.make_sink(tmp_path / "logs")
+    assert isinstance(sink, shadow.LocalLogSink)
+    sink.close()
+
+
+def test_make_sink_unknown_scheme_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown sink scheme"):
+        shadow.make_sink("r2://bucket/prefix")
+
+
+def test_make_sink_dispatches_s3(monkeypatch) -> None:
+    """boto3.client is the real construction; mock it."""
+    from unittest.mock import MagicMock as MM
+    monkeypatch.setattr("boto3.client", lambda _name: MM())
+    sink = shadow.make_sink("s3://my-bucket/prefix")
+    assert isinstance(sink, shadow.S3Sink)
+    sink.close()
+
+
+def test_make_sink_dispatches_gcs(monkeypatch) -> None:
+    """google.cloud.storage.Client is the construction; mock it."""
+    from unittest.mock import MagicMock as MM
+    monkeypatch.setattr("google.cloud.storage.Client", lambda: MM())
+    sink = shadow.make_sink("gs://my-bucket/prefix")
+    assert isinstance(sink, shadow.GCSSink)
+    sink.close()
+
+
+def test_make_sink_dispatches_azure(monkeypatch) -> None:
+    """_azure_client construction; mock it. azure-storage-blob's
+    DefaultAzureCredential search is slow without env var set; provide it."""
+    from unittest.mock import MagicMock as MM
+    monkeypatch.setenv(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=fake==;EndpointSuffix=core.windows.net",
+    )
+    monkeypatch.setattr("firefly.storage._azure_client", lambda _account: MM())
+    sink = shadow.make_sink("az://myacct/mycontainer/prefix")
+    assert isinstance(sink, shadow.AzureSink)
+    sink.close()
+
+
+def test_s3_sink_writes_sharded_stats_and_blobs(monkeypatch) -> None:
+    """End-to-end S3 sink: feed it events, verify the right put_object calls fire."""
+    from unittest.mock import MagicMock as MM
+
+    client = MM()
+    monkeypatch.setattr("boto3.client", lambda _name: client)
+    sink = shadow.S3Sink("s3://my-bucket/refs/v1")
+
+    # 3 events: two stats-only, one with a tensor blob.
+    for i in range(3):
+        sink.write(
+            shadow._Event(
+                request_id=None,
+                tap_name=f"tap.{i}",
+                step=i,
+                stats={"shape": [4], "dtype": "float32", "mean": float(i)},
+                tensor=torch.tensor([float(i), 0.1]) if i == 1 else None,
+                timestamp=0.0,
+            )
+        )
+    sink.close()
+
+    # Inspect put_object calls.
+    keys = [call.kwargs["Key"] for call in client.put_object.call_args_list]
+    buckets = {call.kwargs["Bucket"] for call in client.put_object.call_args_list}
+    assert buckets == {"my-bucket"}
+    # The blob upload happened first (write of event 1), then the shard on close.
+    assert "refs/v1/blobs/00000000.pt" in keys
+    assert "refs/v1/stats-00000.jsonl" in keys
+
+
+def test_s3_sink_sidecar_uploads(monkeypatch) -> None:
+    from unittest.mock import MagicMock as MM
+
+    client = MM()
+    monkeypatch.setattr("boto3.client", lambda _name: client)
+    sink = shadow.S3Sink("s3://my-bucket/refs/v1")
+    sink.write_sidecar("tap_index.json", '{"0": "layer.0"}')
+    sink.close()
+
+    keys = [call.kwargs["Key"] for call in client.put_object.call_args_list]
+    assert "refs/v1/tap_index.json" in keys
+
+
+def test_gcs_sink_writes_sharded_stats(monkeypatch) -> None:
+    from unittest.mock import MagicMock as MM
+
+    bucket = MM()
+    client = MM()
+    client.bucket = MM(return_value=bucket)
+    monkeypatch.setattr("google.cloud.storage.Client", lambda: client)
+    sink = shadow.GCSSink("gs://my-bucket/refs/v1")
+
+    sink.write(
+        shadow._Event(
+            request_id=None,
+            tap_name="t",
+            step=0,
+            stats={},
+            tensor=None,
+            timestamp=0.0,
+        )
+    )
+    sink.close()
+    # Inspect the upload_from_string calls.
+    blob_calls = bucket.blob.call_args_list
+    keys = [c.args[0] for c in blob_calls]
+    assert "refs/v1/stats-00000.jsonl" in keys
+
+
+def test_azure_sink_writes_sharded_stats(monkeypatch) -> None:
+    from unittest.mock import MagicMock as MM
+
+    monkeypatch.setenv(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=fake==;EndpointSuffix=core.windows.net",
+    )
+    azure_client = MM()
+    container_client = MM()
+    azure_client.get_container_client = MM(return_value=container_client)
+    monkeypatch.setattr("firefly.storage._azure_client", lambda _acct: azure_client)
+    sink = shadow.AzureSink("az://myacct/mycontainer/refs/v1")
+
+    sink.write(
+        shadow._Event(
+            request_id=None,
+            tap_name="t",
+            step=0,
+            stats={},
+            tensor=None,
+            timestamp=0.0,
+        )
+    )
+    sink.close()
+    upload_calls = container_client.upload_blob.call_args_list
+    names = [c.kwargs["name"] for c in upload_calls]
+    assert "refs/v1/stats-00000.jsonl" in names
+
+
+def test_cloud_sink_errors_dont_crash_inference(monkeypatch) -> None:
+    """A failing upload should be logged, not raised."""
+    from unittest.mock import MagicMock as MM
+
+    client = MM()
+    client.put_object.side_effect = RuntimeError("network down")
+    monkeypatch.setattr("boto3.client", lambda _name: client)
+    sink = shadow.S3Sink("s3://my-bucket/refs/v1")
+
+    # Feed an event with a tensor; the blob upload will fail. write() must not
+    # raise, and the stats record should still get queued (without blob_path).
+    sink.write(
+        shadow._Event(
+            request_id=None,
+            tap_name="t",
+            step=0,
+            stats={"mean": 1.0},
+            tensor=torch.tensor([1.0, 2.0]),
+            timestamp=0.0,
+        )
+    )
+    sink.close()
+    # The shard flush also fails (same client), but close() shouldn't raise.
+
+
+def test_static_tapper_with_local_sink_writes_tap_index_via_sink(tmp_path: Path) -> None:
+    """After refactor: tap_index.json lands via the sink's write_sidecar,
+    not direct filesystem write. Verifies local sink still works."""
+    t = shadow.StaticTapper(
+        tmp_path / "logs", {0: "tap.0", 5: "tap.5"}, device="cpu"
+    )
+    assert (tmp_path / "logs" / "tap_index.json").exists()
+    data = json.loads((tmp_path / "logs" / "tap_index.json").read_text())
+    assert data == {"0": "tap.0", "5": "tap.5"}
+    # The sink is the local one, not a cloud one.
+    assert isinstance(t.sink, shadow.LocalLogSink)
+
+
 def _wait_for_lines(path: Path, expected: int, timeout: float = 2.0) -> None:
     """Poll for the drain thread to flush at least ``expected`` records."""
     deadline = time.time() + timeout
