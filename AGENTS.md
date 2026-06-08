@@ -40,10 +40,12 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 - ✅ **CI integration** — `action.yml` GitHub Action wrapper, `--ci-format markdown` for PR comments, `--max-rel-error` for cross-platform jitter, `--allow-default-tolerances` escape hatch
 - ✅ **HF Hub storage backend** — `hf://org/repo[@rev][/subpath]`; GCS/Azure stubbed with planned-for-vN errors (`src/firefly/storage.py`)
 - ✅ **S3 storage backend** — `s3://bucket/prefix`, boto3 default credential chain, ETag-based incremental sync into `$FIREFLY_CACHE_DIR` (v2 first item)
+- ✅ **HF Hub publish flow** — `firefly publish --reference <dir> --to <uri>`, plus `--push <uri>` on `capture` / `calibrate`. Supports hf:// and s3://.
 - ✅ **Recsys domain selector** — TorchRec / DLRM / DCN-v2 conventions in `tap_points.py`
 - ✅ **Reproducible parity suite** — `scripts/vllm_test_suite.yml` + `scripts/run_vllm_suite.py`; 7 tests passing
 - ✅ **v0.1.0 tag** — annotated tag created (commit before push); pinnable via `uses: neelvad/firefly@v0.1.0`
-- ✅ **Blog post drafted** — `docs/index.md` + `docs/_config.yml`, Cayman theme, ~2300 words; 3 inline plots; ready for GH Pages + HN submission
+- ✅ **Blog post — 5 findings** — `docs/index.md` covers Finding 1 (FLASH vs XFORMERS layer 7 on SmolLM), Finding 1.5 (cross-scale + cross-family check: within-Meta holds, breaks across families), Finding 2 (decode KV-cache propagation), Finding 3 (V0 vs V1 step function across 9/1k/2k/4k tokens on Llama), Finding 4 (FLASH vs FLASHINFER layer-0 universal across 4 models), Finding 5 (Qwen+FLASHINFER catastrophic layer-27 spike, 20× outlier).
+- ✅ **Modal image variants in `scripts/capture_vllm.py`** — `0.7.3` and `0.8.5` on `debian_slim`; `0.8.5-fi` on `nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04` with `add_python="3.11"` for the FLASHINFER backend. Shared HF cache via `firefly-hf-cache` Modal Volume mounted at `/root/.cache/huggingface`. `--max-seq-len` and `--gpu-memory-utilization` flags for production-scale runs.
 
 ## Architecture (load-bearing modules)
 
@@ -82,27 +84,36 @@ optional TF32 matmul. All results in `scripts/results/`. Key findings:
 
 ## Roadmap (current state)
 
-v1 is **code-complete and tagged at v0.1.0**. Blog post drafted in `docs/index.md`. The remaining v1 launch steps are user-actions, not engineering:
+v1 is **code-complete and tagged at v0.1.0**. Blog post in `docs/index.md` now has 5 findings (1, 1.5, 2, 3, 4, 5) including the cross-family rewrite of Finding 1.5 and the Qwen layer-27 catastrophic divergence (Finding 5). Remaining v1 launch steps are user-actions, not engineering:
 
-1. **Push commits and tag** (`git push && git push --tags`) — unpushed at session compact.
+1. **Push commits and tag** (`git push && git push --tags`) — many unpushed commits.
 2. **Enable GH Pages** in repo settings → Pages → source: branch main / folder `/docs`. URL becomes `neelvad.github.io/firefly`.
 3. **Submit to HN** (narrative-framing title from the post recommended over Show HN; Sunday evening / Monday morning US time).
 
-v2 is **in progress**:
+v2 is **mostly done**:
 
 - ✅ **S3 storage backend** — `s3://bucket/prefix`, boto3 default credential chain, ETag-based incremental sync. Optional install via `pip install 'firefly[s3]'`.
+- ✅ **HF Hub publish flow** — `firefly publish --reference <dir> --to <uri>` plus `--push <uri>` on `capture` and `calibrate`. HF + S3 both supported.
+- ✅ **Llama-3.1-8B validation** — drives Finding 1.5 (within-Meta universality at layer 7) and Finding 4 (cross-model FLASHINFER at layer 0).
+- ✅ **Long-prompt series (1k/2k/4k)** — Finding 3 rewritten as a step function: bit-equal at 9 tokens, saturated at ~2.8% final-norm rel from 1k through 4k. Block-boundary > 1 is the threshold, not length.
+- ✅ **FLASHINFER backend** — drives Finding 4. **Working install path: `nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04` + `add_python="3.11"` + explicit pip-install of vllm + flashinfer**. Other paths (debian_slim, vllm-openai docker image) failed and are documented in `project_firefly_flashinfer_finding.md`.
+- ✅ **Cross-family check (Qwen + Mistral)** — drives Finding 1.5 rewrite + Finding 5. The XFORMERS layer-7 universality is within-Meta only; FLASHINFER layer-0 holds across all 4 models, 3 families; Qwen-2.5-7B + FLASHINFER has a localized 20× catastrophic divergence at its final layer 27.
 
-Remaining v2 items (do not start without explicit go-ahead):
+Remaining v2 nice-to-haves (small):
 
-- **FLASHINFER backend test** — three install paths documented in `project_firefly_flashinfer_deferred.md`; pick one deliberately
-- **Larger-model validation** (Llama-3-8B) — confirms the predicted layer-boundary shift; the post called out as not-yet-tested
-- **Long-prompt series at 1k/2k/4k** — tightens the load-bearing finding to "diverges at every length past PagedAttention block boundary"
+- **More cross-family models** (Gemma-2-9B, Phi-3, Yi-1.5-9B) — extend the 4-model table to 5+.
+- **2k/4k Llama FLASHINFER captures** — does the monotonic-growth curve saturate eventually? Two captures, ~$1.
+- **Reproducibility re-capture of Qwen+FLASHINFER** — currently N=1 on the 22.83% number; one more capture resolves the "is it a fluke" objection.
+- **Extend `scripts/vllm_test_suite.yml`** with the Qwen + Mistral cross-family comparisons.
 
-What's deferred to v3:
+v3 is **in progress**:
 
-- GCS / Azure storage backends
-- Shadow-mode capture against production traffic (needs custom op for CUDA-graph / torch.compile compat)
-- Hosted dashboard (the monetization seam; hold for actual usage signal)
+- 🚧 **GCS / Azure storage backends** — same pattern as S3, optional extras `[gcs]` / `[azure]`.
+
+v3 deferred (multi-session):
+
+- **Shadow-mode capture against production traffic** — needs custom op for CUDA-graph / torch.compile compat. Weeks, not days.
+- **Hosted dashboard** — the monetization seam; hold for actual usage signal.
 
 ## Non-obvious decisions to preserve
 

@@ -1,8 +1,6 @@
 """First-divergence-layer attribution.
 
-The user-facing value of Firefly is not "outputs differ" but "divergence
-first appears at model.layers.7.mlp, everything upstream matches." That's
-actionable. This module is the small, pure function that picks the first
+This module is the small, pure function that picks the first
 flagged tap from a forward-ordered divergence list.
 """
 

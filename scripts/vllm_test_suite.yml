@@ -5,18 +5,18 @@
 # diff between each pair, and reports pass/fail vs the expectation in a
 # markdown summary.
 #
-# All reference dirs were captured at:
-#   model:  HuggingFaceTB/SmolLM-135M
+# Reference dirs are captured at:
 #   dtype:  bfloat16
-#   prompt: "the quick brown fox jumps over the lazy dog"
-#   gpu:    A10G via Modal
+#   prompt: "the quick brown fox jumps over the lazy dog" (unless noted)
 #   tool:   scripts/capture_vllm.py
+# with the model and GPU varying per test. SmolLM-135M runs on A10G;
+# 7B+ models (Llama, Qwen, Mistral) on A100-40GB with --gpu-memory-utilization 0.7.
 #
 # Add a new test by appending an entry. Add a new vLLM version, attention
 # backend, or engine by extending scripts/capture_vllm.py first, capturing,
 # then declaring the new pair here.
 
-suite_name: "vLLM 0.8.5 inference parity matrix (BF16, SmolLM-135M)"
+suite_name: "vLLM 0.8.5 inference parity matrix (BF16, multi-model)"
 
 tests:
   - name: "cross-version (V0, auto backend)"
@@ -73,3 +73,45 @@ tests:
       # would make this test brittle to upstream vLLM changes that
       # legitimately move the boundary.
       n_divergent_min: 600
+
+  # --- cross-family checks (drives Finding 1.5 retraction + Finding 4 universality) -----
+
+  - name: "Qwen-2.5-7B FLASH_ATTN vs XFORMERS"
+    description: "Cross-family test of the Finding 1.5 universality claim. On Meta models (SmolLM, Llama) FLASH vs XFORMERS first-divergence is layer.7.self_attn. On Qwen-2.5-7B it shifts to layer.0.self_attn — the within-Meta universality does NOT hold across families. Most likely driver: vLLM's XFORMERS backend takes a different RoPE-handling code path for Qwen's theta=1000000 vs Llama's theta=500000+rope_scaling."
+    reference_a: scripts/results/qwen_v0_flash_short
+    reference_b: scripts/results/qwen_v0_xformers_short
+    expected:
+      first_divergence: layer.0.self_attn
+      n_divergent_min: 80  # actual 85/85
+
+  - name: "Mistral-7B-v0.1 FLASH_ATTN vs XFORMERS"
+    description: "Same cross-family test on Mistral. Confirms the Qwen result isn't a Qwen quirk — Mistral also shifts to layer.0.self_attn first-divergence, so the within-Meta layer-7 universality breaks at TWO different architecture families."
+    reference_a: scripts/results/mistral_v0_flash_short
+    reference_b: scripts/results/mistral_v0_xformers_short
+    expected:
+      first_divergence: layer.0.self_attn
+      n_divergent_min: 90  # actual 97/97
+
+  - name: "Llama-3.1-8B FLASH_ATTN vs FLASHINFER"
+    description: "Drives blog Finding 4. FLASH vs FLASHINFER per-element kernel diff is ~520× larger than FLASH vs XFORMERS at layer 0, so it crosses BF16's representable threshold immediately. Layer.0.self_attn is the first divergent tap, ~0.05% rel; final-norm ~1.3%."
+    reference_a: scripts/results/llama_v0_flash_short
+    reference_b: scripts/results/llama_v0_flashinfer_short
+    expected:
+      first_divergence: layer.0.self_attn
+      n_divergent_min: 90  # actual 97/97
+
+  - name: "Qwen-2.5-7B FLASH_ATTN vs FLASHINFER (Finding 5 anomaly)"
+    description: "Through Qwen layers 0-26, FLASH vs FLASHINFER tracks the other models closely (gradual climb to ~1.2% by layer 26). At Qwen's final layer 27, the relative error spikes 20× to 22.83% final-norm — driven by Qwen's outlier-feature concentration at depth (max-abs activation magnitude 252, largest of any model tested). Production-relevant catch for any Qwen-on-FLASHINFER serving stack."
+    reference_a: scripts/results/qwen_v0_flash_short
+    reference_b: scripts/results/qwen_v0_flashinfer_short
+    expected:
+      first_divergence: layer.0.self_attn
+      n_divergent_min: 80  # actual 85/85
+
+  - name: "Mistral-7B-v0.1 FLASH_ATTN vs FLASHINFER"
+    description: "Confirms FLASHINFER layer-0 universality across all 4 models. Mistral's curve sits at ~1.2% final-norm rel — similar to Llama, no catastrophic final-layer spike (Mistral spreads its outlier features across 32 layers rather than concentrating in the final 1-2)."
+    reference_a: scripts/results/mistral_v0_flash_short
+    reference_b: scripts/results/mistral_v0_flashinfer_short
+    expected:
+      first_divergence: layer.0.self_attn
+      n_divergent_min: 90  # actual 97/97
