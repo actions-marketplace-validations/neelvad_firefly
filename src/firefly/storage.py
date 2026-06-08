@@ -11,11 +11,14 @@ Supported:
 - GCS: ``gs://<bucket>/<prefix>/`` (requires ``google-cloud-storage``;
   uses Application Default Credentials — ``GOOGLE_APPLICATION_CREDENTIALS``,
   ``gcloud auth application-default login``, or GCE/GKE metadata server)
+- Azure Blob: ``az://<account>/<container>/<prefix>/`` (requires
+  ``azure-storage-blob``; uses ``AZURE_STORAGE_CONNECTION_STRING`` if
+  set, otherwise ``DefaultAzureCredential`` — managed identity, az CLI,
+  env-var-credentials, etc.)
 
-Planned: Azure (v3). Unsupported-but-recognized schemes raise
-``NotImplementedError`` with a clear message and the planned version,
-so users hitting them get a useful pointer rather than a generic
-"file not found" later in the pipeline.
+Unrecognized schemes are treated as local paths to match ``Path``'s
+permissive behavior; ill-formed URIs in a known scheme raise
+``ValueError`` with a clear hint.
 """
 
 from __future__ import annotations
@@ -25,10 +28,10 @@ import os
 import re
 from pathlib import Path
 
-_PLANNED_BACKENDS: dict[str, str] = {
-    "az": "v3",
-    "azure": "v3",
-}
+# All four storage schemes (local, hf, s3, gs, az) are now supported.
+# Keep the planned-backends map as the place to stub future schemes if
+# they get added (e.g., r2:// for Cloudflare R2 with a non-S3 client).
+_PLANNED_BACKENDS: dict[str, str] = {}
 
 
 _HF_REGEX = re.compile(
@@ -51,6 +54,19 @@ _S3_REGEX = re.compile(
 _GCS_REGEX = re.compile(
     r"^(?:gs|gcs)://"
     r"(?P<bucket>[^/]+)"
+    r"(?:/(?P<prefix>.*))?$",
+    re.IGNORECASE,
+)
+
+
+# az://<account>/<container>/<prefix>. Account explicit in the URI;
+# alternatives (env var, connection string with embedded account) get
+# complicated quickly and we'd rather have the URI itself be
+# unambiguously routable.
+_AZURE_REGEX = re.compile(
+    r"^(?:az|azure)://"
+    r"(?P<account>[^/]+)/"
+    r"(?P<container>[^/]+)"
     r"(?:/(?P<prefix>.*))?$",
     re.IGNORECASE,
 )
@@ -82,12 +98,15 @@ def resolve_reference(uri: str | Path) -> Path:
     if scheme in ("gs", "gcs"):
         return _resolve_gcs(raw)
 
+    if scheme in ("az", "azure"):
+        return _resolve_azure(raw)
+
     planned = _PLANNED_BACKENDS.get(scheme)
     if planned is not None:
         raise NotImplementedError(
             f"Reference scheme {scheme!r} is not yet supported "
-            f"(planned for {planned}). Use a local path, hf://<org>/<repo>, "
-            f"s3://<bucket>/<prefix>, or gs://<bucket>/<prefix>."
+            f"(planned for {planned}). Use a local path, hf://, s3://, "
+            f"gs://, or az://."
         )
 
     # Unknown scheme — treat as a path (matches Path's permissive behavior).
@@ -261,6 +280,116 @@ def _gcs_cache_dir(bucket: str, prefix: str) -> Path:
     return _cache_root() / "gcs" / bucket / safe_prefix
 
 
+def _azure_client(account: str):
+    """Build a BlobServiceClient using env-var auth.
+
+    Prefers ``AZURE_STORAGE_CONNECTION_STRING`` if set; otherwise uses
+    ``DefaultAzureCredential`` (managed identity, az CLI, env vars).
+    """
+    from azure.identity import DefaultAzureCredential
+    from azure.storage.blob import BlobServiceClient
+
+    conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    if conn_str:
+        return BlobServiceClient.from_connection_string(conn_str)
+    return BlobServiceClient(
+        account_url=f"https://{account}.blob.core.windows.net",
+        credential=DefaultAzureCredential(),
+    )
+
+
+def _resolve_azure(uri: str) -> Path:
+    """Mirror an Azure Blob prefix to a local cache, return the cache path."""
+    m = _AZURE_REGEX.match(uri)
+    if not m:
+        raise ValueError(
+            f"Invalid Azure URI {uri!r}. Expected format: "
+            f"az://<account>/<container>/<prefix>"
+        )
+    account = m.group("account")
+    container_name = m.group("container")
+    raw_prefix = (m.group("prefix") or "").strip("/")
+    prefix = f"{raw_prefix}/" if raw_prefix else ""
+
+    try:
+        from azure.core.exceptions import AzureError
+    except ImportError as e:
+        raise ImportError(
+            "azure-storage-blob and azure-identity are required for "
+            "az:// references but aren't installed. Install with: "
+            "pip install 'firefly[azure]'."
+        ) from e
+
+    cache_dir = _azure_cache_dir(account, container_name, raw_prefix)
+    try:
+        client = _azure_client(account)
+    except ImportError as e:
+        raise ImportError(
+            "azure-storage-blob and azure-identity are required for "
+            "az:// references but aren't installed. Install with: "
+            "pip install 'firefly[azure]'."
+        ) from e
+
+    try:
+        _sync_azure_prefix(client, container_name, prefix, cache_dir)
+    except AzureError as e:
+        raise RuntimeError(
+            f"Failed to sync Azure reference {uri!r}: {e}\n"
+            f"Check that the container exists and your credentials are "
+            f"set (AZURE_STORAGE_CONNECTION_STRING, or DefaultAzureCredential "
+            f"sources — managed identity, az CLI, env vars)."
+        ) from e
+
+    return cache_dir
+
+
+def _azure_cache_dir(account: str, container: str, prefix: str) -> Path:
+    """Cache directory for an Azure (account, container, prefix) tuple."""
+    safe_prefix = prefix.replace("/", "_") if prefix else "_root"
+    return _cache_root() / "azure" / account / container / safe_prefix
+
+
+def _sync_azure_prefix(client, container_name: str, prefix: str, cache_dir: Path) -> None:
+    """Mirror container/prefix into cache_dir, skipping unchanged blobs."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = cache_dir / "_manifest.json"
+    old_manifest: dict[str, str] = {}
+    if manifest_path.exists():
+        old_manifest = json.loads(manifest_path.read_text())
+
+    new_manifest: dict[str, str] = {}
+    container_client = client.get_container_client(container_name)
+    for blob in container_client.list_blobs(name_starts_with=prefix):
+        key = blob.name
+        # Azure ETags can be wrapped in double quotes; strip for stable comparison.
+        etag = (blob.etag or "").strip('"')
+        if key.endswith("/"):
+            continue
+        relpath = key[len(prefix):] if prefix and key.startswith(prefix) else key
+        if not relpath:
+            continue
+        new_manifest[key] = etag
+        local_path = cache_dir / relpath
+        if old_manifest.get(key) == etag and local_path.exists():
+            continue
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        blob_client = container_client.get_blob_client(key)
+        with open(local_path, "wb") as f:
+            f.write(blob_client.download_blob().readall())
+
+    for stale_key in set(old_manifest) - set(new_manifest):
+        relpath = (
+            stale_key[len(prefix):]
+            if prefix and stale_key.startswith(prefix)
+            else stale_key
+        )
+        stale_path = cache_dir / relpath
+        if stale_path.exists():
+            stale_path.unlink()
+
+    manifest_path.write_text(json.dumps(new_manifest, indent=2, sort_keys=True))
+
+
 def _sync_gcs_prefix(client, bucket_name: str, prefix: str, cache_dir: Path) -> None:
     """Mirror bucket/prefix into cache_dir, skipping unchanged objects."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -320,10 +449,12 @@ def publish_reference(
     * ``gs://<bucket>/<prefix>`` — uploads each file under
       ``local_path`` to ``<bucket>/<prefix>/<relpath>`` via
       google-cloud-storage.
+    * ``az://<account>/<container>/<prefix>`` — uploads each file
+      under ``local_path`` to ``<container>/<prefix>/<relpath>`` via
+      azure-storage-blob.
 
     Local destinations are intentionally not supported — use
-    ``cp -r`` instead. Azure raises ``NotImplementedError`` with the
-    planned version.
+    ``cp -r`` instead.
     """
     if not local_path.exists():
         raise FileNotFoundError(f"Reference directory does not exist: {local_path}")
@@ -344,12 +475,14 @@ def publish_reference(
         return _publish_s3(local_path, uri)
     if scheme in ("gs", "gcs"):
         return _publish_gcs(local_path, uri)
+    if scheme in ("az", "azure"):
+        return _publish_azure(local_path, uri)
 
     planned = _PLANNED_BACKENDS.get(scheme)
     if planned is not None:
         raise NotImplementedError(
             f"Publishing to scheme {scheme!r} is not yet supported "
-            f"(planned for {planned}). Use hf://, s3://, or gs://."
+            f"(planned for {planned}). Use hf://, s3://, gs://, or az://."
         )
     raise ValueError(f"Unknown URI scheme {scheme!r}")
 
@@ -427,6 +560,54 @@ def _publish_s3(local_path: Path, uri: str) -> None:
             f"Failed to publish to S3 {uri!r}: {e}\n"
             f"Check that the bucket exists and your credentials have "
             f"PutObject permission."
+        ) from e
+
+
+def _publish_azure(local_path: Path, uri: str) -> None:
+    """Upload each file under local_path to az://account/container/prefix/<relpath>."""
+    m = _AZURE_REGEX.match(uri)
+    if not m:
+        raise ValueError(
+            f"Invalid Azure URI {uri!r}. Expected format: "
+            f"az://<account>/<container>/<prefix>"
+        )
+    account = m.group("account")
+    container_name = m.group("container")
+    raw_prefix = (m.group("prefix") or "").strip("/")
+    prefix = f"{raw_prefix}/" if raw_prefix else ""
+
+    try:
+        from azure.core.exceptions import AzureError
+    except ImportError as e:
+        raise ImportError(
+            "azure-storage-blob and azure-identity are required for "
+            "az:// publish but aren't installed. Install with: "
+            "pip install 'firefly[azure]'."
+        ) from e
+
+    try:
+        client = _azure_client(account)
+    except ImportError as e:
+        raise ImportError(
+            "azure-storage-blob and azure-identity are required for "
+            "az:// publish but aren't installed. Install with: "
+            "pip install 'firefly[azure]'."
+        ) from e
+
+    try:
+        container_client = client.get_container_client(container_name)
+        for file in sorted(local_path.rglob("*")):
+            if not file.is_file():
+                continue
+            relpath = file.relative_to(local_path).as_posix()
+            key = f"{prefix}{relpath}"
+            with open(file, "rb") as f:
+                container_client.upload_blob(name=key, data=f, overwrite=True)
+    except AzureError as e:
+        raise RuntimeError(
+            f"Failed to publish to Azure {uri!r}: {e}\n"
+            f"Check that the container exists and your credentials have "
+            f"Blob Data Contributor permission."
         ) from e
 
 

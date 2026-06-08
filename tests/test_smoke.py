@@ -57,19 +57,20 @@ def test_calibrate_help_lists_push_flag() -> None:
     assert "--push" in _plain(result.stdout)
 
 
-def test_publish_planned_scheme_exits_cleanly(tmp_path: Path) -> None:
-    """`firefly publish --to gs://...` should hit the planned-vN error path."""
+def test_publish_malformed_uri_exits_cleanly(tmp_path: Path) -> None:
+    """`firefly publish --to <malformed>` should exit non-zero with a clear message."""
     ref = tmp_path / "ref"
     ref.mkdir()
     (ref / "manifest.json").write_text("{}")
 
+    # az:// with only a container (missing account/) should fail the URI regex.
     result = runner.invoke(
         app,
-        ["publish", "--reference", str(ref), "--to", "az://my-container/ref"],
+        ["publish", "--reference", str(ref), "--to", "az://just-one-segment"],
     )
     assert result.exit_code != 0
     combined = _plain(result.output + (result.stderr or ""))
-    assert "planned for v3" in combined
+    assert "az://" in combined
 
 
 def test_capture_command_advertises_options() -> None:
@@ -111,9 +112,9 @@ def test_check_advertises_allow_default_tolerances_flag() -> None:
     assert "--allow-default-tolerances" in _plain(result.stdout)
 
 
-def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> None:
-    """An az:// reference path should fail with a 'planned for v3' message,
-    not the generic 'tolerances.json not found' error."""
+def test_check_emits_clean_error_on_malformed_remote_uri(tmp_path: Path) -> None:
+    """A malformed az:// URI should error before getting to the
+    'tolerances.json not found' check."""
     inputs = tmp_path / "x.json"
     inputs.write_text("{}")
 
@@ -121,20 +122,18 @@ def test_check_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> 
         app,
         [
             "check",
-            "--reference", "az://my-container/some-ref",
+            "--reference", "az://just-one-segment",
             "--candidate", "HuggingFaceTB/SmolLM-135M",
             "--inputs", str(inputs),
         ],
     )
     assert result.exit_code != 0
     combined = _plain(result.output + (result.stderr or ""))
-    assert "planned for v3" in combined
-    assert "'az'" in combined or "az" in combined
+    assert "az://" in combined
 
 
-def test_calibrate_emits_planned_message_for_known_remote_scheme(tmp_path: Path) -> None:
-    """Same scheme validation should fire on calibrate (hf:// / s3:// / gs://
-    are now supported; az:// remains stubbed)."""
+def test_calibrate_emits_clean_error_on_malformed_remote_uri(tmp_path: Path) -> None:
+    """Same URI validation should fire on calibrate."""
     inputs = tmp_path / "x.json"
     inputs.write_text("{}")
 
@@ -142,13 +141,13 @@ def test_calibrate_emits_planned_message_for_known_remote_scheme(tmp_path: Path)
         app,
         [
             "calibrate",
-            "--reference", "az://my-container/some-ref",
+            "--reference", "az://just-one-segment",
             "--inputs", str(inputs),
         ],
     )
     assert result.exit_code != 0
     combined = _plain(result.output + (result.stderr or ""))
-    assert "planned for v3" in combined
+    assert "az://" in combined
 
 
 def test_check_refuses_without_calibration(tmp_path: Path) -> None:

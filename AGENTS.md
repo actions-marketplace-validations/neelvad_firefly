@@ -108,7 +108,8 @@ Remaining v2 nice-to-haves (small):
 
 v3 is **in progress**:
 
-- 🚧 **GCS / Azure storage backends** — same pattern as S3, optional extras `[gcs]` / `[azure]`.
+- ✅ **GCS storage backend** — `gs://bucket/prefix` (or `gcs://`), Application Default Credentials, ETag-based incremental sync. Optional install via `pip install 'firefly[gcs]'`.
+- ✅ **Azure Blob storage backend** — `az://account/container/prefix`, `AZURE_STORAGE_CONNECTION_STRING` or `DefaultAzureCredential` (managed identity / az CLI / env vars). Optional install via `pip install 'firefly[azure]'`.
 
 v3 deferred (multi-session):
 

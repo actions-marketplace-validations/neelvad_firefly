@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -18,9 +19,11 @@ def test_relative_path_passes_through() -> None:
     assert resolve_reference("./reference") == Path("./reference")
 
 
-def test_planned_azure_scheme_raises_with_version() -> None:
-    with pytest.raises(NotImplementedError, match="planned for v3"):
-        resolve_reference("az://my-container/ref")
+def test_unknown_scheme_treated_as_path() -> None:
+    """Unknown schemes pass through as local paths (matches Path's permissive behavior)."""
+    # No more planned-vN stubs — all 4 cloud backends ship.
+    # An obviously-not-a-real scheme like ``r2://`` is just a path.
+    assert resolve_reference("r2://bucket/ref") == Path("r2://bucket/ref")
 
 
 def test_hf_uri_invokes_snapshot_download(tmp_path: Path) -> None:
@@ -260,10 +263,13 @@ def test_publish_file_instead_of_dir_raises(tmp_path: Path) -> None:
         publish_reference(f, "hf://my-org/my-ref")
 
 
-def test_publish_planned_scheme_raises(tmp_path: Path) -> None:
+def test_publish_unknown_scheme_treated_as_path(tmp_path: Path) -> None:
+    """An unknown scheme (no planned-vN stubs left) should not be a remote target."""
     ref = _make_reference_dir(tmp_path)
-    with pytest.raises(NotImplementedError, match="planned for v3"):
-        publish_reference(ref, "az://container/ref")
+    # Scheme dispatcher doesn't know r2://, so _extract_scheme returns "r2"
+    # which isn't in any known set and isn't planned — raises ValueError.
+    with pytest.raises(ValueError, match="Unknown URI scheme"):
+        publish_reference(ref, "r2://my-bucket/ref")
 
 
 def test_publish_hf_calls_upload_folder(tmp_path: Path) -> None:
@@ -483,3 +489,197 @@ def test_gcs_missing_library_raises_import_error(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match=r"firefly\[gcs\]"):
         resolve_reference("gs://my-bucket/refs/v1")
+
+
+# --- Azure backend ----------------------------------------------------------
+
+
+def _fake_azure_client(objects: dict[str, tuple[str, bytes]]) -> MagicMock:
+    """Build a MagicMock BlobServiceClient backed by an in-memory object map.
+
+    Tracks ``client.downloads`` and ``client.uploads`` (lists of (key, local_path))
+    for tests to inspect, mirroring the GCS fake.
+    """
+    client = MagicMock()
+    client.downloads = []
+    client.uploads = []
+
+    def make_blob(name: str, etag: str) -> MagicMock:
+        blob = MagicMock()
+        blob.name = name
+        blob.etag = etag  # Azure ETags often come quoted; storage.py strips them.
+        return blob
+
+    container_client = MagicMock()
+
+    def list_blobs(name_starts_with: str = ""):
+        return [
+            make_blob(name, etag)
+            for name, (etag, _body) in objects.items()
+            if name.startswith(name_starts_with)
+        ]
+
+    container_client.list_blobs.side_effect = list_blobs
+
+    def get_blob_client(blob_name: str) -> MagicMock:
+        bc = MagicMock()
+
+        def download_blob():
+            dl = MagicMock()
+            _etag, body = objects[blob_name]
+
+            def readall():
+                client.downloads.append((blob_name, "<readall>"))
+                return body
+
+            dl.readall.side_effect = readall
+            return dl
+
+        bc.download_blob.side_effect = download_blob
+        return bc
+
+    container_client.get_blob_client.side_effect = get_blob_client
+
+    def upload_blob(name: str, data, overwrite: bool = False) -> None:  # noqa: ARG001
+        # We track the upload but don't actually consume the file handle.
+        client.uploads.append((name, "<upload>"))
+
+    container_client.upload_blob.side_effect = upload_blob
+
+    client.get_container_client.return_value = container_client
+    return client
+
+
+def _patch_azure(client: MagicMock):
+    """Patch the BlobServiceClient + DefaultAzureCredential at the right import sites.
+
+    storage.py imports these inside _azure_client. We patch both the
+    connection-string and the credential-auth paths since the env var
+    determines which one runs.
+    """
+    return patch.multiple(
+        "azure.storage.blob",
+        BlobServiceClient=MagicMock(
+            from_connection_string=MagicMock(return_value=client),
+            return_value=client,
+        ),
+    )
+
+
+def test_azure_uri_mirrors_prefix_to_cache(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=fake==;EndpointSuffix=core.windows.net",
+    )
+    objects = {
+        "refs/v1/tap_index.json": ("etag-a", b'{"taps": []}'),
+        "refs/v1/weights.safetensors": ("etag-b", b"binary"),
+    }
+    client = _fake_azure_client(objects)
+
+    fake_bs_class = MagicMock(
+        from_connection_string=MagicMock(return_value=client),
+    )
+    with patch("azure.storage.blob.BlobServiceClient", fake_bs_class):
+        result = resolve_reference("az://myaccount/mycontainer/refs/v1")
+
+    # We don't actually write files to disk for the Azure fake — we just
+    # verify the right blob-client paths were taken.
+    assert result == Path(tmp_path / "cache") / "azure" / "myaccount" / "mycontainer" / "refs_v1"
+    keys = sorted(name for name, _path in client.downloads)
+    assert keys == ["refs/v1/tap_index.json", "refs/v1/weights.safetensors"]
+
+
+def test_azure_uri_skips_redownload_when_etag_matches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=fake==;EndpointSuffix=core.windows.net",
+    )
+    objects = {"refs/v1/file.json": ("etag-a", b"{}")}
+
+    client1 = _fake_azure_client(objects)
+    fake_bs_class_1 = MagicMock(from_connection_string=MagicMock(return_value=client1))
+    with patch("azure.storage.blob.BlobServiceClient", fake_bs_class_1):
+        resolve_reference("az://myaccount/mycontainer/refs/v1")
+
+    # Touch the cache file so the "ETag matches AND local file exists" branch fires.
+    cache_dir = Path(tmp_path / "cache") / "azure" / "myaccount" / "mycontainer" / "refs_v1"
+    (cache_dir / "file.json").parent.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "file.json").write_text("{}")
+
+    client2 = _fake_azure_client(objects)
+    fake_bs_class_2 = MagicMock(from_connection_string=MagicMock(return_value=client2))
+    with patch("azure.storage.blob.BlobServiceClient", fake_bs_class_2):
+        resolve_reference("az://myaccount/mycontainer/refs/v1")
+
+    assert len(client1.downloads) == 1, "first resolve should download once"
+    assert len(client2.downloads) == 0, "second resolve should skip download (ETag match)"
+
+
+def test_azure_etag_quotes_stripped(tmp_path: Path, monkeypatch) -> None:
+    """Azure ETags sometimes come back with surrounding double-quotes;
+    storage._sync_azure_prefix strips them so cache comparisons work."""
+    monkeypatch.setenv("FIREFLY_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=fake==;EndpointSuffix=core.windows.net",
+    )
+    # Object with a quoted ETag.
+    objects = {"file.json": ('"etag-quoted"', b"{}")}
+
+    client1 = _fake_azure_client(objects)
+    fake_bs_class_1 = MagicMock(from_connection_string=MagicMock(return_value=client1))
+    with patch("azure.storage.blob.BlobServiceClient", fake_bs_class_1):
+        result = resolve_reference("az://myaccount/mycontainer")
+
+    # Touch cache file so the ETag-match branch sees it.
+    (result / "file.json").parent.mkdir(parents=True, exist_ok=True)
+    (result / "file.json").write_text("{}")
+    manifest = json.loads((result / "_manifest.json").read_text())
+    assert manifest["file.json"] == "etag-quoted", "quotes should be stripped from ETag"
+
+
+def test_publish_azure_uploads_each_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DefaultEndpointsProtocol=https;AccountName=fake;AccountKey=fake==;EndpointSuffix=core.windows.net",
+    )
+    ref = _make_reference_dir(tmp_path)
+    client = _fake_azure_client({})
+    fake_bs_class = MagicMock(from_connection_string=MagicMock(return_value=client))
+    with patch("azure.storage.blob.BlobServiceClient", fake_bs_class):
+        publish_reference(ref, "az://myaccount/mycontainer/refs/v1")
+
+    keys = sorted(name for name, _path in client.uploads)
+    assert keys == [
+        "refs/v1/manifest.json",
+        "refs/v1/tolerances.json",
+        "refs/v1/weights.safetensors",
+    ]
+
+
+def test_malformed_azure_uri_raises_value_error() -> None:
+    """az:// with only one segment (missing container/) should error clearly."""
+    with pytest.raises(ValueError, match="Azure URI"):
+        resolve_reference("az://just-one-segment")
+
+
+def test_azure_missing_library_raises_import_error(monkeypatch) -> None:
+    """Helpful error pointing at the install command when the library isn't installed."""
+    import builtins
+    import json as _json
+
+    _ = _json  # silence ruff unused-warning if any
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("azure"):
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ImportError, match=r"firefly\[azure\]"):
+        resolve_reference("az://myaccount/mycontainer/refs/v1")

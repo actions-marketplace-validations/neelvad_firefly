@@ -168,12 +168,16 @@ the >1% threshold where real bugs live.
 | `hf://<org>/<repo>[@<rev>][/<subpath>]` | Reference hosted on HF Hub | (built-in) |
 | `s3://<bucket>/<prefix>` | Reference in private AWS bucket | `pip install 'firefly[s3]'` |
 | `gs://<bucket>/<prefix>` | Reference in private GCS bucket | `pip install 'firefly[gcs]'` |
+| `az://<account>/<container>/<prefix>` | Reference in private Azure container | `pip install 'firefly[azure]'` |
 
-Both S3 and GCS use their library's default credential chain — env
-vars, local credential files, or instance/runner metadata. Files are
-mirrored into `$FIREFLY_CACHE_DIR` (or `~/.cache/firefly/<scheme>/<bucket>/...`)
-with ETag-based incremental sync, so re-runs on a persistent CI cache only
-re-download what changed upstream.
+All three cloud backends use their library's default credential chain —
+env vars, local credential files, or instance/runner metadata. Azure
+prefers `AZURE_STORAGE_CONNECTION_STRING` if set, otherwise falls back
+to `DefaultAzureCredential` (managed identity, az CLI, env vars).
+Files are mirrored into `$FIREFLY_CACHE_DIR` (or
+`~/.cache/firefly/<scheme>/<bucket>/...`) with ETag-based incremental
+sync, so re-runs on a persistent CI cache only re-download what
+changed upstream.
 
 ## Roadmap
 
@@ -197,7 +201,8 @@ Production-ready as a one-repo, one-team quality gate.
 
 - GCS storage backend (`gs://`) — done; same ETag-based incremental
   sync pattern as S3
-- Azure storage backend (`az://`) — planned
+- Azure storage backend (`az://`) — done; account name lives in the URI
+  to match S3/GCS bucket-in-URI conventions
 - Shadow-mode capture against production traffic — requires a custom
   op so torch.compile / CUDA-graphed inference doesn't break
 
