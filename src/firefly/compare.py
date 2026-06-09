@@ -272,7 +272,15 @@ def compare_to_reference_per_head(
         tolerances=tolerances,
         max_rel_error=max_rel_error,
     )
+    # Order the per-head taps by the manifest's forward-ordered tap list, not
+    # by head_counts dict order (which is lexical after JSON sort_keys). Keeps
+    # the per-head table consistent with the forward-order divergence table.
+    ordered_head_counts = {
+        name: manifest.head_counts[name]
+        for name in manifest.tap_points
+        if name in manifest.head_counts
+    }
     per_head = attribute_divergent_heads(
-        ref_tensors, candidate_tensors, manifest.head_counts
+        ref_tensors, candidate_tensors, ordered_head_counts
     )
     return divergences, per_head
