@@ -688,6 +688,28 @@ to file upstream: *which code path in FLASHINFER's prefill kernel
 returns a zero output row for these two specific (query-head,
 KV-group-1) combinations on Qwen-2.5-7B at BF16?*
 
+**It's a live bug, not a historical one.** I re-ran the pair on
+current vLLM (0.22.1, V1 engine, which pins flashinfer-python
+0.6.11.post2 — roughly two years of FlashInfer releases past the
+0.2.x that vLLM 0.8.5 used): heads 10 and 13 of layer 27 are still
+exactly zero, same two heads, FLASH_ATTN still fine. The repro now
+spans two *completely different* vLLM integration layers — the
+deleted V0 engine and the current V1 engine — which moves suspicion
+firmly toward FlashInfer's own prefill path (or an invocation pattern
+both vLLM generations share) rather than vLLM glue code.
+
+That re-run came with a methodological trap worth recording: modern
+vLLM **silently ignores** the `VLLM_ATTENTION_BACKEND` environment
+variable (backend selection moved to an `attention_backend` engine
+argument). My first "repro attempt" on 0.22.1 produced two
+bit-identical captures — both had quietly run the default backend,
+and a naive reading would have concluded "fixed upstream." The
+capture harness now reads the attention implementation class off the
+live model (`FlashAttentionImpl` vs `FlashInferImpl`) and refuses to
+proceed when it doesn't match the request. If your comparison tooling
+trusts its own knobs, the knobs will eventually lie to you; verify
+the thing you're varying actually varied.
+
 I'll take the falsification: the hypothesis I wrote in Finding 5 was
 a smooth-numerics story, and the per-head instrument built to test it
 found a discrete bug-shaped behavior instead. That's the strongest
@@ -901,16 +923,15 @@ uv run firefly quant-risk --reference <reference-dir> --bits 8
 
 ## What's next
 
-1. **Isolate the FLASHINFER zero-head trigger and file it upstream.**
-   Finding 6 answered the *what* of the Qwen layer-27 spike (two
-   query heads in KV-group 1 return all-zero outputs); the *why*
-   inside FLASHINFER's kernel is open. The repro is two Modal
-   commands and the failing condition is sharp — Qwen-2.5-7B, BF16,
-   prefill, heads 10/13 of layer 27 — so this is now a fileable
-   issue against FlashInfer (or vLLM's integration of it) rather
-   than a research question. Step one is checking whether it
-   reproduces on FLASHINFER's latest version; vLLM 0.8.5 pins an
-   older one.
+1. **File the FLASHINFER zero-head bug upstream.** Finding 6
+   answered the *what* (two query heads in KV-group 1 return
+   all-zero outputs at Qwen's layer 27) and the re-run confirmed
+   it's *live* — reproduces on flashinfer 0.6.11.post2 / vLLM 0.22.1
+   V1 just as on flashinfer 0.2.x / vLLM 0.8.5 V0, same two heads.
+   The remaining question (which kernel code path returns the zero
+   rows, and why these two of the seven heads in the KV group) is
+   one for the FlashInfer maintainers; the repro is two Modal
+   commands plus a 20-line tensor check.
 
 2. **More cross-family models.** Phi-3, Yi, and Gemma-2 added in
    this pass. The remaining gaps are non-GQA architectures (Falcon),
