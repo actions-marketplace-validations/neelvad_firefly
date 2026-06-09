@@ -22,6 +22,14 @@ _DECODER_LAYERS_PATHS = ("model.layers", "transformer.h", "layers")
 # Common paths for the final pre-head normalization.
 _FINAL_NORM_PATHS = ("model.norm", "transformer.ln_f", "norm")
 
+# Attribute names under a decoder layer where the attention sub-module lives.
+_ATTN_MODULE_NAMES = ("self_attn", "self_attention", "attention", "attn")
+
+# Attribute names for the attention *output* projection within the attention
+# sub-module. Llama/Mistral/Qwen use ``o_proj``; OPT uses ``out_proj``;
+# GPT-NeoX/Falcon/BLOOM use ``dense``; GPT-2 uses ``c_proj``.
+_ATTN_OUTPUT_PROJ_NAMES = ("o_proj", "out_proj", "dense", "c_proj")
+
 
 @dataclass(frozen=True)
 class TapPoint:
@@ -29,6 +37,15 @@ class TapPoint:
 
     name: str
     module_path: str  # dotted attribute path from the model root
+    capture_input: bool = False
+    """If True, capture the *input* to this module rather than its output.
+
+    Used for per-head attention taps: the attention output projection
+    (``o_proj``) consumes the concatenated per-head outputs of shape
+    ``(..., n_heads * head_dim)``. We tap its input because post-projection
+    the heads are linearly mixed and no longer separable — only the input
+    carries recoverable per-head structure.
+    """
 
 
 def resolve_module_path(module: nn.Module, dotted_path: str) -> nn.Module:
@@ -57,11 +74,31 @@ def find_decoder_layers_path(model: nn.Module) -> str:
     )
 
 
-def select_llm_tap_points(model: nn.Module) -> list[TapPoint]:
+def _find_attn_output_proj(layer: nn.Module) -> str | None:
+    """Return the dotted sub-path (from the layer) to the attention output
+    projection, e.g. ``"self_attn.o_proj"``, or ``None`` if not found.
+
+    Probes the common attention-module names then the common projection
+    names within. The first match wins, so the order of the name tuples
+    matters only when a model has two plausible candidates (rare).
+    """
+    for attn_name in _ATTN_MODULE_NAMES:
+        attn = getattr(layer, attn_name, None)
+        if attn is None:
+            continue
+        for proj_name in _ATTN_OUTPUT_PROJ_NAMES:
+            if hasattr(attn, proj_name):
+                return f"{attn_name}.{proj_name}"
+    return None
+
+
+def select_llm_tap_points(model: nn.Module, per_head: bool = False) -> list[TapPoint]:
     """Walk a HF-style decoder transformer and return its stable tap points.
 
     Per decoder layer i, emits (in forward order):
         layer.{i}.self_attn  → output of the attention sub-block
+        layer.{i}.attn_heads → input to the attention output projection
+                               (per-head outputs); only when ``per_head``
         layer.{i}.mlp        → output of the MLP sub-block
         layer.{i}            → residual stream at end of layer
 
@@ -70,6 +107,14 @@ def select_llm_tap_points(model: nn.Module) -> list[TapPoint]:
     The forward-order ordering matters: attribution walks this list in order
     and reports the first tap that exceeds tolerance, which corresponds to
     the earliest point in the network where divergence appeared.
+
+    When ``per_head`` is set, each layer additionally gets an
+    ``attn_heads`` tap that captures the *input* to the attention output
+    projection. That tensor is the concatenated per-head attention outputs,
+    which :mod:`firefly.head_attribution` can split by head to attribute
+    divergence to a specific attention head. The tap is placed right after
+    ``self_attn`` in forward order since it observes an earlier point in the
+    same sub-block.
     """
     layers_path = find_decoder_layers_path(model)
     layers = resolve_module_path(model, layers_path)
@@ -80,6 +125,16 @@ def select_llm_tap_points(model: nn.Module) -> list[TapPoint]:
             taps.append(
                 TapPoint(name=f"layer.{i}.self_attn", module_path=f"{layers_path}.{i}.self_attn")
             )
+        if per_head:
+            proj_subpath = _find_attn_output_proj(layer)
+            if proj_subpath is not None:
+                taps.append(
+                    TapPoint(
+                        name=f"layer.{i}.attn_heads",
+                        module_path=f"{layers_path}.{i}.{proj_subpath}",
+                        capture_input=True,
+                    )
+                )
         if hasattr(layer, "mlp"):
             taps.append(TapPoint(name=f"layer.{i}.mlp", module_path=f"{layers_path}.{i}.mlp"))
         taps.append(TapPoint(name=f"layer.{i}", module_path=f"{layers_path}.{i}"))
@@ -124,7 +179,7 @@ _RECSYS_OVER_PATHS = (
 )
 
 
-def select_recsys_tap_points(model: nn.Module) -> list[TapPoint]:
+def select_recsys_tap_points(model: nn.Module, per_head: bool = False) -> list[TapPoint]:
     """Walk a recsys-style model and return its stable tap points.
 
     Recsys models lack the per-decoder-layer regularity that HF
@@ -194,12 +249,19 @@ _TAP_SELECTORS = {
 }
 
 
-def select_tap_points(model: nn.Module, domain: str = "llm") -> list[TapPoint]:
-    """Domain-aware tap-point selection. The dispatch seam for v2 domains."""
+def select_tap_points(
+    model: nn.Module, domain: str = "llm", per_head: bool = False
+) -> list[TapPoint]:
+    """Domain-aware tap-point selection. The dispatch seam for v2 domains.
+
+    ``per_head`` adds per-head attention taps (LLM domain only; the recsys
+    selector accepts and ignores it, since attention heads have no recsys
+    analogue).
+    """
     try:
         selector = _TAP_SELECTORS[domain]
     except KeyError as e:
         raise ValueError(
             f"Unsupported domain: {domain!r}. Available: {sorted(_TAP_SELECTORS)}"
         ) from e
-    return selector(model)
+    return selector(model, per_head=per_head)

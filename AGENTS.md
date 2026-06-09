@@ -42,6 +42,7 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 - ✅ **S3 storage backend** — `s3://bucket/prefix`, boto3 default credential chain, ETag-based incremental sync into `$FIREFLY_CACHE_DIR` (v2 first item)
 - ✅ **HF Hub publish flow** — `firefly publish --reference <dir> --to <uri>`, plus `--push <uri>` on `capture` / `calibrate`. Supports hf:// and s3://.
 - ✅ **Recsys domain selector** — TorchRec / DLRM / DCN-v2 conventions in `tap_points.py`
+- ✅ **Per-head attention attribution** — `capture --per-head` adds `layer.{i}.attn_heads` taps that capture the *input* to the attention output projection (o_proj/out_proj/dense/c_proj); `check` auto-detects these from `manifest.head_counts` and drills divergence down to the worst attention head per layer (`src/firefly/head_attribution.py`). Reports worst-head + concentration (worst/median head) in human/markdown/JSON. Genuine per-head only works on the o_proj *input* — post-projection heads are linearly mixed and unrecoverable.
 - ✅ **Reproducible parity suite** — `scripts/vllm_test_suite.yml` + `scripts/run_vllm_suite.py`; 7 tests passing
 - ✅ **v0.1.0 tag** — annotated tag created (commit before push); pinnable via `uses: neelvad/firefly@v0.1.0`
 - ✅ **Blog post — 5 findings** — `docs/index.md` covers Finding 1 (FLASH vs XFORMERS layer 7 on SmolLM), Finding 1.5 (cross-scale + cross-family check: within-Meta holds, breaks across families), Finding 2 (decode KV-cache propagation), Finding 3 (V0 vs V1 step function across 9/1k/2k/4k tokens on Llama), Finding 4 (FLASH vs FLASHINFER layer-0 universal across 4 models), Finding 5 (Qwen+FLASHINFER catastrophic layer-27 spike, 20× outlier).
@@ -52,13 +53,14 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 | File | Role |
 | --- | --- |
 | `src/firefly/determinism.py` | `set_deterministic` (locks PyTorch) vs `set_hardware_noise_baseline` (relaxes for real GPU noise) |
-| `src/firefly/tap_points.py` | Domain-aware tap selector via `select_tap_points(model, domain="llm")`. LLM variant picks per-layer self_attn/mlp/residual + final_norm |
+| `src/firefly/tap_points.py` | Domain-aware tap selector via `select_tap_points(model, domain="llm", per_head=False)`. LLM variant picks per-layer self_attn/mlp/residual + final_norm; `per_head=True` adds `attn_heads` taps with `capture_input=True` at the attention output projection |
 | `src/firefly/noise.py` | `NoiseSpec` dataclass + `_NoiseInjector` hook for synthetic mode |
-| `src/firefly/capture.py` | `run_capture_repeated(model, batch, runs, noise)` — pure core. `capture_reference(...)` — orchestrator. Also `parse_dtype` / `dtype_to_name` / `load_model_and_tokenizer` |
-| `src/firefly/reference.py` | `ReferenceManifest` + safetensors I/O; doc-only reference to `tolerances.json` (read/write lives in compare.py) |
-| `src/firefly/compare.py` | `TapTolerance` + `diff_captures` (pure) + `compare_to_reference` (orchestrator, does fingerprint check + auto-loads tolerances.json) + `read_tolerances` / `write_tolerances` |
+| `src/firefly/capture.py` | `run_capture_repeated(model, batch, runs, noise, per_head)` — pure core (honors `capture_input` taps via `inputs[0]`). `capture_reference(..., per_head)` — orchestrator, records `num_attention_heads` into `manifest.head_counts`. Also `parse_dtype` / `dtype_to_name` / `load_model_and_tokenizer` |
+| `src/firefly/reference.py` | `ReferenceManifest` (+ `head_counts` field) + safetensors I/O; `read_manifest` (metadata-only peek); doc-only reference to `tolerances.json` (read/write lives in compare.py) |
+| `src/firefly/compare.py` | `TapTolerance` + `diff_captures` (pure) + `compare_to_reference` (orchestrator, fingerprint check + auto-loads tolerances.json) + `compare_to_reference_per_head` (also returns per-head attribution; single candidate run via `_run_candidate`) + `read_tolerances` / `write_tolerances` |
 | `src/firefly/calibrate.py` | `derive_tolerances` (pure) + `calibrate(reference_dir, inputs_path, runs, safety_factor, noise, ...)` — writes `tolerances.json` |
 | `src/firefly/attribution.py` | `attribute_first_divergence` — walks forward order, names first tap exceeding tolerance |
+| `src/firefly/head_attribution.py` | Pure per-head drill-down: `split_heads` / `per_head_divergence` / `attribute_divergent_heads`. Splits an `attn_heads` tap by head, ranks worst head + concentration ratio. Driven by `manifest.head_counts` |
 | `src/firefly/report.py` | Rich terminal table + structured JSON output |
 | `src/firefly/cli.py` | `firefly capture / check / calibrate` subcommands with all flags |
 | `scripts/modal_validation.py` | Modal app that runs capture + 3 noise configs on GPU, returns per-tap data |

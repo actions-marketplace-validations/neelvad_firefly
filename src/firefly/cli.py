@@ -45,6 +45,15 @@ def capture(
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
     seed: int = typer.Option(0, "--seed", help="Determinism seed."),
     dtype: str = typer.Option("fp32", "--dtype", help="Model dtype: fp32, bf16, or fp16."),
+    per_head: bool = typer.Option(
+        False,
+        "--per-head",
+        help=(
+            "Also capture per-head attention taps (the input to each layer's "
+            "attention output projection). Enables `firefly check` to attribute "
+            "divergence to individual attention heads."
+        ),
+    ),
     push: str | None = typer.Option(
         None,
         "--push",
@@ -58,7 +67,10 @@ def capture(
     """Capture a reference artifact from a model + golden inputs."""
     from firefly.capture import capture_reference, parse_dtype
 
-    typer.echo(f"Capturing reference: model={model} device={device} dtype={dtype}")
+    typer.echo(
+        f"Capturing reference: model={model} device={device} dtype={dtype} "
+        f"per_head={per_head}"
+    )
     capture_reference(
         model_id=model,
         inputs_path=inputs,
@@ -66,6 +78,7 @@ def capture(
         device=device,
         seed=seed,
         dtype=parse_dtype(dtype),
+        per_head=per_head,
     )
     typer.echo(f"Wrote reference artifact to {out}")
 
@@ -255,7 +268,12 @@ def check(
 ) -> None:
     """Check a candidate against a reference. Exits non-zero if divergence exceeds tolerance."""
     from firefly.attribution import attribute_first_divergence
-    from firefly.compare import TOLERANCES_FILE, compare_to_reference
+    from firefly.compare import (
+        TOLERANCES_FILE,
+        compare_to_reference,
+        compare_to_reference_per_head,
+    )
+    from firefly.reference import read_manifest
     from firefly.report import render_human, render_markdown, write_json
 
     resolved_reference = _resolve_or_exit(reference)
@@ -289,24 +307,41 @@ def check(
         )
         raise typer.Exit(code=2)
 
-    divergences = compare_to_reference(
-        reference_dir=resolved_reference,
-        candidate_model_id=candidate,
-        inputs_path=inputs,
-        device=device,
-        seed=seed,
-        allow_fingerprint_mismatch=allow_fingerprint_mismatch,
-        max_rel_error=(max_rel_error if max_rel_error > 0 else None),
-    )
+    # If the reference carries per-head taps, run the per-head attribution
+    # path so the report can name which attention head diverged. Both paths
+    # run the candidate exactly once.
+    per_head_taps = bool(read_manifest(resolved_reference).head_counts)
+    max_rel = max_rel_error if max_rel_error > 0 else None
+    if per_head_taps:
+        divergences, per_head = compare_to_reference_per_head(
+            reference_dir=resolved_reference,
+            candidate_model_id=candidate,
+            inputs_path=inputs,
+            device=device,
+            seed=seed,
+            allow_fingerprint_mismatch=allow_fingerprint_mismatch,
+            max_rel_error=max_rel,
+        )
+    else:
+        divergences = compare_to_reference(
+            reference_dir=resolved_reference,
+            candidate_model_id=candidate,
+            inputs_path=inputs,
+            device=device,
+            seed=seed,
+            allow_fingerprint_mismatch=allow_fingerprint_mismatch,
+            max_rel_error=max_rel,
+        )
+        per_head = []
     result = attribute_first_divergence(divergences)
 
     if ci_format == "markdown":
-        typer.echo(render_markdown(result))
+        typer.echo(render_markdown(result, per_head=per_head))
     else:
-        typer.echo(render_human(result))
+        typer.echo(render_human(result, per_head=per_head))
 
     if report_json is not None:
-        write_json(result, report_json)
+        write_json(result, report_json, per_head=per_head)
 
     if result.any_exceeded:
         raise typer.Exit(code=1)

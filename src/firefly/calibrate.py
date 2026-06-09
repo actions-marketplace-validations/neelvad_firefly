@@ -108,6 +108,9 @@ def calibrate(
         runs=runs,
         domain=manifest.domain,
         noise=noise,
+        # Match the reference: if it has per-head taps, calibrate them too so
+        # they get an empirical tolerance instead of falling to the flat default.
+        per_head=bool(manifest.head_counts),
     )
 
     tolerances = derive_tolerances(

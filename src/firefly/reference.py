@@ -40,6 +40,10 @@ class ReferenceManifest:
     env: dict[str, str] = field(default_factory=dict)
     domain: str = "llm"
     dtype: str = "float32"  # the model's storage dtype: float32 / bfloat16 / float16
+    head_counts: dict[str, int] = field(default_factory=dict)
+    """For per-head taps (``layer.{i}.attn_heads``): the number of attention
+    heads to split that tap's tensor into. Empty unless captured with
+    ``--per-head``. Consumed by :mod:`firefly.head_attribution`."""
     schema_version: int = SCHEMA_VERSION
 
 
@@ -72,15 +76,15 @@ def write_reference(
         json.dump(asdict(manifest), f, indent=2, sort_keys=True)
 
 
-def read_reference(ref_dir: Path) -> tuple[ReferenceManifest, dict[str, torch.Tensor]]:
-    """Load a reference artifact from disk."""
-    manifest_path = ref_dir / _MANIFEST_FILE
-    weights_path = ref_dir / _WEIGHTS_FILE
+def read_manifest(ref_dir: Path) -> ReferenceManifest:
+    """Load just the manifest (no tensors) from a reference artifact.
 
+    Cheap peek for callers that only need metadata — e.g. the CLI deciding
+    whether a reference has per-head taps before choosing a compare path.
+    """
+    manifest_path = ref_dir / _MANIFEST_FILE
     if not manifest_path.exists():
         raise FileNotFoundError(f"No manifest at {manifest_path}")
-    if not weights_path.exists():
-        raise FileNotFoundError(f"No weights at {weights_path}")
 
     with manifest_path.open() as f:
         data = json.load(f)
@@ -90,7 +94,16 @@ def read_reference(ref_dir: Path) -> tuple[ReferenceManifest, dict[str, torch.Te
         raise ValueError(
             f"Unsupported reference schema_version={found_version}; expected {SCHEMA_VERSION}"
         )
+    return ReferenceManifest(**data)
 
-    manifest = ReferenceManifest(**data)
+
+def read_reference(ref_dir: Path) -> tuple[ReferenceManifest, dict[str, torch.Tensor]]:
+    """Load a reference artifact from disk."""
+    manifest = read_manifest(ref_dir)  # raises "No manifest" if absent
+
+    weights_path = ref_dir / _WEIGHTS_FILE
+    if not weights_path.exists():
+        raise FileNotFoundError(f"No weights at {weights_path}")
+
     tensors = load_file(str(weights_path))
     return manifest, tensors

@@ -157,21 +157,20 @@ def diff_captures(
     return divergences
 
 
-def compare_to_reference(
+def _run_candidate(
     reference_dir: Path,
     candidate_model_id: str,
     inputs_path: Path,
-    device: str = "cpu",
-    seed: int = 0,
-    tolerances: dict[str, TapTolerance] | None = None,
-    allow_fingerprint_mismatch: bool = False,
-    max_rel_error: float | None = None,
-) -> list[TapDivergence]:
-    """Run candidate, diff against reference, return per-tap divergences in forward order.
+    device: str,
+    seed: int,
+    tolerances: dict[str, TapTolerance] | None,
+    allow_fingerprint_mismatch: bool,
+):
+    """Load reference + candidate, fingerprint-check, capture candidate once.
 
-    Raises :class:`FingerprintMismatchError` if the candidate's fingerprint
-    doesn't match the reference manifest, unless ``allow_fingerprint_mismatch``
-    is set.
+    Returns ``(manifest, ref_tensors, candidate_tensors, tolerances)``. Shared
+    by :func:`compare_to_reference` and :func:`compare_to_reference_per_head`
+    so the candidate forward pass runs exactly once per check.
     """
     manifest, ref_tensors = read_reference(reference_dir)
 
@@ -196,8 +195,39 @@ def compare_to_reference(
         )
 
     batch = load_golden_inputs(inputs_path, tokenizer, device)
-    candidate_tensors = run_capture(candidate, batch, domain=manifest.domain)
+    # per_head mirrors what the reference recorded: if it has head taps, the
+    # candidate must capture them too or the diff would be missing-tap errors.
+    candidate_tensors = run_capture(
+        candidate, batch, domain=manifest.domain, per_head=bool(manifest.head_counts)
+    )
+    return manifest, ref_tensors, candidate_tensors, tolerances
 
+
+def compare_to_reference(
+    reference_dir: Path,
+    candidate_model_id: str,
+    inputs_path: Path,
+    device: str = "cpu",
+    seed: int = 0,
+    tolerances: dict[str, TapTolerance] | None = None,
+    allow_fingerprint_mismatch: bool = False,
+    max_rel_error: float | None = None,
+) -> list[TapDivergence]:
+    """Run candidate, diff against reference, return per-tap divergences in forward order.
+
+    Raises :class:`FingerprintMismatchError` if the candidate's fingerprint
+    doesn't match the reference manifest, unless ``allow_fingerprint_mismatch``
+    is set.
+    """
+    manifest, ref_tensors, candidate_tensors, tolerances = _run_candidate(
+        reference_dir,
+        candidate_model_id,
+        inputs_path,
+        device,
+        seed,
+        tolerances,
+        allow_fingerprint_mismatch,
+    )
     return diff_captures(
         reference_tensors=ref_tensors,
         candidate_tensors=candidate_tensors,
@@ -205,3 +235,44 @@ def compare_to_reference(
         tolerances=tolerances,
         max_rel_error=max_rel_error,
     )
+
+
+def compare_to_reference_per_head(
+    reference_dir: Path,
+    candidate_model_id: str,
+    inputs_path: Path,
+    device: str = "cpu",
+    seed: int = 0,
+    tolerances: dict[str, TapTolerance] | None = None,
+    allow_fingerprint_mismatch: bool = False,
+    max_rel_error: float | None = None,
+):
+    """Like :func:`compare_to_reference` but also returns per-head attribution.
+
+    Returns ``(divergences, per_head_attributions)``. The candidate runs once
+    and both the per-tap diff (the gate) and the per-head drill-down (purely
+    diagnostic) are computed from the same capture. ``per_head_attributions``
+    is empty when the reference has no per-head taps.
+    """
+    from firefly.head_attribution import attribute_divergent_heads
+
+    manifest, ref_tensors, candidate_tensors, tolerances = _run_candidate(
+        reference_dir,
+        candidate_model_id,
+        inputs_path,
+        device,
+        seed,
+        tolerances,
+        allow_fingerprint_mismatch,
+    )
+    divergences = diff_captures(
+        reference_tensors=ref_tensors,
+        candidate_tensors=candidate_tensors,
+        tap_order=manifest.tap_points,
+        tolerances=tolerances,
+        max_rel_error=max_rel_error,
+    )
+    per_head = attribute_divergent_heads(
+        ref_tensors, candidate_tensors, manifest.head_counts
+    )
+    return divergences, per_head

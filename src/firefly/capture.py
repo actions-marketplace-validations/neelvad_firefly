@@ -40,6 +40,7 @@ def run_capture_repeated(
     runs: int = 1,
     domain: str = "llm",
     noise: NoiseSpec | None = None,
+    per_head: bool = False,
 ) -> dict[str, list[torch.Tensor]]:
     """Register hooks once, run ``runs`` forward passes, return one tensor per
     run per tap. Used by calibration, which needs many self-runs to measure
@@ -50,19 +51,27 @@ def run_capture_repeated(
     captured tensors at and downstream of the injection point reflect the
     noised activations.
 
+    ``per_head`` adds per-head attention taps (see
+    :func:`firefly.tap_points.select_llm_tap_points`); those taps capture the
+    *input* to the attention output projection rather than its output.
+
     Hooks handle tuple outputs (e.g., HF ``self_attn`` returns
-    ``(hidden_states, attn_weights, past_kv)``) by capturing ``output[0]``.
+    ``(hidden_states, attn_weights, past_kv)``) by capturing ``output[0]``,
+    and tuple inputs (capture-input taps) by capturing ``inputs[0]``.
     """
     if runs < 1:
         raise ValueError(f"runs must be >= 1, got {runs}")
 
-    taps = select_tap_points(model, domain=domain)
+    taps = select_tap_points(model, domain=domain, per_head=per_head)
     captures: dict[str, list[torch.Tensor]] = {tap.name: [] for tap in taps}
     handles: list[torch.utils.hooks.RemovableHandle] = []
 
-    def _make_hook(tap_name: str):
-        def _hook(_module: nn.Module, _inputs: Any, output: Any) -> None:
-            tensor = output[0] if isinstance(output, tuple) else output
+    def _make_hook(tap_name: str, capture_input: bool):
+        def _hook(_module: nn.Module, inputs: Any, output: Any) -> None:
+            if capture_input:
+                tensor = inputs[0] if isinstance(inputs, tuple) else inputs
+            else:
+                tensor = output[0] if isinstance(output, tuple) else output
             captures[tap_name].append(tensor.detach().cpu().contiguous())
         return _hook
 
@@ -74,7 +83,9 @@ def run_capture_repeated(
 
     for tap in taps:
         submod = resolve_module_path(model, tap.module_path)
-        handles.append(submod.register_forward_hook(_make_hook(tap.name)))
+        handles.append(
+            submod.register_forward_hook(_make_hook(tap.name, tap.capture_input))
+        )
 
     try:
         with torch.inference_mode():
@@ -91,10 +102,28 @@ def run_capture(
     model: nn.Module,
     batch: dict[str, torch.Tensor],
     domain: str = "llm",
+    per_head: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Single-run convenience wrapper around :func:`run_capture_repeated`."""
-    repeated = run_capture_repeated(model, batch, runs=1, domain=domain)
+    repeated = run_capture_repeated(model, batch, runs=1, domain=domain, per_head=per_head)
     return {name: tensors[0] for name, tensors in repeated.items()}
+
+
+# Config attribute names under which HF models expose their query/attention
+# head count. The per-head tap splits the o_proj input into this many heads.
+_NUM_HEADS_ATTRS = ("num_attention_heads", "n_head", "num_heads", "n_heads")
+
+
+def num_attention_heads(model: nn.Module) -> int | None:
+    """Read the attention head count from a model's config, or None if absent."""
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+    for attr in _NUM_HEADS_ATTRS:
+        val = getattr(config, attr, None)
+        if isinstance(val, int) and val > 0:
+            return val
+    return None
 
 
 def fingerprint_model(model: nn.Module) -> str:
@@ -190,12 +219,28 @@ def capture_reference(
     seed: int = 0,
     domain: str = "llm",
     dtype: torch.dtype = torch.float32,
+    per_head: bool = False,
 ) -> None:
-    """Load ``model_id``, run the golden inputs, write a reference artifact."""
+    """Load ``model_id``, run the golden inputs, write a reference artifact.
+
+    With ``per_head``, additionally captures per-head attention taps and
+    records the head count per such tap in ``manifest.head_counts`` so
+    ``firefly check`` can attribute divergence to individual heads.
+    """
     set_deterministic(seed=seed)
     model, tokenizer = load_model_and_tokenizer(model_id, device=device, dtype=dtype)
     batch = load_golden_inputs(inputs_path, tokenizer, device)
-    captured = run_capture(model, batch, domain=domain)
+    captured = run_capture(model, batch, domain=domain, per_head=per_head)
+
+    head_counts: dict[str, int] = {}
+    if per_head:
+        n_heads = num_attention_heads(model)
+        if n_heads is not None:
+            for name, t in captured.items():
+                # Only the per-head taps are head-splittable, and only when
+                # the captured width divides evenly into n_heads.
+                if name.endswith(".attn_heads") and t.shape[-1] % n_heads == 0:
+                    head_counts[name] = n_heads
 
     manifest = ReferenceManifest(
         model_id=model_id,
@@ -207,5 +252,6 @@ def capture_reference(
         env=capture_env(),
         domain=domain,
         dtype=dtype_to_name(dtype),
+        head_counts=head_counts,
     )
     write_reference(out_dir, manifest, captured)
