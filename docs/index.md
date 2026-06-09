@@ -507,6 +507,13 @@ magnitudes jump 4× from layer 26, the per-element diff suddenly has 4×
 more headroom to manifest in absolute terms — and the relative error
 spikes 20×.
 
+(That was my working hypothesis when I first wrote this section.
+Finding 6's per-head instrument turned out to **falsify it** — the
+real mechanism is a discrete kernel behavior, not amplified rounding.
+The hypothesis-as-written is preserved here because the correction is
+the point; skip ahead to the end of Finding 6 for what's actually
+happening.)
+
 This is the kind of finding a Qwen-on-FLASHINFER serving stack would
 want to know about. The model's output drift in BF16 with FLASHINFER
 is a specific, localized, mechanistic issue concentrated in one layer
@@ -525,13 +532,14 @@ both have similar peak activation magnitudes but no final-layer
 spike, because they spread their outlier features across more layers
 rather than concentrating them in the final 1-2.
 
-I haven't tried to file this with vLLM or with FlashInfer upstream
-because I'm not certain it's a *bug* — it might be the BF16-correct
+When I first wrote this section I hadn't filed it upstream because I
+wasn't certain it was a *bug* — it could have been the BF16-correct
 behavior given Qwen's outlier-feature concentration at the final
-layer. But it's a reproducible, attributable, *production-relevant*
-numerical divergence, and the diagnostic flow it took to surface it
-(swap one knob, run one Firefly check, look at the per-layer curve)
-is exactly the workflow this tool is for.
+layer. The per-head result at the end of Finding 6 changed my mind:
+exact-zero head outputs are not a rounding regime. Either way the
+diagnostic flow that surfaced it (swap one knob, run one Firefly
+check, look at the per-layer curve, then drill per-head) is exactly
+the workflow this tool is for.
 
 ### The BLOOM regime: kernel-fundamental divergence from layer 0
 
@@ -633,6 +641,59 @@ magnitude-dependent rounding); flat concentration from layer 0 means
 "the kernel itself computes differently for everything" (think:
 different reduction order, different bias handling). Same tool, one
 extra flag, and the diagnosis gets a mechanism attached.
+
+### The Qwen payoff: the layer-27 spike is two silently zeroed heads
+
+Then I pointed the per-head instrument at Finding 5's open question —
+the Qwen-2.5-7B + FLASHINFER 20× spike at layer 27 — expecting to see
+the outlier-feature head with elevated-but-continuous divergence, which
+would have confirmed the "magnitude × kernel rounding" hypothesis.
+
+That's not what the data says. Layers 0–26 show FLASHINFER's usual
+uniform kernel signature (concentration 1.5–7.5×). At layer 27:
+
+| layer.27 head | max\|Δ\| | head's own max\|activation\| (FLASH) | rel |
+|---|---|---|---|
+| **10** | **68.5** | **68.5** | **100%** |
+| **13** | **68.5** | **68.5** | **100%** |
+| 7 | 0.14 | 68.5 | 0.21% |
+| 26 | 0.13 | 8.9 | 1.41% |
+| (other 24 heads) | ≤0.094 | — | ≤3.9% |
+
+Two heads at exactly 100% relative error, 26 heads at ordinary kernel
+noise. And 100% isn't "very divergent" — checking the raw tensors:
+**FLASHINFER outputs all-zeros for heads 10 and 13 of layer 27.** Every
+token, every dimension, exactly 0.0. FLASH_ATTN produces real values
+there (peaking at 68.5 — the largest activation anywhere in the
+model, at the BOS token). Scanning all 784 (layer, head) pairs in the
+network: these two are the *only* zeroed outputs, on either backend.
+
+A softmax-weighted average of value vectors can't be exactly zero by
+accident. This is a discrete kernel behavior — FLASHINFER's path is
+dropping those two heads' outputs entirely — and o_proj then mixes the
+missing contribution into every output channel, which is why the
+layer-level view in Finding 5 showed a diffuse-looking 24% error
+instead of two missing heads.
+
+The structure around it is suggestive. Qwen-2.5-7B is GQA with 4 KV
+heads (7 query heads per group). Heads 7–13 — the group sharing KV
+head 1 — are exactly the heads whose outputs carry the model's massive
+BOS-token activation (max 68.5, all five of heads 7/8/10/11/13 hit
+it, since they share the same V). FLASHINFER zeroes two of those
+seven. So the zeroing is co-located with the massive-activation
+attention-sink structure, but magnitude alone doesn't determine it —
+heads 7, 8, and 11 see the same 68.5 and survive. The trigger inside
+the kernel is the remaining open question, and it's now sharp enough
+to file upstream: *which code path in FLASHINFER's prefill kernel
+returns a zero output row for these two specific (query-head,
+KV-group-1) combinations on Qwen-2.5-7B at BF16?*
+
+I'll take the falsification: the hypothesis I wrote in Finding 5 was
+a smooth-numerics story, and the per-head instrument built to test it
+found a discrete bug-shaped behavior instead. That's the strongest
+argument for attribution tooling I can offer — each level of
+attribution (layer → head → tensor) didn't just narrow the location,
+it *changed the mechanism class* of the explanation.
 
 ## Finding 7: The reference artifact doubles as a quantization-risk map
 
@@ -826,6 +887,12 @@ uv run python scripts/compare_per_head.py \
   scripts/results/flash_ph scripts/results/xformers_ph
 ```
 
+For the Qwen zero-head result, use `--vllm-tag 0.8.5-fi --model
+Qwen/Qwen2.5-7B --gpu A100-40GB --gpu-memory-utilization 0.7` with
+backends `FLASH_ATTN` and `FLASHINFER`, then
+`scripts/analyze_qwen_layer27.py <flash_dir> <flashinfer_dir>` prints
+the per-head magnitude/divergence breakdown at layers 25–27.
+
 Finding 7 needs no GPU at all — any captured reference works:
 
 ```sh
@@ -834,14 +901,16 @@ uv run firefly quant-risk --reference <reference-dir> --bits 8
 
 ## What's next
 
-1. **Run per-head attribution on the Qwen layer-27 spike.** Finding 6
-   built the per-head instrument (it's what produced the
-   single-head-crack result), but I haven't yet pointed it at Finding
-   5's Qwen catastrophe. The question it would answer: is the 20×
-   layer-27 spike concentrated in one or two outlier-feature heads
-   (which would complete the magnitude × kernel-diff mechanism), or
-   does the whole layer's attention go at once? One Modal run on the
-   FLASHINFER image.
+1. **Isolate the FLASHINFER zero-head trigger and file it upstream.**
+   Finding 6 answered the *what* of the Qwen layer-27 spike (two
+   query heads in KV-group 1 return all-zero outputs); the *why*
+   inside FLASHINFER's kernel is open. The repro is two Modal
+   commands and the failing condition is sharp — Qwen-2.5-7B, BF16,
+   prefill, heads 10/13 of layer 27 — so this is now a fileable
+   issue against FlashInfer (or vLLM's integration of it) rather
+   than a research question. Step one is checking whether it
+   reproduces on FLASHINFER's latest version; vLLM 0.8.5 pins an
+   older one.
 
 2. **More cross-family models.** Phi-3, Yi, and Gemma-2 added in
    this pass. The remaining gaps are non-GQA architectures (Falcon),
