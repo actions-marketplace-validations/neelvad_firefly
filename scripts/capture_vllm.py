@@ -105,6 +105,17 @@ _VLLM_VERSIONS: dict[str, dict] = {
         "transformers": "transformers==4.51.3",
         "flashinfer_index": "https://flashinfer.ai/whl/cu124/torch2.6/",
     },
+    # Recent-vLLM variant for "does the bug still reproduce on current
+    # FlashInfer?" checks. Modern vLLM declares flashinfer-python as a
+    # regular dependency with real PyPI wheels, so no custom index is
+    # needed — but FlashInfer JIT-compiles some kernels at runtime, so
+    # the CUDA-devel base (nvcc + CUDA_HOME) is still required. V0
+    # engine no longer exists at this version; run with --engine v1.
+    "latest-fi": {
+        "base_image": "nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04",
+        "vllm": "vllm==0.22.1",
+        "transformers": "transformers>=4.55",
+    },
 }
 
 
@@ -331,6 +342,31 @@ def _v1_read_n_heads(worker) -> int:
     return _read_n_heads_impl(worker.model_runner.model)
 
 
+def _read_attn_impl_impl(model) -> str:
+    """Inside vLLM worker: report the attention implementation actually in use.
+
+    vLLM's unified ``Attention`` layer holds its backend implementation as
+    ``self.impl`` (e.g. ``FlashAttentionImpl``, ``FlashInferImpl``) across
+    both the 0.8.x and current lineages. We read it off the live model
+    instead of trusting env vars / kwargs, because backend-selection
+    mechanisms have changed across vLLM versions and a silently ignored
+    selector would otherwise invalidate a whole comparison.
+    """
+    for m in model.modules():
+        impl = getattr(m, "impl", None)
+        if impl is not None and type(impl).__name__.endswith("Impl"):
+            return type(impl).__name__
+    return "unknown"
+
+
+def _read_attn_impl(model) -> str:
+    return _read_attn_impl_impl(model)
+
+
+def _v1_read_attn_impl(worker) -> str:
+    return _read_attn_impl_impl(worker.model_runner.model)
+
+
 def _drain_captures(model) -> dict:
     """Inside vLLM worker: bulk d2h, remove hooks, return tensor dict."""
     captures = getattr(model, "_firefly_captures", {})
@@ -412,6 +448,10 @@ def _do_capture(
             "(per-head attribution is prefill-only)."
         )
     os.environ["VLLM_USE_V1"] = "0" if engine == "v0" else "1"
+    # Newer vLLM (>=0.9-ish) refuses to msgspec-serialize arbitrary callables
+    # through collective_rpc and asks for this env var to fall back to pickle.
+    # Our register/drain functions are exactly that; harmless on old versions.
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
 
@@ -425,6 +465,13 @@ def _do_capture(
         f"capture_decode={capture_decode}  n_prompts={n_prompts}  "
         f"speculative_tokens={speculative_tokens}"
     )
+    # Record the FlashInfer version when present — upstream repro reports
+    # need "which flashinfer" to be unambiguous.
+    try:
+        import flashinfer
+        print(f"flashinfer version: {flashinfer.__version__}")
+    except ImportError:
+        print("flashinfer: not installed")
     print(f"Loading {model_id} dtype={dtype}")
 
     llm_kwargs = dict(
@@ -452,6 +499,21 @@ def _do_capture(
             "prompt_lookup_max": 4,
         }
 
+    # Modern vLLM removed the VLLM_ATTENTION_BACKEND env var in favor of an
+    # `attention_backend` engine arg (AttentionBackendEnum). Pass it when the
+    # installed version supports it; the env var (set above) covers old
+    # versions. Without this, the env var is silently ignored on new vLLM and
+    # both sides of a "backend comparison" run the default backend.
+    if attention_backend:
+        from vllm.engine.arg_utils import EngineArgs
+        if "attention_backend" in getattr(EngineArgs, "__dataclass_fields__", {}):
+            try:
+                from vllm.v1.attention.backends.registry import AttentionBackendEnum
+                llm_kwargs["attention_backend"] = AttentionBackendEnum[attention_backend]
+            except (ImportError, KeyError):
+                llm_kwargs["attention_backend"] = attention_backend
+            print(f"backend selection via engine arg: {llm_kwargs['attention_backend']}")
+
     llm = LLM(**llm_kwargs)
 
     # V0 uses apply_model (worker callable receives the model). V1's
@@ -466,6 +528,7 @@ def _do_capture(
         else:
             register_fn = _register_capture_hooks
         read_heads_fn = _read_n_heads
+        read_attn_impl_fn = _read_attn_impl
         drain_fn = _drain_captures
         dispatch = llm.apply_model
     else:
@@ -476,12 +539,30 @@ def _do_capture(
         else:
             register_fn = _v1_register_capture_hooks
         read_heads_fn = _v1_read_n_heads
+        read_attn_impl_fn = _v1_read_attn_impl
         drain_fn = _v1_drain_captures
         dispatch = llm.collective_rpc
 
     n_hooks_raw = dispatch(register_fn)
     n_hooks = n_hooks_raw[0] if isinstance(n_hooks_raw, list) and n_hooks_raw else n_hooks_raw
     print(f"Registered {n_hooks} forward hooks")
+
+    # Verify the attention impl actually loaded — selection mechanisms have
+    # drifted across vLLM versions, and a silently ignored selector would
+    # invalidate the comparison this capture is for.
+    attn_impl_raw = dispatch(read_attn_impl_fn)
+    attn_impl = attn_impl_raw[0] if isinstance(attn_impl_raw, list) and attn_impl_raw else attn_impl_raw
+    print(f"attention impl in use: {attn_impl}")
+    if attention_backend:
+        want = attention_backend.replace("_", "").lower()  # FLASH_ATTN → flashattn
+        got = str(attn_impl).lower()
+        if want.startswith("flashinfer") != got.startswith("flashinfer"):
+            raise RuntimeError(
+                f"Requested attention backend {attention_backend!r} but the "
+                f"model is running {attn_impl!r} — the backend selector was "
+                f"ignored. Aborting so a same-backend comparison isn't "
+                f"mislabeled."
+            )
 
     # Read the head count for per-head taps via the same dispatch mechanism
     # (plain int return — no tensor-summarization issue like the drain has).
@@ -553,6 +634,7 @@ def _do_capture(
         "speculative_tokens": speculative_tokens,
         "per_head": per_head,
         "n_heads": n_heads,
+        "attn_impl": attn_impl,
         "captures": captures,
     }
 
@@ -674,10 +756,39 @@ def capture_at_v_0_8_5_fi(
     )
 
 
+@app.function(
+    image=_make_image(_VLLM_VERSIONS["latest-fi"]),
+    gpu="A10G",
+    timeout=1800,
+    secrets=_HF_SECRETS,
+    volumes={_HF_CACHE_MOUNT: _HF_CACHE},
+)
+def capture_at_latest_fi(
+    model_id: str = "HuggingFaceTB/SmolLM-135M",
+    prompt: str = "the quick brown fox jumps over the lazy dog",
+    max_seq_len: int = 1024,
+    dtype: str = "bfloat16",
+    attention_backend: str = "",
+    engine: str = "v1",
+    capture_decode: bool = False,
+    max_tokens: int = 8,
+    n_prompts: int = 1,
+    speculative_tokens: int = 0,
+    gpu_memory_utilization: float = 0.4,
+    per_head: bool = False,
+) -> dict:
+    return _do_capture(
+        model_id, prompt, max_seq_len, dtype,
+        attention_backend, engine, capture_decode, max_tokens, n_prompts,
+        speculative_tokens, gpu_memory_utilization, per_head,
+    )
+
+
 _CAPTURE_BY_TAG = {
     "0.7.3": capture_at_v_0_7_3,
     "0.8.5": capture_at_v_0_8_5,
     "0.8.5-fi": capture_at_v_0_8_5_fi,
+    "latest-fi": capture_at_latest_fi,
 }
 
 
@@ -796,6 +907,7 @@ def main(
             "prompt": prompt,
             "per_head": str(per_head_used),
             "n_heads": str(n_heads_used),
+            "attn_impl": str(result.get("attn_impl", "unknown")),
         },
         domain="llm",
         dtype=dtype,
