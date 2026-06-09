@@ -678,8 +678,8 @@ instead of two missing heads.
 The structure around it is suggestive. Qwen-2.5-7B is GQA with 4 KV
 heads (7 query heads per group). Heads 7–13 — the group sharing KV
 head 1 — are exactly the heads whose outputs carry the model's massive
-BOS-token activation (max 68.5, all five of heads 7/8/10/11/13 hit
-it, since they share the same V). FLASHINFER zeroes two of those
+BOS-token activation (all seven peak at exactly 68.5, since they
+share the same V and all sink on BOS). FLASHINFER zeroes two of those
 seven. So the zeroing is co-located with the massive-activation
 attention-sink structure, but magnitude alone doesn't determine it —
 heads 7, 8, and 11 see the same 68.5 and survive. The trigger inside
