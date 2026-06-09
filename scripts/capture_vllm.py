@@ -198,7 +198,21 @@ def _find_model_layout(model):
     )
 
 
-def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
+# Attention output-projection attr names, probed under the attn sub-module to
+# place the per-head tap. Mirrors firefly.tap_points._ATTN_OUTPUT_PROJ_NAMES.
+_VLLM_ATTN_OUTPUT_PROJ_NAMES = ("o_proj", "out_proj", "dense", "c_proj")
+
+
+def _find_attn_output_proj(attn_module):
+    """Return the output-projection submodule of a vLLM attention block, or None."""
+    for proj_name in _VLLM_ATTN_OUTPUT_PROJ_NAMES:
+        proj = getattr(attn_module, proj_name, None)
+        if proj is not None:
+            return proj
+    return None
+
+
+def _register_capture_hooks_impl(model, capture_decode: bool, per_head: bool = False) -> int:
     """Inside vLLM worker: install forward hooks on Firefly's tap points.
 
     Tap names follow the existing LLM-domain convention: per-layer
@@ -215,6 +229,15 @@ def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
     ``layer.7.self_attn@token_0`` for the first decode step, etc.
     Decode-only diffs are valuable because decode is where vLLM's
     optimization-heavy path lives (PagedAttention, scheduler, spec decode).
+
+    When ``per_head`` is True, additionally install an *input*-capturing hook
+    on each attention output projection (``o_proj``), named
+    ``layer.{i}.attn_heads``. That input is the concatenated per-head context
+    vectors (shape ``(num_tokens, n_heads*head_dim)`` under vLLM's flattened
+    batching) — the only place heads are still separable, since ``o_proj``
+    linearly mixes them. ``firefly.head_attribution`` splits it by head.
+    Mutually exclusive with ``capture_decode`` here (the per-head divergence
+    demo is prefill-only); combine later if a decode use-case appears.
     """
     import torch
 
@@ -222,9 +245,12 @@ def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
     step_counters: dict[str, int] = {}
     handles: list = []
 
-    def make_hook(name: str):
-        def hook(_module, _input, output):
-            tensor = output[0] if isinstance(output, tuple) else output
+    def make_hook(name: str, capture_input: bool = False):
+        def hook(_module, input_, output):
+            if capture_input:
+                tensor = input_[0] if isinstance(input_, tuple) else input_
+            else:
+                tensor = output[0] if isinstance(output, tuple) else output
             if not isinstance(tensor, torch.Tensor) or tensor.dim() < 1:
                 return
             leading = tensor.shape[0]
@@ -245,7 +271,16 @@ def _register_capture_hooks_impl(model, capture_decode: bool) -> int:
 
     layers, attn_attr, mlp_attr, final_norm = _find_model_layout(model)
     for i, layer in enumerate(layers):
-        handles.append(getattr(layer, attn_attr).register_forward_hook(make_hook(f"layer.{i}.self_attn")))
+        attn = getattr(layer, attn_attr)
+        handles.append(attn.register_forward_hook(make_hook(f"layer.{i}.self_attn")))
+        if per_head:
+            o_proj = _find_attn_output_proj(attn)
+            if o_proj is not None:
+                handles.append(
+                    o_proj.register_forward_hook(
+                        make_hook(f"layer.{i}.attn_heads", capture_input=True)
+                    )
+                )
         handles.append(getattr(layer, mlp_attr).register_forward_hook(make_hook(f"layer.{i}.mlp")))
         handles.append(layer.register_forward_hook(make_hook(f"layer.{i}")))
     handles.append(final_norm.register_forward_hook(make_hook("final_norm")))
@@ -261,6 +296,39 @@ def _register_capture_hooks(model) -> int:
 
 def _register_capture_hooks_with_decode(model) -> int:
     return _register_capture_hooks_impl(model, capture_decode=True)
+
+
+def _register_capture_hooks_per_head(model) -> int:
+    return _register_capture_hooks_impl(model, capture_decode=False, per_head=True)
+
+
+# Config attr names for the attention head count (mirrors capture.num_attention_heads,
+# but reads the vLLM model's config inside the worker without importing firefly there).
+_VLLM_NUM_HEADS_ATTRS = ("num_attention_heads", "n_head", "num_heads", "n_heads")
+
+
+def _read_n_heads_impl(model) -> int:
+    """Inside vLLM worker: read the attention head count from model.config.
+
+    Returns 0 if no recognized attribute is found (caller treats 0 as "skip
+    per-head" rather than guessing a head split).
+    """
+    config = getattr(model, "config", None)
+    if config is None:
+        return 0
+    for attr in _VLLM_NUM_HEADS_ATTRS:
+        val = getattr(config, attr, None)
+        if isinstance(val, int) and val > 0:
+            return val
+    return 0
+
+
+def _read_n_heads(model) -> int:
+    return _read_n_heads_impl(model)
+
+
+def _v1_read_n_heads(worker) -> int:
+    return _read_n_heads_impl(worker.model_runner.model)
 
 
 def _drain_captures(model) -> dict:
@@ -290,6 +358,10 @@ def _v1_register_capture_hooks(worker) -> int:
 
 def _v1_register_capture_hooks_with_decode(worker) -> int:
     return _register_capture_hooks_with_decode(worker.model_runner.model)
+
+
+def _v1_register_capture_hooks_per_head(worker) -> int:
+    return _register_capture_hooks_per_head(worker.model_runner.model)
 
 
 def _v1_drain_captures(worker) -> bytes:
@@ -330,9 +402,15 @@ def _do_capture(
     n_prompts: int = 1,
     speculative_tokens: int = 0,
     gpu_memory_utilization: float = 0.4,
+    per_head: bool = False,
 ) -> dict:
     if engine not in {"v0", "v1"}:
         raise ValueError(f"engine must be 'v0' or 'v1', got {engine!r}")
+    if per_head and capture_decode:
+        raise ValueError(
+            "per_head and capture_decode are mutually exclusive in this script "
+            "(per-head attribution is prefill-only)."
+        )
     os.environ["VLLM_USE_V1"] = "0" if engine == "v0" else "1"
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
@@ -381,23 +459,37 @@ def _do_capture(
     # worker-shaped wrappers that navigate worker → model_runner → model.
     # The register fn varies by capture_decode mode; drain is uniform.
     if engine == "v0":
-        register_fn = (
-            _register_capture_hooks_with_decode if capture_decode
-            else _register_capture_hooks
-        )
+        if per_head:
+            register_fn = _register_capture_hooks_per_head
+        elif capture_decode:
+            register_fn = _register_capture_hooks_with_decode
+        else:
+            register_fn = _register_capture_hooks
+        read_heads_fn = _read_n_heads
         drain_fn = _drain_captures
         dispatch = llm.apply_model
     else:
-        register_fn = (
-            _v1_register_capture_hooks_with_decode if capture_decode
-            else _v1_register_capture_hooks
-        )
+        if per_head:
+            register_fn = _v1_register_capture_hooks_per_head
+        elif capture_decode:
+            register_fn = _v1_register_capture_hooks_with_decode
+        else:
+            register_fn = _v1_register_capture_hooks
+        read_heads_fn = _v1_read_n_heads
         drain_fn = _v1_drain_captures
         dispatch = llm.collective_rpc
 
     n_hooks_raw = dispatch(register_fn)
     n_hooks = n_hooks_raw[0] if isinstance(n_hooks_raw, list) and n_hooks_raw else n_hooks_raw
     print(f"Registered {n_hooks} forward hooks")
+
+    # Read the head count for per-head taps via the same dispatch mechanism
+    # (plain int return — no tensor-summarization issue like the drain has).
+    n_heads = 0
+    if per_head:
+        n_heads_raw = dispatch(read_heads_fn)
+        n_heads = n_heads_raw[0] if isinstance(n_heads_raw, list) and n_heads_raw else n_heads_raw
+        print(f"Per-head capture enabled: num_attention_heads={n_heads}")
 
     # With capture_decode=False, max_tokens=1 → only prefill produces a
     # captured forward (the lone decode step is dropped by the filter).
@@ -459,13 +551,15 @@ def _do_capture(
         "max_tokens": effective_max_tokens,
         "n_prompts": len(prompts_batch),
         "speculative_tokens": speculative_tokens,
+        "per_head": per_head,
+        "n_heads": n_heads,
         "captures": captures,
     }
 
 
 def _tap_order_key(name: str) -> tuple:
     """Sort taps in forward order:
-       self_attn < mlp < layer-level, then final_norm.
+       self_attn < attn_heads < mlp < layer-level, then final_norm.
        Within a tap: bare name (legacy prefill-only) ≡ @prefill, then @token_0..N.
     """
     base, suffix = (name.rsplit("@", 1) + [""])[:2] if "@" in name else (name, "")
@@ -481,11 +575,11 @@ def _tap_order_key(name: str) -> tuple:
 
     if base == "final_norm":
         return (10**9, 0, suffix_key, name)
-    m = re.match(r"layer\.(\d+)(?:\.(self_attn|mlp))?$", base)
+    m = re.match(r"layer\.(\d+)(?:\.(self_attn|attn_heads|mlp))?$", base)
     if m:
         layer_idx = int(m.group(1))
         sub = m.group(2)
-        within = {"self_attn": 0, "mlp": 1, None: 2}[sub]
+        within = {"self_attn": 0, "attn_heads": 1, "mlp": 2, None: 3}[sub]
         return (layer_idx, within, suffix_key, name)
     return (10**9 - 1, 0, suffix_key, name)
 
@@ -515,11 +609,12 @@ def capture_at_v_0_7_3(
     n_prompts: int = 1,
     speculative_tokens: int = 0,
     gpu_memory_utilization: float = 0.4,
+    per_head: bool = False,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
-        speculative_tokens, gpu_memory_utilization,
+        speculative_tokens, gpu_memory_utilization, per_head,
     )
 
 
@@ -542,11 +637,12 @@ def capture_at_v_0_8_5(
     n_prompts: int = 1,
     speculative_tokens: int = 0,
     gpu_memory_utilization: float = 0.4,
+    per_head: bool = False,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
-        speculative_tokens, gpu_memory_utilization,
+        speculative_tokens, gpu_memory_utilization, per_head,
     )
 
 
@@ -569,11 +665,12 @@ def capture_at_v_0_8_5_fi(
     n_prompts: int = 1,
     speculative_tokens: int = 0,
     gpu_memory_utilization: float = 0.4,
+    per_head: bool = False,
 ) -> dict:
     return _do_capture(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
-        speculative_tokens, gpu_memory_utilization,
+        speculative_tokens, gpu_memory_utilization, per_head,
     )
 
 
@@ -605,6 +702,7 @@ def main(
     speculative_tokens: int = 0,
     gpu_memory_utilization: float = 0.4,
     max_seq_len: int = 1024,
+    per_head: bool = False,
     out: str = "",
 ) -> None:
     from datetime import UTC, datetime
@@ -641,7 +739,7 @@ def main(
         capture_decode=capture_decode, max_tokens=max_tokens,
         n_prompts=n_prompts, speculative_tokens=speculative_tokens,
         gpu_memory_utilization=gpu_memory_utilization,
-        max_seq_len=max_seq_len,
+        max_seq_len=max_seq_len, per_head=per_head,
     )
 
     vllm_version = result["vllm_version"]
@@ -650,6 +748,8 @@ def main(
     captures: dict = result["captures"]
     capture_decode_used = result.get("capture_decode", False)
     max_tokens_used = result.get("max_tokens", 1)
+    per_head_used = result.get("per_head", False)
+    n_heads_used = result.get("n_heads", 0)
 
     if not out:
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -664,6 +764,14 @@ def main(
     out_dir = Path(__file__).parent / "results" / out
 
     tap_points = sorted(captures.keys(), key=_tap_order_key)
+
+    # Per-head taps are head-splittable only when the captured width divides
+    # evenly into the model's head count. Mirrors capture_reference's logic.
+    head_counts: dict[str, int] = {}
+    if per_head_used and n_heads_used > 0:
+        for name in tap_points:
+            if name.endswith(".attn_heads") and captures[name].shape[-1] % n_heads_used == 0:
+                head_counts[name] = n_heads_used
 
     manifest = ReferenceManifest(
         model_id=model,
@@ -686,9 +794,12 @@ def main(
             "speculative_tokens": str(result.get("speculative_tokens", 0)),
             "gpu": gpu,
             "prompt": prompt,
+            "per_head": str(per_head_used),
+            "n_heads": str(n_heads_used),
         },
         domain="llm",
         dtype=dtype,
+        head_counts=head_counts,
     )
 
     write_reference(out_dir, manifest, captures)
@@ -697,5 +808,6 @@ def main(
     print(
         f"  {len(captures)} taps, vllm={vllm_version} engine={engine_used}, "
         f"dtype={dtype}, attention_backend={backend_used}, "
-        f"capture_decode={capture_decode_used}, max_tokens={max_tokens_used}"
+        f"capture_decode={capture_decode_used}, max_tokens={max_tokens_used}, "
+        f"per_head={per_head_used} ({len(head_counts)} head taps)"
     )
