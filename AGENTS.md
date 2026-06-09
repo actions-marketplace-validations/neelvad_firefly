@@ -46,7 +46,7 @@ Phase 1 (demoable artifact) — **DONE**. Phase 2 (calibration methodology
 - ✅ **Quantization-risk attribution** — `firefly quant-risk --reference <dir> [--bits 4|8]` simulates symmetric per-tensor vs per-channel quantization of the *stored* activations (no model run) and flags taps where per-tensor breaks (`src/firefly/quant_risk.py`). Channel-mean relative error metric (a global mean lets outlier channels hide the damage). Validated: reproduces the layer-11 outlier-feature finding — layer.11.mlp 768× channel concentration, 98% int8 per-tensor error rescued to 1.2% by per-channel (80.6× mitigation gain).
 - ✅ **Reproducible parity suite** — `scripts/vllm_test_suite.yml` + `scripts/run_vllm_suite.py`; 7 tests passing
 - ✅ **v0.1.0 tag** — annotated tag created (commit before push); pinnable via `uses: neelvad/firefly@v0.1.0`
-- ✅ **Blog post — 5 findings** — `docs/index.md` covers Finding 1 (FLASH vs XFORMERS layer 7 on SmolLM), Finding 1.5 (cross-scale + cross-family check: within-Meta holds, breaks across families), Finding 2 (decode KV-cache propagation), Finding 3 (V0 vs V1 step function across 9/1k/2k/4k tokens on Llama), Finding 4 (FLASH vs FLASHINFER layer-0 universal across 4 models), Finding 5 (Qwen+FLASHINFER catastrophic layer-27 spike, 20× outlier).
+- ✅ **Blog post — 7 findings** — `docs/index.md` covers Finding 1 (FLASH vs XFORMERS layer 7 on SmolLM), Finding 1.5 (cross-scale + cross-family check: within-Meta holds, breaks across families), Finding 2 (decode KV-cache propagation), Finding 3 (V0 vs V1 step function across 9/1k/2k/4k tokens on Llama), Finding 4 (FLASH vs FLASHINFER layer-0 universal across 4 models), Finding 5 (Qwen+FLASHINFER catastrophic layer-27 spike, 20× outlier), Finding 6 (per-head: single-head crack at layer 7 across 60× scale; FLASHINFER all-heads-from-layer-0 contrast), Finding 7 (quant-risk map: layer-11 98% int8 per-tensor error → 1.2% per-channel).
 - ✅ **Modal image variants in `scripts/capture_vllm.py`** — `0.7.3` and `0.8.5` on `debian_slim`; `0.8.5-fi` on `nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04` with `add_python="3.11"` for the FLASHINFER backend. Shared HF cache via `firefly-hf-cache` Modal Volume mounted at `/root/.cache/huggingface`. `--max-seq-len` and `--gpu-memory-utilization` flags for production-scale runs.
 
 ## Architecture (load-bearing modules)
@@ -89,7 +89,7 @@ optional TF32 matmul. All results in `scripts/results/`. Key findings:
 
 ## Roadmap (current state)
 
-v1 is **code-complete and tagged at v0.1.0**. Blog post in `docs/index.md` now has 5 findings (1, 1.5, 2, 3, 4, 5) including the cross-family rewrite of Finding 1.5 and the Qwen layer-27 catastrophic divergence (Finding 5). Remaining v1 launch steps are user-actions, not engineering:
+v1 is **code-complete and tagged at v0.1.0**. Blog post in `docs/index.md` now has 7 findings (1, 1.5, 2–7) including the per-head single-head-crack result (Finding 6) and the quant-risk map (Finding 7). Remaining v1 launch steps are user-actions, not engineering:
 
 1. **Push commits and tag** (`git push && git push --tags`) — many unpushed commits.
 2. **Enable GH Pages** in repo settings → Pages → source: branch main / folder `/docs`. URL becomes `neelvad.github.io/firefly`.
