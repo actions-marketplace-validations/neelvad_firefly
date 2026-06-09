@@ -631,6 +631,165 @@ def test_static_tapper_with_local_sink_writes_tap_index_via_sink(tmp_path: Path)
     assert isinstance(t.sink, shadow.LocalLogSink)
 
 
+# ---------------------------------------------------------------------------
+# instrument() — auto-wiring via torch.fx or named_modules
+# ---------------------------------------------------------------------------
+
+
+class _TinyForInstrument(nn.Module):
+    """3-layer MLP for instrument() tests. Static control flow so FX traces."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(4, 8)
+        self.fc2 = nn.Linear(8, 16)
+        self.fc3 = nn.Linear(16, 4)
+
+    def forward(self, x):
+        return self.fc3(self.fc2(self.fc1(x)))
+
+
+def test_instrument_validates_mode_and_method() -> None:
+    m = _TinyForInstrument()
+    with pytest.raises(ValueError, match="mode must be"):
+        shadow.instrument(m, "fc.*", mode="bogus")
+    with pytest.raises(ValueError, match="method must be"):
+        shadow.instrument(m, "fc.*", method="bogus")
+
+
+def test_instrument_named_modules_eager_wraps_forwards() -> None:
+    """Eager mode + named_modules: matching modules get their forward
+    wrapped so the return value flows through capture()."""
+    m = _TinyForInstrument()
+    instrumented, idx_to_name = shadow.instrument(
+        m, r"fc[12]$", mode="eager", method="named_modules"
+    )
+    assert instrumented is m  # in-place modification
+    assert idx_to_name == {}  # eager mode doesn't populate the index map
+
+    # Run through the active Tapper; verify the right events were recorded.
+    buf = shadow._Buffer(max_size=100)
+    with shadow.Tapper(buf):
+        _ = instrumented(torch.randn(1, 4))
+    events = _drain(buf)
+    # fc1 and fc2 match the regex (not fc3 because the regex is fc[12]$).
+    tap_names = sorted(e.tap_name for e in events)
+    assert tap_names == ["fc1", "fc2"]
+
+
+def test_instrument_named_modules_static_returns_index_map(tmp_path: Path) -> None:
+    """Static mode + named_modules: returns a {tap_idx: name} map suitable
+    for StaticTapper(index_to_name=...)."""
+    m = _TinyForInstrument()
+    instrumented, idx_to_name = shadow.instrument(
+        m, r"fc[123]$", mode="static", method="named_modules"
+    )
+    # All three matched in declaration order — but named_modules iteration
+    # is the model's child order, which is also fc1, fc2, fc3.
+    assert sorted(idx_to_name.items()) == [(0, "fc1"), (1, "fc2"), (2, "fc3")]
+
+
+def test_instrument_named_modules_tap_index_start_offsets_indices() -> None:
+    """tap_index_start lets the caller disambiguate multiple sub-models."""
+    m = _TinyForInstrument()
+    _, idx_to_name = shadow.instrument(
+        m, r"fc[12]$", mode="static", method="named_modules", tap_index_start=100
+    )
+    assert sorted(idx_to_name.items()) == [(100, "fc1"), (101, "fc2")]
+
+
+def test_instrument_fx_eager_inserts_capture_nodes() -> None:
+    """FX mode + eager: torch.fx.symbolic_trace + graph mutation. Verify
+    the resulting GraphModule has call_function nodes for the capture op."""
+    m = _TinyForInstrument()
+    instrumented, idx_to_name = shadow.instrument(
+        m, r"fc[12]$", mode="eager", method="fx"
+    )
+    assert idx_to_name == {}
+    # FX produces a GraphModule, not the original model.
+    assert isinstance(instrumented, torch.fx.GraphModule)
+    capture_nodes = [
+        node for node in instrumented.graph.nodes
+        if node.op == "call_function" and node.target is shadow._firefly_eager_tap
+    ]
+    assert len(capture_nodes) == 2  # one per matching module
+
+
+def test_instrument_fx_static_inserts_capture_nodes_and_returns_map() -> None:
+    m = _TinyForInstrument()
+    instrumented, idx_to_name = shadow.instrument(
+        m, r"fc[12]$", mode="static", method="fx"
+    )
+    assert isinstance(instrumented, torch.fx.GraphModule)
+    assert sorted(idx_to_name.items()) == [(0, "fc1"), (1, "fc2")]
+    capture_nodes = [
+        node for node in instrumented.graph.nodes
+        if node.op == "call_function" and node.target is shadow._firefly_static_tap
+    ]
+    assert len(capture_nodes) == 2
+
+
+def test_instrument_fx_eager_executes_correctly() -> None:
+    """End-to-end: instrument with FX, run under a Tapper, verify the
+    events show up just like manual @tap would have."""
+    m = _TinyForInstrument()
+    instrumented, _ = shadow.instrument(
+        m, r"fc[12]$", mode="eager", method="fx"
+    )
+    buf = shadow._Buffer(max_size=100)
+    with shadow.Tapper(buf):
+        _ = instrumented(torch.randn(1, 4))
+    events = _drain(buf)
+    tap_names = sorted(e.tap_name for e in events)
+    assert tap_names == ["fc1", "fc2"]
+
+
+class _DynamicTiny(nn.Module):
+    """A model whose forward has tensor-dependent control flow.
+
+    FX's ``symbolic_trace`` can't reason through Python conditionals that
+    branch on a Proxy value (``x.shape[0]`` is a Proxy at trace time, and
+    ``> 16`` returns a Proxy; using it in ``if`` raises). This pattern
+    mirrors what production LLMs do with attention masks / KV caches.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(4, 8)
+        self.fc2 = nn.Linear(8, 4)
+
+    def forward(self, x):
+        if x.shape[0] > 16:  # Proxy-valued conditional — FX raises here
+            x = x * 2
+        return self.fc2(self.fc1(x))
+
+
+def test_instrument_auto_falls_back_when_fx_fails() -> None:
+    """A model with tensor-shape-dependent control flow trips FX
+    symbolic_trace. The auto method should fall back to named_modules
+    silently."""
+    m = _DynamicTiny()
+    instrumented, _ = shadow.instrument(
+        m, r"fc[12]$", mode="eager", method="auto"
+    )
+    # Fell back to named_modules → in-place modification, not a GraphModule.
+    assert not isinstance(instrumented, torch.fx.GraphModule)
+    assert instrumented is m
+    # Confirm the wrapping worked end-to-end.
+    buf = shadow._Buffer(max_size=100)
+    with shadow.Tapper(buf):
+        _ = instrumented(torch.randn(1, 4))
+    events = _drain(buf)
+    assert sorted(e.tap_name for e in events) == ["fc1", "fc2"]
+
+
+def test_instrument_method_fx_raises_when_fx_fails() -> None:
+    """method='fx' should re-raise the FX failure, not silently fall back."""
+    m = _DynamicTiny()
+    with pytest.raises(Exception):  # noqa: B017 — FX raises various types
+        shadow.instrument(m, r"fc.*", mode="eager", method="fx")
+
+
 def _wait_for_lines(path: Path, expected: int, timeout: float = 2.0) -> None:
     """Poll for the drain thread to flush at least ``expected`` records."""
     deadline = time.time() + timeout

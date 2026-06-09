@@ -100,6 +100,41 @@ def _active_tapper() -> Tapper | None:
     return getattr(_TLS, "tapper", None)
 
 
+class _TapperContextBase:
+    """Re-entrance check + thread-local registration; subclass hooks for setup.
+
+    Both :class:`Tapper` and :class:`StaticTapper` use the same context-
+    manager pattern: enforce one-active-per-thread, register on a TLS
+    attribute, then do whatever subclass-specific setup is needed (drain
+    thread for StaticTapper). Override ``_tls_attr`` and ``_kind`` in
+    each subclass, plus optional ``_on_enter`` / ``_on_exit`` hooks.
+    """
+
+    _tls_attr: str = ""    # override: TLS attribute name
+    _kind: str = "Tapper"  # override: label for the re-entrance error
+
+    def __enter__(self):
+        current = getattr(_TLS, self._tls_attr, None)
+        if current is not None:
+            raise RuntimeError(
+                f"{self._kind} is not re-entrant within a single thread. "
+                f"Nested instances would interleave captures unpredictably."
+            )
+        setattr(_TLS, self._tls_attr, self)
+        self._on_enter()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._on_exit()
+        setattr(_TLS, self._tls_attr, None)
+
+    def _on_enter(self) -> None:
+        """Subclass hook for additional setup (e.g. start drain thread)."""
+
+    def _on_exit(self) -> None:
+        """Subclass hook for additional teardown (e.g. stop drain, flush)."""
+
+
 @dataclass
 class FullTensorPolicy:
     """When (if ever) to record a full tensor in addition to summary stats.
@@ -131,7 +166,7 @@ class _TapState:
     step: int = 0
 
 
-class Tapper:
+class Tapper(_TapperContextBase):
     """Thread-local context that enables shadow capture for one inference call.
 
     Usage::
@@ -144,6 +179,9 @@ class Tapper:
     summary stats recorded; the full-tensor policy decides whether to
     also persist the raw tensor.
     """
+
+    _tls_attr = "tapper"
+    _kind = "Tapper"
 
     def __init__(
         self,
@@ -168,18 +206,6 @@ class Tapper:
         recording, or after the underlying alert condition clears).
         """
         self._alerting = alerting
-
-    def __enter__(self) -> Tapper:
-        if _active_tapper() is not None:
-            raise RuntimeError(
-                "Tapper is not re-entrant within a single thread. "
-                "Nested Tappers would interleave captures unpredictably."
-            )
-        _TLS.tapper = self
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        _TLS.tapper = None
 
     def _record(self, x: torch.Tensor, name: str) -> None:
         if not self._taps_re.search(name):
@@ -1080,7 +1106,7 @@ class StaticFullTensorPolicy:
         )
 
 
-class StaticTapper:
+class StaticTapper(_TapperContextBase):
     """CUDA-graph-mode counterpart to :class:`Tapper`.
 
     Pre-allocates GPU buffers (stats + counter, optionally blob + blob_meta)
@@ -1178,16 +1204,14 @@ class StaticTapper:
         """
         self.alert_flag.fill_(1 if alerting else 0)
 
-    def __enter__(self) -> StaticTapper:
-        if _active_static_tapper() is not None:
-            raise RuntimeError("StaticTapper is not re-entrant within a thread.")
-        _TLS.static_tapper = self
+    _tls_attr = "static_tapper"
+    _kind = "StaticTapper"
+
+    def _on_enter(self) -> None:
         self._drain_thread = _StaticDrainThread(self)
         self._drain_thread.start()
-        return self
 
-    def __exit__(self, *_exc) -> None:
-        _TLS.static_tapper = None
+    def _on_exit(self) -> None:
         if self._drain_thread is not None:
             self._drain_thread.stop()
             self._drain_thread.join(timeout=5.0)
@@ -1350,3 +1374,230 @@ def tap_static(idx: int, name: str | None = None):
         return wrapper
 
     return decorator
+
+
+# ---------------------------------------------------------------------------
+# Auto-instrumentation via torch.fx OR named_modules
+#
+# Manual `@tap("name")` / `@tap_static(idx, name)` is the most explicit way to
+# wire shadow capture into a model — you mark exactly which forward methods
+# get instrumented. But on a 32-layer Llama you'd be decorating 100+ sites by
+# hand. `instrument(model, pattern, ...)` does the wiring by name-pattern.
+#
+# Two underlying methods are supported:
+#
+#   - "fx": torch.fx.symbolic_trace(model), walk the resulting Graph, insert
+#     call_function nodes after every call_module whose target matches the
+#     pattern. Most powerful; finds taps at sub-module boundaries even when
+#     the forward method calls them mid-expression. Fails on dynamic control
+#     flow (most production LLMs have `if attention_mask is not None`,
+#     KV-cache None checks, etc.) — symbolic_trace will raise.
+#
+#   - "named_modules": walk model.named_modules(), monkey-patch matching
+#     module forward methods to wrap their return value with the capture op.
+#     Simpler; works on any model with nn.Module structure. Misses taps that
+#     don't correspond to a named sub-module (rare in practice).
+#
+#   - "auto" (default): try fx first, fall back to named_modules if fx raises.
+#     Gets the best available approach for each model without the user having
+#     to know which to pick.
+# ---------------------------------------------------------------------------
+
+
+@torch.fx.wrap
+def _firefly_eager_tap(x: torch.Tensor, name: str) -> torch.Tensor:
+    """FX-opaque wrapper for eager-mode capture. Inserted at instrumented
+    sites by :func:`_instrument_via_fx`."""
+    return torch.ops.firefly.capture(x, name)
+
+
+@torch.fx.wrap
+def _firefly_static_tap(x: torch.Tensor, tap_idx: int) -> torch.Tensor:
+    """FX-opaque wrapper for CUDA-graph-mode capture.
+
+    Looks up the active StaticTapper at runtime; the lookup happens during
+    graph capture and the resulting op call (with its concrete buffer
+    pointers baked in) is what survives into the captured graph for replay.
+    """
+    t = _active_static_tapper()
+    if t is None:
+        return x
+    return torch.ops.firefly.capture_static(
+        x, t.stats_buf, t.counter, tap_idx,
+        t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+        t.full_tensor_policy.first_n_steps,
+        t.full_tensor_policy.every_n_steps,
+        1 if t.full_tensor_policy.on_alert else 0,
+    )
+
+
+def instrument(
+    model: torch.nn.Module,
+    pattern: str,
+    *,
+    mode: str = "eager",
+    method: str = "auto",
+    tap_index_start: int = 0,
+) -> tuple[torch.nn.Module, dict[int, str]]:
+    """Insert shadow capture ops at module sites matching ``pattern``.
+
+    Args:
+        model: The model to instrument. Modified in place for the
+            ``named_modules`` path; replaced with a GraphModule for the
+            ``fx`` path. Either way, the returned model is the one to
+            use for inference.
+        pattern: Regex matched against module names (e.g.
+            ``r"layer\\.(7|15)\\.self_attn$"``).
+        mode: ``"eager"`` (calls :func:`capture` with the tap name) or
+            ``"static"`` (calls :func:`capture_static` with a tap index).
+        method: ``"fx"`` forces torch.fx; ``"named_modules"`` wraps
+            forwards; ``"auto"`` (default) tries fx first then falls
+            back to named_modules if symbolic tracing fails.
+        tap_index_start: For ``mode="static"``: starting tap_idx (useful
+            when instrumenting multiple sub-models with disjoint indices).
+
+    Returns:
+        ``(instrumented_model, index_to_name)`` — the second element is a
+        ``{tap_idx: module_name}`` map populated for ``mode="static"``,
+        empty for ``mode="eager"``. Pass it to
+        :class:`StaticTapper(index_to_name=...)` so the drain can re-attach
+        names.
+    """
+    if mode not in ("eager", "static"):
+        raise ValueError(f"mode must be 'eager' or 'static', got {mode!r}")
+    if method not in ("fx", "named_modules", "auto"):
+        raise ValueError(
+            f"method must be 'fx', 'named_modules', or 'auto', got {method!r}"
+        )
+
+    if method == "fx":
+        return _instrument_via_fx(model, pattern, mode, tap_index_start)
+    if method == "named_modules":
+        return _instrument_via_named_modules(model, pattern, mode, tap_index_start)
+    # auto: try fx, fall back to named_modules on tracing failure.
+    try:
+        return _instrument_via_fx(model, pattern, mode, tap_index_start)
+    except Exception as e:  # noqa: BLE001 — FX raises many types
+        import sys
+        print(
+            f"[firefly] instrument: torch.fx tracing failed ({type(e).__name__}: "
+            f"{e}); falling back to named_modules method.",
+            file=sys.stderr,
+        )
+        return _instrument_via_named_modules(model, pattern, mode, tap_index_start)
+
+
+def _instrument_via_fx(
+    model: torch.nn.Module,
+    pattern: str,
+    mode: str,
+    tap_index_start: int,
+) -> tuple[torch.nn.Module, dict[int, str]]:
+    """torch.fx symbolic-trace then insert capture call_function nodes."""
+    pat = re.compile(pattern)
+    gm = torch.fx.symbolic_trace(model)
+    index_to_name: dict[int, str] = {}
+    next_idx = tap_index_start
+
+    # Iterate over a list copy — we mutate the graph during iteration.
+    for node in list(gm.graph.nodes):
+        if node.op != "call_module":
+            continue
+        target_str = str(node.target)
+        if not pat.search(target_str):
+            continue
+
+        if mode == "eager":
+            with gm.graph.inserting_after(node):
+                new_node = gm.graph.call_function(
+                    _firefly_eager_tap, args=(node, target_str)
+                )
+        else:  # static
+            tap_idx = next_idx
+            index_to_name[tap_idx] = target_str
+            next_idx += 1
+            with gm.graph.inserting_after(node):
+                new_node = gm.graph.call_function(
+                    _firefly_static_tap, args=(node, tap_idx)
+                )
+        # Redirect every downstream use of `node` to read from `new_node`
+        # instead. The replacement runs over all current uses; we then
+        # restore `new_node`'s reference to the original `node` since the
+        # capture wrapper needs the captured tensor as input.
+        node.replace_all_uses_with(new_node)
+        new_node.args = (node, *new_node.args[1:])
+
+    gm.recompile()
+    return gm, index_to_name
+
+
+def _instrument_via_named_modules(
+    model: torch.nn.Module,
+    pattern: str,
+    mode: str,
+    tap_index_start: int,
+) -> tuple[torch.nn.Module, dict[int, str]]:
+    """Monkey-patch forward() on every module whose name matches the pattern."""
+    pat = re.compile(pattern)
+    index_to_name: dict[int, str] = {}
+    next_idx = tap_index_start
+
+    for name, mod in model.named_modules():
+        if not pat.search(name):
+            continue
+        if mode == "eager":
+            _wrap_forward_eager(mod, name)
+        else:
+            index_to_name[next_idx] = name
+            _wrap_forward_static(mod, next_idx)
+            next_idx += 1
+    return model, index_to_name
+
+
+def _wrap_forward_eager(mod: torch.nn.Module, name: str) -> None:
+    """Replace ``mod.forward`` so its return value is routed through the
+    eager capture op. Tuple-returning forwards get their first tensor
+    element captured."""
+    original = mod.forward
+
+    @functools.wraps(original)
+    def wrapped(*args, **kwargs):
+        out = original(*args, **kwargs)
+        if isinstance(out, torch.Tensor):
+            return torch.ops.firefly.capture(out, name)
+        if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
+            return (torch.ops.firefly.capture(out[0], name), *out[1:])
+        return out
+
+    mod.forward = wrapped
+
+
+def _wrap_forward_static(mod: torch.nn.Module, tap_idx: int) -> None:
+    """Like :func:`_wrap_forward_eager` but for CUDA-graph mode."""
+    original = mod.forward
+
+    @functools.wraps(original)
+    def wrapped(*args, **kwargs):
+        out = original(*args, **kwargs)
+        t = _active_static_tapper()
+        if t is None:
+            return out
+        first_n = t.full_tensor_policy.first_n_steps
+        every_n = t.full_tensor_policy.every_n_steps
+        on_alert_enabled = 1 if t.full_tensor_policy.on_alert else 0
+        if isinstance(out, torch.Tensor):
+            return torch.ops.firefly.capture_static(
+                out, t.stats_buf, t.counter, tap_idx,
+                t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                first_n, every_n, on_alert_enabled,
+            )
+        if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
+            head = torch.ops.firefly.capture_static(
+                out[0], t.stats_buf, t.counter, tap_idx,
+                t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                first_n, every_n, on_alert_enabled,
+            )
+            return (head, *out[1:])
+        return out
+
+    mod.forward = wrapped
