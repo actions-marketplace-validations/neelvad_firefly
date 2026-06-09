@@ -347,5 +347,66 @@ def check(
         raise typer.Exit(code=1)
 
 
+@app.command("quant-risk")
+def quant_risk(
+    reference: str = typer.Option(
+        ...,
+        "--reference",
+        "-r",
+        help=(
+            "Reference artifact directory (local path or hf://org/repo). "
+            "Analysis uses the activations already stored in the artifact — "
+            "no model run needed."
+        ),
+    ),
+    bits: int = typer.Option(
+        8,
+        "--bits",
+        help="Quantization bit-width to simulate (8 for int8, 4 for int4).",
+    ),
+    threshold: float = typer.Option(
+        0.01,
+        "--threshold",
+        help=(
+            "Flag taps whose simulated per-tensor relative error exceeds this "
+            "fraction (default 1%). Purely diagnostic — exit code is always 0."
+        ),
+    ),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write the structured per-tap report to this path."
+    ),
+) -> None:
+    """Predict which layers will degrade under quantization, from stored activations.
+
+    Simulates symmetric round-to-nearest quantization of each tap's captured
+    activation (per-tensor and per-channel) and reports the taps where
+    per-tensor quantization breaks down — typically outlier-feature layers
+    whose few extreme channels force a scale that crushes the rest.
+    """
+    import json
+    from dataclasses import asdict
+
+    from firefly.quant_risk import analyze_quant_risk
+    from firefly.reference import read_reference
+    from firefly.report import render_quant_risk
+
+    resolved_reference = _resolve_or_exit(reference)
+    manifest, tensors = read_reference(resolved_reference)
+    risks = analyze_quant_risk(tensors, manifest.tap_points, bits=bits)
+    typer.echo(render_quant_risk(risks, bits=bits, threshold=threshold))
+
+    if report_json is not None:
+        payload = {
+            "bits": bits,
+            "threshold": threshold,
+            "taps": [
+                {**asdict(r), "mitigation_gain": r.mitigation_gain} for r in risks
+            ],
+        }
+        with report_json.open("w") as f:
+            json.dump(payload, f, indent=2)
+        typer.echo(f"Wrote quant-risk report to {report_json}")
+
+
 if __name__ == "__main__":
     app()

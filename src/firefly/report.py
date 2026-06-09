@@ -18,6 +18,7 @@ from firefly.attribution import AttributionResult
 
 if TYPE_CHECKING:
     from firefly.head_attribution import PerHeadAttribution
+    from firefly.quant_risk import TapQuantRisk
 
 
 def render_human(
@@ -105,6 +106,69 @@ def write_json(
         ]
     with path.open("w") as f:
         json.dump(payload, f, indent=2)
+
+
+def render_quant_risk(
+    risks: list[TapQuantRisk],
+    bits: int,
+    threshold: float,
+    console: Console | None = None,
+) -> str:
+    """Render the quantization-risk table in forward order.
+
+    Rows whose simulated per-tensor relative error exceeds ``threshold``
+    are flagged; the worst tap is highlighted. Returns the rendered text.
+    """
+    console = console or Console(record=True, width=120)
+
+    table = Table(
+        title=f"Firefly quantization-risk report (int{bits}, symmetric)",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("Tap", no_wrap=True)
+    table.add_column("abs max", justify="right")
+    table.add_column("outlier ratio", justify="right")
+    table.add_column("channel conc.", justify="right")
+    table.add_column("per-tensor err", justify="right")
+    table.add_column("per-channel err", justify="right")
+    table.add_column("mitigation gain", justify="right")
+    table.add_column("Status", justify="center")
+
+    worst = max(risks, key=lambda r: r.per_tensor_rel_err, default=None)
+    n_flagged = 0
+    for r in risks:
+        flagged = r.per_tensor_rel_err > threshold
+        n_flagged += flagged
+        status = "[red]⚠[/]" if flagged else "[green]✓[/]"
+        row_style = "bold red" if (worst is not None and r is worst and flagged) else None
+        table.add_row(
+            r.tap_name,
+            f"{r.abs_max:.3e}",
+            f"{r.outlier_ratio:.1f}×",
+            f"{r.channel_concentration:.1f}×",
+            f"{r.per_tensor_rel_err:.2%}",
+            f"{r.per_channel_rel_err:.2%}",
+            f"{r.mitigation_gain:.1f}×",
+            status,
+            style=row_style,
+        )
+
+    console.print(table)
+    if worst is not None and worst.per_tensor_rel_err > threshold:
+        console.print(
+            f"[bold red]{n_flagged} of {len(risks)} taps above {threshold:.1%} "
+            f"simulated int{bits} error.[/] Worst: {worst.tap_name} "
+            f"({worst.per_tensor_rel_err:.2%} per-tensor; per-channel scaling "
+            f"reduces it {worst.mitigation_gain:.1f}× to {worst.per_channel_rel_err:.2%})."
+        )
+    else:
+        console.print(
+            f"[bold green]All {len(risks)} taps within {threshold:.1%} "
+            f"simulated int{bits} error.[/]"
+        )
+
+    return console.export_text()
 
 
 def render_markdown(
