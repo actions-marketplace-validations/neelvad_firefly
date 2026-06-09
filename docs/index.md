@@ -567,6 +567,137 @@ implication is "FLASHINFER is not a drop-in for ALiBi-positional
 models in BF16."** It's an architectural mismatch, not a per-model
 quirk.
 
+## Finding 6: The kernel divergence starts at exactly *one* attention head — at any model scale
+
+Everything above attributes divergence to a *layer*. This pass drills
+one level deeper: which attention *head* inside `layer.7.self_attn`
+actually diverges first?
+
+The mechanics first, because they constrain where you can look. You
+can't recover per-head outputs from the attention block's output: the
+output projection (`o_proj`) is a dense matmul that linearly mixes all
+heads together. The only place per-head structure still exists is the
+*input* to `o_proj` — the concatenated per-head context vectors. So
+Firefly's `--per-head` mode taps there, splits the tensor into
+`(n_heads, head_dim)`, and reports per-head max-diffs plus a
+**concentration ratio**: worst head's diff over the median head's diff.
+A high ratio means the divergence is localized to one head; ~1× means
+it's everywhere.
+
+Running FLASH_ATTN vs XFORMERS again with per-head taps:
+
+| | bit-clean prefix | at layer 7 | heads diverging at layer 7 |
+|---|---|---|---|
+| SmolLM-135M (9 heads) | layers 0–6 | head **2**, max\|Δ\| 1.95e-03 | **exactly 1 of 9** |
+| Llama-3.1-8B (32 heads) | layers 0–6 | head **30**, max\|Δ\| 6.10e-05 | **exactly 1 of 32** |
+
+That's not "head 2 is the worst" — it's *every other head at layer 7 is
+bit-identical between the two kernels.* One head cracks. By layer 8 the
+divergence has entered the residual stream and smeared across all
+heads (concentration drops to single digits), which is why layer-level
+attribution sees a clean break at layer 7 but per-head attribution is
+needed to see how surgical the break actually is.
+
+The cross-scale replication is the part I didn't expect. Finding 1.5
+established that the layer-7 *layer* boundary survives 60× model scale
+within the Meta lineage. The per-head data says the *single-head-crack
+pattern* survives too: on Llama-3.1-8B the first divergence is a few
+elements of one head out of 32 (mean |Δ| at that tap: 1.5e-09 — the
+max is 6.1e-05 concentrated in a couple of positions). The head
+*index* is not conserved (2/9 vs 30/32), which fits the Finding 1
+mechanism: whichever head carries the largest activation magnitudes
+at layer 7 crosses the BF16 representability threshold first, and
+which head that is depends on where the model happened to put its
+outlier features.
+
+And the FLASHINFER contrast makes the signature diagnostic. Running
+FLASH_ATTN vs FLASHINFER per-head (both captured on the same
+FLASHINFER-capable image, so the only variable is the backend):
+**every head diverges from layer 0.** Worst head at layer 0 is
+9.8e-04, the *median* head is 1.2e-04 — nonzero everywhere — and the
+concentration ratio never exceeds ~9× anywhere in the network. No
+bit-clean prefix, no single cracking head.
+
+So the two divergence classes from Finding 4 now have distinct
+per-head signatures:
+
+| comparison | layer signature | per-head signature |
+|---|---|---|
+| FLASH vs XFORMERS | bit-equal until layer 7 | one head cracks (∞ concentration), then smears to single digits |
+| FLASH vs FLASHINFER | diverges at layer 0 | all heads at once, uniformly (~1–9× everywhere) |
+
+A debugging workflow can read this directly: high per-head
+concentration at the first divergent layer means "a specific head's
+numerics crossed a precision threshold" (think: outlier features,
+magnitude-dependent rounding); flat concentration from layer 0 means
+"the kernel itself computes differently for everything" (think:
+different reduction order, different bias handling). Same tool, one
+extra flag, and the diagnosis gets a mechanism attached.
+
+## Finding 7: The reference artifact doubles as a quantization-risk map
+
+This one isn't a divergence finding — it's a reuse of the data Firefly
+already has. A reference artifact contains every tap's full activation
+tensor. That's exactly the input you need to answer a different
+question: **which layers will break if I quantize this model?**
+
+`firefly quant-risk --reference <dir>` simulates symmetric
+round-to-nearest int8 (or int4) quantization of each stored activation
+twice — once with a single per-tensor scale, once with one scale per
+channel — and reports the relative error of each, per tap. No model
+run, no quantized weights; it's pure arithmetic on tensors you already
+captured for parity checking.
+
+One metric decision matters enough to flag: the error is computed
+*within* each channel and then averaged across channels, not as a
+single magnitude-weighted global mean. The failure mode this catches
+is the whole point: when one channel is 1000× the others, a per-tensor
+scale sized for the outlier rounds every *normal* channel to zero —
+100% error on each of them — while a global error metric barely moves,
+because the outlier channel dominates its numerator and denominator
+alike. (My first implementation used the global metric; the unit test
+for "one outlier channel" showed per-channel scaling only winning
+3.7×, which was the metric hiding the damage, not the damage being
+small.)
+
+Running it on the SmolLM-135M FP32 reference from the earlier
+validation work:
+
+| tap | max\|activation\| | channel concentration | int8 per-tensor err | int8 per-channel err | gain |
+|---|---|---|---|---|---|
+| layer.9.mlp | 35.5 | 9.1× | 7.7% | 0.8% | 9× |
+| layer.10.mlp | 49.7 | 9.3× | 5.3% | 0.5% | 11× |
+| **layer.11.mlp** | **30,300** | **768×** | **98.0%** | **1.2%** | **81×** |
+| layer.12 (residual) | 31,900 | 939× | 99.0% | 0.7% | 142× |
+| layer.13 (residual) | 32,000 | 943× | 99.0% | 0.7% | 146× |
+
+This is the layer-11 outlier-feature phase transition from the
+validation findings — the same `max(|activation|)` jump from ~50 to
+~30,000 in one layer that made TF32 noise spike there — now read out
+as a quantization-risk statement: **per-tensor int8 at layer 11 puts
+the average channel at 98% relative error — most channels round to
+zero — and per-channel scaling recovers it to 1.2%.** The residual
+stream stays in that regime through layer 27, exactly where the
+magnitudes stay locked at ~32k.
+
+Two things I like about this result. First, it's a quantitative
+re-derivation of *why* LLM.int8(), SmoothQuant, and every production
+W8A8 scheme ended up outlier-aware — derived from one CLI command on
+an artifact that was captured for a completely different purpose.
+Second, it closes a loop within this post: Finding 1's mechanism
+(kernel divergence surfaces where activation magnitudes cross the
+BF16 threshold) and Finding 7's mechanism (quantization breaks where
+activation magnitudes are outlier-concentrated) are the same
+underlying object — the model's activation-magnitude profile — read
+through two different failure modes. Capture it once, and both
+diagnostics are queries against it.
+
+The honest caveat: this simulates round-to-nearest quantization of
+activations in isolation. A real quantized serving stack has fused
+dequant epilogues, weight quantization, and calibration data that
+shift the picture. `quant-risk` is a *map of where to look*, not a
+substitute for evaluating the quantized model.
+
 ## What I think this means for ML CI
 
 A few unromantic takeaways:
@@ -620,7 +751,10 @@ will miss most real upgrade-time bugs.
   earlier validation work showed FP32 is bit-deterministic on the same
   setup, and FP16 behaves like BF16 from a reproducibility standpoint
   (different mantissa, same general pattern). Quantized regimes
-  (INT8/INT4) would surface different failure modes.
+  (INT8/INT4) would surface different failure modes — Finding 7
+  *simulates* activation quantization from stored tensors, but real
+  quantized kernels (fused dequant, weight quant, calibration) are
+  untested territory.
 - **One inference engine.** Firefly currently has a vLLM-specific
   capture path. SGLang and TGI would each need their own. The engine-
   internal differences (apply_model vs collective_rpc, etc.) are the
@@ -678,16 +812,36 @@ uv run modal run scripts/capture_vllm.py \
 
 `uv run python scripts/plot_validation.py diff scripts/results/llama_v0_flash_long1k scripts/results/llama_v1_flash_long1k` produces the per-tap curve at 1k tokens. The full overlay (9 / 1k / 2k / 4k on one chart) needs the 2k and 4k pairs as well; swap the prompt file and `--max-seq-len` accordingly.
 
+The Finding 6 per-head comparison is two captures plus one local diff
+(SmolLM on A10G is ~$0.10; swap in the Llama model/GPU flags above for
+the 8B version):
+
+```sh
+uv run modal run scripts/capture_vllm.py \
+  --vllm-tag 0.8.5 --attention-backend FLASH_ATTN --per-head --out flash_ph
+uv run modal run scripts/capture_vllm.py \
+  --vllm-tag 0.8.5 --attention-backend XFORMERS --per-head --out xformers_ph
+
+uv run python scripts/compare_per_head.py \
+  scripts/results/flash_ph scripts/results/xformers_ph
+```
+
+Finding 7 needs no GPU at all — any captured reference works:
+
+```sh
+uv run firefly quant-risk --reference <reference-dir> --bits 8
+```
+
 ## What's next
 
-1. **Why exactly does Qwen layer 27 spike with FLASHINFER and not with
-   FLASH_ATTN?** Finding 5 establishes the *what*; the mechanism is
-   plausibly "outlier-feature magnitudes × FLASHINFER's reduction
-   order at the final layer" but I haven't isolated which specific
-   FLASHINFER kernel call diverges. A focused investigation would
-   compare per-head attention outputs at Qwen layer 27 — Firefly's
-   hook infrastructure already supports it, just needs an extra
-   tap-point selector.
+1. **Run per-head attribution on the Qwen layer-27 spike.** Finding 6
+   built the per-head instrument (it's what produced the
+   single-head-crack result), but I haven't yet pointed it at Finding
+   5's Qwen catastrophe. The question it would answer: is the 20×
+   layer-27 spike concentrated in one or two outlier-feature heads
+   (which would complete the magnitude × kernel-diff mechanism), or
+   does the whole layer's attention go at once? One Modal run on the
+   FLASHINFER image.
 
 2. **More cross-family models.** Phi-3, Yi, and Gemma-2 added in
    this pass. The remaining gaps are non-GQA architectures (Falcon),
