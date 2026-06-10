@@ -3,15 +3,15 @@ layout: default
 title: "Firefly: a numerical-parity CI gate for ML"
 ---
 
-# What I found running per-layer activation diffs against vLLM
+# Per-layer activation diffs against vLLM
 
-A few months ago I started building **[Firefly][repo]**, a small tool that
+Here's a small tool **[Firefly][repo]** that
 diffs a candidate ML model's per-layer activations against a calibrated
 reference and tells you the first layer where they disagree. The intended
 use case is a CI gate: you point it at your model on every PR and it
 fails loud if the residual stream moves.
 
-This post is about what fell out of running it against vLLM.
+This post mainly discusses what happens when you run it against vLLM on some models.
 
 The most useful finding, before any setup:
 
@@ -45,8 +45,8 @@ It's a CLI plus a GitHub Action wrapper. The model is:
 
 The architecture is intentionally boring. The capture, diff, and
 attribution modules are pure functions; the orchestrators wrap them with
-the model-loading and file-I/O. There's no online inference layer, no
-hosted dashboard, no novel ML. The interesting part is the picks:
+the model-loading and file-I/O. There's no fully fledged online inference layer (yet), no
+hosted dashboard (yet), no novel ML (yet). The interesting part is the picks:
 
 - **Hook at the module boundary, not inside.** vLLM and HF transformers
   both expose `model.layers[i].self_attn` as a top-level submodule. Even
@@ -73,11 +73,26 @@ hooks working; CUDA graphs would skip them).
 The reason for `enforce_eager=True` deserves a flag: in eager mode, hooks
 work because every forward op is dispatched through the Python
 interpreter. With CUDA graphs enabled — which is what production vLLM
-actually runs — hooks would force graph breaks. That means **Firefly as
-currently written is a CI-time diagnostic, not a shadow-mode capture
-against live traffic**. For shadow mode you'd need a custom op
-(`torch.ops.firefly.capture(tensor, name)`) that Dynamo treats as
-opaque-but-tensor-in/tensor-out. That's a separate engineering arc.
+actually runs — hooks would force graph breaks. So the measurements in
+this post are a **CI-time diagnostic**: Firefly spins up its own
+eager-mode vLLM, captures, and tears it down. That's fine for a
+per-PR check, where nobody's watching the latency.
+
+Capturing against *live* production traffic is a different constraint —
+you can't ask a serving stack to drop CUDA graphs and torch.compile.
+That path needs a custom op that Dynamo treats as opaque
+(tensor-in/tensor-out) so it survives compilation, plus something that
+survives CUDA-graph replay, where there's no Python callback to hang a
+hook on at all. Both of those now exist in the repo
+(`firefly.shadow`): `torch.ops.firefly.capture` for the
+eager/`torch.compile` path, and a Triton-kernel custom op
+(`capture_static`) that writes stats into a pre-allocated GPU buffer
+whose pointers get captured into the graph and re-run on every replay.
+They're validated by spikes and a Modal integration test, but I haven't
+yet wired them into a one-command `firefly check --runner vllm` flow —
+the shadow *mechanism* is built; the product *plumbing* against a live
+stack is the part that isn't. The findings below all use the eager-mode
+hook path.
 
 ## The matrix
 
@@ -842,9 +857,15 @@ will miss most real upgrade-time bugs.
   capture path. SGLang and TGI would each need their own. The engine-
   internal differences (apply_model vs collective_rpc, etc.) are the
   per-engine engineering cost.
-- **Eager mode only.** As noted, hooks can't survive CUDA graphs, so
-  Firefly today is a CI-time tool. Shadow-mode capture against live
-  traffic would require a custom op. That's the v3 line item.
+- **The measurements here are eager-mode CI captures, not live shadow
+  capture.** Forward hooks can't survive CUDA graphs, so every number in
+  this post came from an eager-mode vLLM that Firefly stood up for the
+  diagnostic. The CUDA-graph-safe custom op needed for capturing against
+  live, compiled production traffic is built (`firefly.shadow`, validated
+  by a Modal integration test) but not yet wired into a `firefly check
+  --runner vllm` product flow — so "Firefly watches your prod serving
+  stack" is a real mechanism without the packaging to make it one command
+  yet.
 
 ## Reproduce
 
