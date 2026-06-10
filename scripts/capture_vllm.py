@@ -80,8 +80,7 @@ _VLLM_VERSIONS: dict[str, dict] = {
         "transformers": "transformers==4.51.3",
         "extras": [],
     },
-    # FLASHINFER variant of 0.8.5. Path history (see also memory:
-    # project_firefly_flashinfer_deferred.md):
+    # FLASHINFER variant of 0.8.5. Install-path history:
     #
     #   1. debian_slim + `pip install flashinfer-python` → failed at
     #      vLLM init with "CUDA_HOME not set". Flashinfer's wheel

@@ -1,6 +1,6 @@
 """Spike: does a noop pass-through custom op survive torch.compile without graph breaks?
 
-The shadow-mode design (see project_firefly_shadow_mode_design memory) hinges
+The shadow-mode design (src/firefly/shadow.py module docstring) hinges
 on this: if the op survives Dynamo tracing as opaque, the rest of the
 architecture is normal Python work. If it forces a graph break, the
 architecture has to pivot.

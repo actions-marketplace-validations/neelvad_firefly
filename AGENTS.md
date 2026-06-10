@@ -101,7 +101,7 @@ v2 is **mostly done**:
 - ✅ **HF Hub publish flow** — `firefly publish --reference <dir> --to <uri>` plus `--push <uri>` on `capture` and `calibrate`. HF + S3 both supported.
 - ✅ **Llama-3.1-8B validation** — drives Finding 1.5 (within-Meta universality at layer 7) and Finding 4 (cross-model FLASHINFER at layer 0).
 - ✅ **Long-prompt series (1k/2k/4k)** — Finding 3 rewritten as a step function: bit-equal at 9 tokens, saturated at ~2.8% final-norm rel from 1k through 4k. Block-boundary > 1 is the threshold, not length.
-- ✅ **FLASHINFER backend** — drives Finding 4. **Working install path: `nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04` + `add_python="3.11"` + explicit pip-install of vllm + flashinfer**. Other paths (debian_slim, vllm-openai docker image) failed and are documented in `project_firefly_flashinfer_finding.md`.
+- ✅ **FLASHINFER backend** — drives Finding 4. **Working install path: `nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04` + `add_python="3.11"` + explicit pip-install of vllm + flashinfer**. Other paths (debian_slim, vllm-openai docker image) failed; the why is documented in the image-definition comments in `scripts/capture_vllm.py`.
 - ✅ **Cross-family check (9 models, 8 families)** — drives Finding 1.5 rewrite + Finding 5. SmolLM, Llama (Meta), Qwen, Mistral, Phi-3, Yi, Gemma-2, Falcon-7B (MQA+RoPE), BLOOM-7B1 (MHA+ALiBi). XFORMERS layer-7 within-Meta only; non-Meta is layer 0 on 6 of 7 (Yi is the lone layer-2 outlier) regardless of MQA-vs-GQA or RoPE-vs-ALiBi. FLASHINFER layer-0 universality holds across all 8 supported models. **BLOOM+FLASHINFER is a SECOND catastrophic outlier** (22% from layer 0, flat through network — kernel-fundamental ALiBi mismatch, different mechanism from Qwen's layer-27 spike). Qwen+FLASHINFER 22.83% spike reproduces bit-identically (N=2). Phi-3 hard-incompatible with FLASHINFER (head_dim=96). MPT was attempted as second ALiBi point but mosaicml/mpt-7b returns 404 (Mosaic acquired by Databricks, model deprecated).
 - ✅ **Llama 2k/4k FLASHINFER captures** — Finding 4 length curve now 4 points (9/1k/2k/4k). Plateaus past 1k just like V0 vs V1, but at a higher plateau (~3% vs ~2.8%).
 - ✅ **Cross-family entries in `scripts/vllm_test_suite.yml`** — 12 tests total (7 original SmolLM + 5 cross-family Qwen/Mistral).
@@ -112,7 +112,7 @@ v3 is **in progress**:
 
 - ✅ **GCS storage backend** — `gs://bucket/prefix` (or `gcs://`), Application Default Credentials, ETag-based incremental sync. Optional install via `pip install 'firefly[gcs]'`.
 - ✅ **Azure Blob storage backend** — `az://account/container/prefix`, `AZURE_STORAGE_CONNECTION_STRING` or `DefaultAzureCredential` (managed identity / az CLI / env vars). Optional install via `pip install 'firefly[azure]'`.
-- ✅ **Shadow-mode capture against production traffic** — shipped 2026-06-09 in `src/firefly/shadow.py`. Both spikes passed (`torch.compile` survival + CUDA-graph survival via Triton). End-to-end Modal integration test passes (200 records / 21 blobs / sidecar / round-trip). What landed: `Tapper` + `@tap` for eager + torch.compile path; `StaticTapper` + `@tap_static` + Triton kernel for CUDA-graph path; both paths support `first_n_steps` / `every_n_steps` / `on_alert` full-tensor policies; `LocalLogSink` plus streaming `S3Sink` / `GCSSink` / `AzureSink` (sharded `stats-NNNNN.jsonl`, 5s/500-event flush cadence, errors-don't-crash-inference contract); `aggregate()` handles both single-file and sharded layouts; `load_tap_index()` reads the `tap_index.json` sidecar; `_TapperContextBase` unifies the re-entrance/TLS bookkeeping; `instrument(model, pattern, mode, method)` auto-wires capture ops via `torch.fx` symbolic trace (primary) with `named_modules` fallback when FX trips on dynamic control flow. 61 shadow tests; full suite 195. The design memory `project_firefly_shadow_mode_design.md` has the full architecture and the corrected "weeks of work" estimate that turned out to be ~2 sessions of normal Python + a 30-line Triton kernel. **Live S3/GCS/Azure integration tests deferred** — mocks cover the contract; revisit if/when a real production deployment is on the roadmap (10-min IAM setup).
+- ✅ **Shadow-mode capture against production traffic** — shipped 2026-06-09 in `src/firefly/shadow.py`. Both spikes passed (`torch.compile` survival + CUDA-graph survival via Triton). End-to-end Modal integration test passes (200 records / 21 blobs / sidecar / round-trip). What landed: `Tapper` + `@tap` for eager + torch.compile path; `StaticTapper` + `@tap_static` + Triton kernel for CUDA-graph path; both paths support `first_n_steps` / `every_n_steps` / `on_alert` full-tensor policies; `LocalLogSink` plus streaming `S3Sink` / `GCSSink` / `AzureSink` (sharded `stats-NNNNN.jsonl`, 5s/500-event flush cadence, errors-don't-crash-inference contract); `aggregate()` handles both single-file and sharded layouts; `load_tap_index()` reads the `tap_index.json` sidecar; `_TapperContextBase` unifies the re-entrance/TLS bookkeeping; `instrument(model, pattern, mode, method)` auto-wires capture ops via `torch.fx` symbolic trace (primary) with `named_modules` fallback when FX trips on dynamic control flow. 61 shadow tests; full suite 195. The module docstring in `src/firefly/shadow.py` carries the architecture sketch; the original "weeks of work" estimate turned out to be ~2 sessions of normal Python + a 30-line Triton kernel. **Live S3/GCS/Azure integration tests deferred** — mocks cover the contract; revisit if/when a real production deployment is on the roadmap (10-min IAM setup).
 
 v3 deferred (multi-session):
 
@@ -145,8 +145,8 @@ v3.5+ (separate features, not part of shadow-mode):
 ## How to pick up a cold session
 
 1. Read this file.
-2. Read `MEMORY.md` for user/project memories (especially `project_recsys_v2_angle.md` if recsys comes up).
-3. Check `git log --oneline -15` to see recent work.
-4. Check `scripts/results/` to see latest validation data.
-5. Run `uv run pytest -q` to confirm green state.
-6. Ask user what specifically they want to work on next; don't assume.
+2. Check `git log --oneline -15` to see recent work.
+3. Check `scripts/results/` to see latest validation data (gitignored;
+   regenerate via `scripts/capture_vllm.py` if absent).
+4. Run `uv run pytest -q` to confirm green state.
+5. Ask user what specifically they want to work on next; don't assume.

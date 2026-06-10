@@ -57,8 +57,13 @@ Three findings at once:
    gets a longer runway before it sees the drift.
 
 We've validated this pattern across 9 NVIDIA GPUs × 3 storage dtypes
-(FP32 / BF16 / FP16) and 5 vLLM (engine × backend) combinations. Full
-findings in `MEMORY.md` and the supporting plots in `scripts/plots/`.
+(FP32 / BF16 / FP16), 9 models across 8 architecture families, and the
+standard vLLM engine × attention-backend matrix. Highlights: the
+FLASH-vs-XFORMERS divergence starts at **exactly one attention head**
+(on both SmolLM-135M and Llama-3.1-8B), and per-head attribution
+surfaced a live FlashInfer bug that silently zeroes two of Qwen-2.5-7B's
+attention heads. Full findings with plots in
+**[the writeup](https://neelvad.github.io/firefly/)** (`docs/index.md`).
 
 ## Quickstart
 
@@ -133,7 +138,7 @@ Three axes you can tune:
 
 | Knob | Where | Default | Use case |
 |---|---|---|---|
-| `safety_factor` | `firefly calibrate` | 1.5x | Multiplies per-tap noise floor |
+| `safety_factor` | `firefly calibrate` | 6x | Multiplies per-tap noise floor |
 | `--max-rel-error` | `firefly check` | 0 (off) | Global ceiling for cross-platform variation |
 | Per-tap atol | hand-edit `tolerances.json` | — | Override calibration for known-noisy taps |
 
@@ -154,8 +159,12 @@ the >1% threshold where real bugs live.
 | `reference.py` | Read/write the inspectable reference artifact (safetensors + JSON) |
 | `compare.py` | Per-tap diff with effective-atol composition |
 | `attribution.py` | Forward-order walk → first divergent tap |
+| `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
+| `quant_risk.py` | Simulated int8/int4 quantization risk from stored activations |
+| `shadow.py` | Shadow-mode capture: custom ops + Triton kernel that survive torch.compile and CUDA graphs |
+| `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
-| `cli.py` | `firefly capture / calibrate / check` |
+| `cli.py` | `firefly capture / calibrate / check / quant-risk / publish` |
 | `action.yml` | GitHub Action wrapper for `firefly check` |
 | `scripts/capture_vllm.py` | vLLM-specific capture (V0 + V1 engines, prefill + decode) |
 | `scripts/plot_validation.py` | Diff and magnitude figures for the writeup |
@@ -181,30 +190,34 @@ changed upstream.
 
 ## Roadmap
 
-**v1 (now):** local-filesystem reference dirs, HuggingFace Hub references
-via `hf://org/repo`, HF transformers + vLLM capture paths, LLM domain.
-Production-ready as a one-repo, one-team quality gate.
+**Shipped:**
 
-**v2 (now):**
+- Core CI flow: capture / calibrate / check, GitHub Action, markdown
+  PR summaries, calibrated per-tap tolerances + `--max-rel-error`
+- Storage backends: local, `hf://`, `s3://`, `gs://`, `az://`
+- vLLM capture (V0 + V1 engines, prefill + decode, attention-backend
+  selection with live verification) and a reproducible parity suite
+- Cross-family validation: 9 models, 8 architecture families
+- **Per-head attention attribution** (`capture --per-head`) — drills
+  the first divergent layer down to the specific attention head
+- **Quantization-risk attribution** (`firefly quant-risk`) — predicts
+  which layers break under int8/int4 from stored activations alone
+- **Shadow-mode capture** (`firefly.shadow`) — custom-op + Triton-kernel
+  taps that survive torch.compile and CUDA-graph replay, with local and
+  S3/GCS/Azure streaming sinks
+- Recsys domain selector (TorchRec / DLRM / DCN-v2 tap conventions)
 
-- S3 storage backend (`s3://`) for teams that host references on AWS
-  rather than HF Hub
-- Recsys domain selector — different tap-point convention for
-  embedding-table + cross-net architectures
-- Comprehensive vLLM test suite — FLASHINFER, multi-request batching,
-  long-context PagedAttention boundaries, speculative decoding
-- Cross-family validation — Qwen-2.5-7B and Mistral-7B-v0.1
-  alongside SmolLM-135M and Llama-3.1-8B (sharpens or refutes
-  per-finding universality claims; see the blog)
+**Planned:**
 
-**v3 (in progress):**
-
-- GCS storage backend (`gs://`) — done; same ETag-based incremental
-  sync pattern as S3
-- Azure storage backend (`az://`) — done; account name lives in the URI
-  to match S3/GCS bucket-in-URI conventions
-- Shadow-mode capture against production traffic — requires a custom
-  op so torch.compile / CUDA-graphed inference doesn't break
+- First-class `firefly check --runner vllm` flow (the vLLM evidence
+  today comes from `scripts/capture_vllm.py`; promoting it into the
+  CLI is the top packaging item)
+- torchao integration — validate the simulated quant-risk rankings
+  against real quantized kernels (per-tensor vs per-channel A/B)
+- Recsys capture end-to-end (embedding-table monitoring, O2O
+  divergence) — the v2 domain expansion
+- Hosted/report surface beyond the terminal table (local static HTML
+  first)
 
 ## Development
 

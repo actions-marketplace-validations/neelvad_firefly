@@ -8,8 +8,7 @@ CUDA graphs (no callback hook point after graph capture). Shadow-mode
 sidesteps both by routing observation through a registered custom op
 that Dynamo treats as opaque.
 
-Architecture (see ``project_firefly_shadow_mode_design`` memory for the
-full sketch and the six decisions baked in):
+Architecture sketch (the design decisions baked in are listed below):
 
 ::
 
@@ -26,7 +25,7 @@ full sketch and the six decisions baked in):
             ▼ (separate drain thread)
         Sink — currently LocalLogSink, writes stats.jsonl + blobs/
 
-Decisions baked in (from the design memory):
+Decisions baked in:
 
 * Pass-through op semantics: ``y = capture(x, name)`` returns ``x``.
 * Summary stats always, full tensors gated by a policy (every N steps,
@@ -836,7 +835,7 @@ def stop_sink(handle: SinkHandle) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CUDA-graph-mode capture (Spike 2 — see project_firefly_shadow_mode_design)
+# CUDA-graph-mode capture (validated by scripts/spike_cuda_graph.py)
 #
 # The eager / torch.compile path above does CPU-side Python in its op body
 # (regex match, queue push). CUDA graphs capture a fixed sequence of GPU

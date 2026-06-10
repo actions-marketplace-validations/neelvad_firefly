@@ -24,6 +24,10 @@ venv/
 *.swp
 .DS_Store
 
+# Claude Code local (per-machine) settings + one-off drafts
+.claude/settings.local.json
+UPSTREAM_ISSUE_DRAFT.md
+
 # Firefly artifacts
 references/
 candidates/
