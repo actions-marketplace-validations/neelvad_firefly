@@ -127,7 +127,7 @@ relative error climbs through the residual stream to 1.4% by the final
 LayerNorm. The shape of the curve is the textbook
 "compounding-rounding-error" pattern in a deep network.
 
-The interesting part isn't *that* this happens — anyone who has worked
+The interesting part isn't that this happens — anyone who has worked
 on numerical kernels expects different reduction orders to round
 differently in low-precision. The interesting part is **why divergence
 starts at layer 7 specifically, not layer 0.**
@@ -150,7 +150,7 @@ I expected the boundary to move on a model with larger early-layer
 activations. The next section is the experiment I ran to test that
 prediction, and the result that made me rewrite this paragraph.
 
-## Finding 1.5: The layer-7 finding survives 60× model scale within Meta — and breaks at the family boundary
+## Finding 1.5: The layer-7 finding survives 60× model scale — and breaks at the family boundary
 
 I expected the layer-7 boundary to shift on a much bigger model, so I
 ran two stress tests of Finding 1's mechanism:
@@ -260,8 +260,6 @@ hold across *all five* models that can use FLASHINFER (one model can't,
 for an architectural reason that's its own finding) — different kernel
 pair, much more robust universality.
 
-These next three findings still surprised me.
-
 ## Finding 2: Decode capture exposes that layer 0 itself diverges, via KV cache pollution
 
 Same FLASH_ATTN vs XFORMERS comparison, but now I let the model generate
@@ -297,8 +295,7 @@ token_0, token_1, ... per tap), the *first* divergent tap is
 prefill-only mode. The KV cache propagation makes layer 0 itself the
 entry point of divergence at decode time.
 
-This destroys the "output-level monitoring will eventually catch it"
-argument that ML observability vendors lean on. The final-LayerNorm
+This shows that output-level monitoring is insufficient. The final-LayerNorm
 rescales by ~50× by the end of the network — output drift is *small
 percent-of-scale*. An eval that thresholds at 1% accuracy delta passes
 this comparison at token 0 and might keep passing for 50 tokens before
@@ -306,7 +303,7 @@ the accumulated drift crosses the threshold.
 
 ## Finding 3: The same engine swap that's safe at 9 tokens is broken at 1k — and stays broken
 
-This is the load-bearing finding. The plot at the top of the post.
+This is the plot at the top of the post.
 
 Same vLLM 0.8.5. Same FLASH_ATTN. Only difference: the V0 engine vs the
 V1 engine. I ran the comparison at four prompt lengths on
@@ -319,7 +316,7 @@ Llama-3.1-8B (A100-40GB, BF16):
 | 2k tokens | 97 / 97 | `layer.0.self_attn` | **2.62%** |
 | 4k tokens | 97 / 97 | `layer.0.self_attn` | **2.86%** |
 
-I expected "monotonically growing with length." That's *not* what
+I expected "monotonically growing with length." That's not what
 happens. **The curve is a step function**: bit-equal at very short
 prompts, immediately maxed-out divergence past the first PagedAttention
 block boundary, and roughly flat from 1k tokens onward. Length isn't
@@ -340,7 +337,7 @@ tap is past tolerance. Crossing from 1k to 4k adds more block
 boundaries but the per-element error from the merge is already
 saturated.
 
-The implication for the product story is:
+The implication is:
 
 - **Short-prompt unit tests pass.** Anyone testing their vLLM upgrade
   with the typical 8-to-30-token prompts you find in test fixtures
@@ -354,7 +351,7 @@ The implication for the product story is:
   FLASH_ATTN on V1 are doing the same math" turns out to be true only
   at trivially-short context — below the block-boundary threshold.
 
-This is the finding I'd want a CI gate to catch — quietly,
+A CI gate should catch this — quietly,
 automatically, before deploy. A short-prompt unit test would not. A
 benchmark eval might or might not, depending on how sensitive the eval
 metric is to ~3% absolute internal drift that final_norm rescales down.
@@ -365,7 +362,7 @@ vLLM ships three attention backends — FLASH_ATTN, XFORMERS, and
 FLASHINFER. FLASHINFER is the one production stacks at Together,
 Fireworks, and DeepSeek actually use, because its split-K
 parallelization beats FlashAttention 2 for single-query decode.
-Getting it installed on Modal was annoying — `flashinfer-python` on
+Getting it installed on Modal was tricky — `flashinfer-python` on
 PyPI is a stub requiring a CUDA-specific wheel; attempts on
 `debian_slim` failed with "CUDA_HOME not set", on the
 `vllm/vllm-openai` Docker image with a Python 3.12 aiohttp ABI
@@ -522,12 +519,11 @@ magnitudes jump 4× from layer 26, the per-element diff suddenly has 4×
 more headroom to manifest in absolute terms — and the relative error
 spikes 20×.
 
-(That was my working hypothesis when I first wrote this section.
-Finding 6's per-head instrument turned out to **falsify it** — the
+Finding 6's per-head instrument notes that the
 real mechanism is a discrete kernel behavior, not amplified rounding.
 The hypothesis-as-written is preserved here because the correction is
 the point; skip ahead to the end of Finding 6 for what's actually
-happening.)
+happening.
 
 This is the kind of finding a Qwen-on-FLASHINFER serving stack would
 want to know about. The model's output drift in BF16 with FLASHINFER
@@ -547,14 +543,12 @@ both have similar peak activation magnitudes but no final-layer
 spike, because they spread their outlier features across more layers
 rather than concentrating them in the final 1-2.
 
-When I first wrote this section I hadn't filed it upstream because I
-wasn't certain it was a *bug* — it could have been the BF16-correct
+I wasn't certain it was a *bug* — it could have been the BF16-correct
 behavior given Qwen's outlier-feature concentration at the final
-layer. The per-head result at the end of Finding 6 changed my mind:
+layer. However, the per-head result at the end of Finding 6 shows that
 exact-zero head outputs are not a rounding regime. Either way the
 diagnostic flow that surfaced it (swap one knob, run one Firefly
-check, look at the per-layer curve, then drill per-head) is exactly
-the workflow this tool is for.
+check, look at the per-layer curve, then drill per-head) is what this tool is for.
 
 ### The BLOOM regime: kernel-fundamental divergence from layer 0
 
@@ -621,7 +615,7 @@ heads (concentration drops to single digits), which is why layer-level
 attribution sees a clean break at layer 7 but per-head attribution is
 needed to see how surgical the break actually is.
 
-The cross-scale replication is the part I didn't expect. Finding 1.5
+The cross-scale replication is unexpected. Finding 1.5
 established that the layer-7 *layer* boundary survives 60× model scale
 within the Meta lineage. The per-head data says the *single-head-crack
 pattern* survives too: on Llama-3.1-8B the first divergence is a few
@@ -725,10 +719,10 @@ proceed when it doesn't match the request. If your comparison tooling
 trusts its own knobs, the knobs will eventually lie to you; verify
 the thing you're varying actually varied.
 
-I'll take the falsification: the hypothesis I wrote in Finding 5 was
+The hypothesis I wrote in Finding 5 was
 a smooth-numerics story, and the per-head instrument built to test it
-found a discrete bug-shaped behavior instead. That's the strongest
-argument for attribution tooling I can offer — each level of
+found a discrete bug-shaped behavior instead. That's a reasonable
+argument for attribution tooling — each level of
 attribution (layer → head → tensor) didn't just narrow the location,
 it *changed the mechanism class* of the explanation.
 
@@ -778,7 +772,7 @@ zero — and per-channel scaling recovers it to 1.2%.** The residual
 stream stays in that regime through layer 27, exactly where the
 magnitudes stay locked at ~32k.
 
-Two things I like about this result. First, it's a quantitative
+First, it's a quantitative
 re-derivation of *why* LLM.int8(), SmoothQuant, and every production
 W8A8 scheme ended up outlier-aware — derived from one CLI command on
 an artifact that was captured for a completely different purpose.
@@ -790,51 +784,35 @@ underlying object — the model's activation-magnitude profile — read
 through two different failure modes. Capture it once, and both
 diagnostics are queries against it.
 
-The honest caveat: this simulates round-to-nearest quantization of
+This simulates round-to-nearest quantization of
 activations in isolation. A real quantized serving stack has fused
 dequant epilogues, weight quantization, and calibration data that
 shift the picture. `quant-risk` is a *map of where to look*, not a
 substitute for evaluating the quantized model.
 
-## What I think this means for ML CI
-
-A few unromantic takeaways:
-
-**Numerical-parity testing is real, and the real failure mode is the
-boring one.** I was hoping to find dramatic bugs: a quantization kernel
-returning NaN, a kernel that off-by-ones at a boundary, a regression
-shipped by accident. What I found instead was *correct code with
-different reduction orders.* The vLLM team isn't doing anything wrong.
-Their engine rewrite is mathematically equivalent. Their kernel swap is
-mathematically equivalent. The numerical-parity failures come from
-"mathematically equivalent" not being the same thing as "bit-identical
-in low precision."
+## Takeaways
 
 **Tolerance calibration is environment-sensitive.** Same-machine
 calibration measures runs-on-this-machine variance; cross-machine FP
-variation is a different (and often larger) noise distribution. I
-discovered this the hard way when the first GitHub Actions run of
-Firefly's own demo lit up like a Christmas tree because I'd calibrated
-on Apple Silicon and the Action ran on x86 Ubuntu. The fix in the
+variation is a different (and often larger) noise distribution. A useful fix in the
 product is a `--max-rel-error` ceiling that composes with the per-tap
 calibration. The lesson: "calibrated tolerances" alone aren't portable;
 they need an environment-stationarity escape hatch.
 
-**Per-layer attribution earns its keep.** "Your eval dropped 2 points"
-sends a developer on a multi-hour fishing expedition through git blame.
+**Per-layer attribution is important.** "Your eval dropped 2 points"
+is extremely difficult to debug.
 "`layer.7.self_attn` is the first divergent tap" points directly at the
 attention kernel. The cost of producing this attribution is N forward
 hooks and a sort — trivially cheap. The cost of *not* producing it
 shows up every time someone debugs a serving-stack regression.
 
-**Decode-step capture changes the story.** Prefill-only is the easy
+**Decode-step capture is required.** Prefill-only is the easy
 case. Decode is where the production knobs (PagedAttention, scheduler,
 spec decode) actually live, and it's where divergence compounds via KV
-cache. If you're going to build numerical-parity tooling for LLM
-inference, decode capture is the part that matters; prefill-only tools
+cache. Prefill-only tools
 will miss most real upgrade-time bugs.
 
-## Limitations I should flag
+## Limitations
 
 - **Nine models, eight architecture families.** Meta lineage
   (SmolLM-135M, Llama-3.1-8B), Qwen-2.5-7B, Mistral-7B-v0.1,
@@ -944,33 +922,19 @@ uv run firefly quant-risk --reference <reference-dir> --bits 8
 
 ## What's next
 
-1. **File the FLASHINFER zero-head bug upstream.** Finding 6
-   answered the *what* (two query heads in KV-group 1 return
-   all-zero outputs at Qwen's layer 27) and the re-run confirmed
-   it's *live* — reproduces on flashinfer 0.6.11.post2 / vLLM 0.22.1
-   V1 just as on flashinfer 0.2.x / vLLM 0.8.5 V0, same two heads.
-   The remaining question (which kernel code path returns the zero
-   rows, and why these two of the seven heads in the KV group) is
-   one for the FlashInfer maintainers; the repro is two Modal
-   commands plus a 20-line tensor check.
-
-2. **More cross-family models.** Phi-3, Yi, and Gemma-2 added in
+1. **More cross-family models.** Phi-3, Yi, and Gemma-2 added in
    this pass. The remaining gaps are non-GQA architectures (Falcon),
    non-Llama-style positional encodings (e.g., ALiBi), and very small
    non-Llama models (Pythia, etc.). Each new family is a cheap
    data point (~$1 of Modal time) once the model's HF gate is
    accepted.
 
-3. **Does the Yi `layer.2` first-divergence reproduce or shift on
+2. **Does the Yi `layer.2` first-divergence reproduce or shift on
    Yi-1.5-34B?** Yi being the lone "layer 2" data point — neither
    the layer 0 of Qwen/Mistral/Phi-3 nor the layer 7 of Meta — is
    suspicious. Either Yi has a unique RoPE handling quirk that
    produces this exact onset, or the layer 2 number is a one-off
    that would shift on a larger Yi model.
-
-If you've hit numerical-regression bugs in serving stacks and want to
-compare notes, or if you'd find Firefly useful for your own CI and want
-to talk about what's missing, I'm at **neel.vadoothker@gmail.com**.
 
 [repo]: https://github.com/neelvad/firefly
 [dettmers]: https://arxiv.org/abs/2208.07339
