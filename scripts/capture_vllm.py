@@ -10,7 +10,7 @@ the local entrypoint; e.g. ``--vllm-tag 0.7.3`` vs ``--vllm-tag 0.8.5``.
 Add a new version by extending ``_VLLM_VERSIONS`` and registering a new
 ``@app.function`` wrapper below.
 
-Design notes (see also AGENTS.md):
+Design notes:
 
   * Loaded with ``enforce_eager=True`` to disable CUDA graphs, otherwise
     forward hooks force graph breaks. Acceptable for the CI diagnostic
