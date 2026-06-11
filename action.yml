@@ -9,9 +9,11 @@ inputs:
   reference:
     description: >-
       Reference artifact location. Accepts a local path inside the
-      workspace, an HF Hub URI (hf://org/repo[@rev][/subpath]), or an
-      S3 URI (s3://bucket/prefix — install boto3 in your runner via
-      `pip install 'firefly[s3]'`). GCS / Azure are planned for v3.
+      workspace, an HF Hub URI (hf://org/repo[@rev][/subpath]), or a
+      cloud URI: s3://bucket/prefix, gs://bucket/prefix, or
+      az://account/container/prefix. Cloud backends need their extra
+      installed on the runner (`pip install 'firefly[s3]'` /
+      `'firefly[gcs]'` / `'firefly[azure]'`).
     required: true
   candidate:
     description: 'HuggingFace model ID or local path to the candidate checkpoint.'

@@ -251,3 +251,24 @@ def test_capture_via_cli(tmp_path: Path) -> None:
     assert "Wrote reference artifact" in result.stdout
     manifest, _ = read_reference(out_dir)
     assert manifest.model_id == "HuggingFaceTB/SmolLM-135M"
+
+
+def test_clear_stale_tolerances_removes_existing(tmp_path: Path) -> None:
+    """A capture into a dir with an old tolerances.json clears it."""
+    from firefly.capture import clear_stale_tolerances
+
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir()
+    tol = ref_dir / "tolerances.json"
+    tol.write_text("{}")
+
+    assert clear_stale_tolerances(ref_dir) is True
+    assert not tol.exists()
+
+
+def test_clear_stale_tolerances_noop_when_absent(tmp_path: Path) -> None:
+    from firefly.capture import clear_stale_tolerances
+
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir()
+    assert clear_stale_tolerances(ref_dir) is False

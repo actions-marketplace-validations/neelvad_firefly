@@ -60,7 +60,7 @@ tests:
       n_divergent_min: 91  # all of them — strict equality is also valid
 
   - name: "cross-backend (FLASH_ATTN vs XFORMERS, decode 8 tokens)"
-    description: "Decode capture: KV cache pollution moves the first divergence from layer.7 (in prefill-only mode) all the way back to layer.0.self_attn at token_0 — even layer 0 reads from a polluted cache during decode."
+    description: "Decode capture: the first divergence moves from layer.7 (prefill-only) back to layer.0.self_attn at token_0 — the decode attention path is a different kernel, so layer 0 no longer stays bit-equal."
     reference_a: scripts/results/vllm_v0_flash_decode8
     reference_b: scripts/results/vllm_v0_xformers_decode8
     expected:

@@ -33,6 +33,12 @@ from pathlib import Path
 # they get added (e.g., r2:// for Cloudflare R2 with a non-S3 client).
 _PLANNED_BACKENDS: dict[str, str] = {}
 
+# Internal sidecar the cloud-resolve cache writes alongside the mirrored
+# reference (ETag bookkeeping for incremental sync). It is NOT part of the
+# reference artifact, so publish flows must skip it — otherwise a
+# resolve-then-publish round-trip would leak cache metadata into the bucket.
+_CACHE_MANIFEST_NAME = "_manifest.json"
+
 
 _HF_REGEX = re.compile(
     r"^(?:hf|huggingface)://"
@@ -76,12 +82,13 @@ def resolve_reference(uri: str | Path) -> Path:
     """Resolve a reference URI to a local filesystem path.
 
     Local paths pass through unchanged. ``hf://`` URIs are downloaded
-    via ``huggingface_hub.snapshot_download``. ``s3://`` and ``gs://``
-    URIs are mirrored into a local cache via boto3 / google-cloud-storage.
-    In remote cases the local path is returned and cached on subsequent calls.
+    via ``huggingface_hub.snapshot_download``. ``s3://``, ``gs://``, and
+    ``az://`` URIs are mirrored into a local cache via boto3 /
+    google-cloud-storage / azure-storage-blob. In remote cases the local
+    path is returned and cached on subsequent calls.
 
-    Raises ``NotImplementedError`` for recognized-but-unimplemented
-    schemes (Azure) with the planned version.
+    Raises ``NotImplementedError`` only for recognized-but-unimplemented
+    schemes registered in ``_PLANNED_BACKENDS`` (none at present).
     """
     raw = str(uri)
 
@@ -352,7 +359,7 @@ def _azure_cache_dir(account: str, container: str, prefix: str) -> Path:
 def _sync_azure_prefix(client, container_name: str, prefix: str, cache_dir: Path) -> None:
     """Mirror container/prefix into cache_dir, skipping unchanged blobs."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = cache_dir / "_manifest.json"
+    manifest_path = cache_dir / _CACHE_MANIFEST_NAME
     old_manifest: dict[str, str] = {}
     if manifest_path.exists():
         old_manifest = json.loads(manifest_path.read_text())
@@ -393,7 +400,7 @@ def _sync_azure_prefix(client, container_name: str, prefix: str, cache_dir: Path
 def _sync_gcs_prefix(client, bucket_name: str, prefix: str, cache_dir: Path) -> None:
     """Mirror bucket/prefix into cache_dir, skipping unchanged objects."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = cache_dir / "_manifest.json"
+    manifest_path = cache_dir / _CACHE_MANIFEST_NAME
     old_manifest: dict[str, str] = {}
     if manifest_path.exists():
         old_manifest = json.loads(manifest_path.read_text())
@@ -552,6 +559,8 @@ def _publish_s3(local_path: Path, uri: str) -> None:
         for file in sorted(local_path.rglob("*")):
             if not file.is_file():
                 continue
+            if file.name == _CACHE_MANIFEST_NAME:
+                continue  # cache bookkeeping, not part of the artifact
             relpath = file.relative_to(local_path).as_posix()
             key = f"{prefix}{relpath}"
             client.upload_file(str(file), bucket, key)
@@ -599,6 +608,8 @@ def _publish_azure(local_path: Path, uri: str) -> None:
         for file in sorted(local_path.rglob("*")):
             if not file.is_file():
                 continue
+            if file.name == _CACHE_MANIFEST_NAME:
+                continue  # cache bookkeeping, not part of the artifact
             relpath = file.relative_to(local_path).as_posix()
             key = f"{prefix}{relpath}"
             with open(file, "rb") as f:
@@ -639,6 +650,8 @@ def _publish_gcs(local_path: Path, uri: str) -> None:
         for file in sorted(local_path.rglob("*")):
             if not file.is_file():
                 continue
+            if file.name == _CACHE_MANIFEST_NAME:
+                continue  # cache bookkeeping, not part of the artifact
             relpath = file.relative_to(local_path).as_posix()
             key = f"{prefix}{relpath}"
             bucket.blob(key).upload_from_filename(str(file))
@@ -653,7 +666,7 @@ def _publish_gcs(local_path: Path, uri: str) -> None:
 def _sync_s3_prefix(client, bucket: str, prefix: str, cache_dir: Path) -> None:
     """Mirror bucket/prefix into cache_dir, skipping unchanged objects."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = cache_dir / "_manifest.json"
+    manifest_path = cache_dir / _CACHE_MANIFEST_NAME
     old_manifest: dict[str, str] = {}
     if manifest_path.exists():
         old_manifest = json.loads(manifest_path.read_text())

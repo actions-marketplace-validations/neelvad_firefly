@@ -129,8 +129,9 @@ def calibrate(
         help=(
             "Reference artifact directory. Accepts a local path or an "
             "hf://org/repo (optionally with @revision and /subpath) "
-            "for HF Hub-hosted references. S3/GCS/Azure are stubbed "
-            "and return a clear planned-for-vN error."
+            "for HF Hub-hosted references, or a cloud URI: s3://bucket/"
+            "prefix, gs://bucket/prefix, or az://account/container/prefix "
+            "(install the matching extra: firefly[s3|gcs|azure])."
         ),
     ),
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
@@ -225,8 +226,9 @@ def check(
         help=(
             "Reference artifact directory. Accepts a local path or an "
             "hf://org/repo (optionally with @revision and /subpath) "
-            "for HF Hub-hosted references. S3/GCS/Azure are stubbed "
-            "and return a clear planned-for-vN error."
+            "for HF Hub-hosted references, or a cloud URI: s3://bucket/"
+            "prefix, gs://bucket/prefix, or az://account/container/prefix "
+            "(install the matching extra: firefly[s3|gcs|azure])."
         ),
     ),
     candidate: str = typer.Option(..., "--candidate", "-c", help="Candidate HF model ID or checkpoint path."),

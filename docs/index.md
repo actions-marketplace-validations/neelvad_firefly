@@ -260,7 +260,7 @@ hold across *all five* models that can use FLASHINFER (one model can't,
 for an architectural reason that's its own finding) — different kernel
 pair, much more robust universality.
 
-## Finding 2: Decode capture exposes that layer 0 itself diverges, via KV cache pollution
+## Finding 2: Decode capture exposes that layer 0 itself diverges
 
 Same FLASH_ATTN vs XFORMERS comparison, but now I let the model generate
 7 additional tokens after the prompt and captured activations at each
@@ -277,23 +277,36 @@ Three things happen at once in this plot:
    `final_norm`. This is what we already had.
 
 2. **token_0 (just above prefill):** *every layer* now diverges,
-   including `layer.0.self_attn`. The prompt-time KV cache that
-   layer 0's decode-step attention reads from already contains
-   diverged tail-layer values from prefill. There is no
-   "layer 0 starts clean" regime at decode time.
+   including `layer.0.self_attn`. That's the surprise — in prefill,
+   layer 0 was bit-equal. I want to be careful about the mechanism
+   here, because the obvious story ("the KV cache carries divergence
+   into layer 0") is wrong: each layer attends over *its own* KV
+   cache, and layer 0's prefill cache was bit-equal between the two
+   backends. What actually changes at decode is the attention *path* —
+   FlashAttention and xFormers both special-case single-query decode
+   with a different kernel than prefill, so the rounding that stayed
+   sub-threshold at layer 0 in prefill need not stay sub-threshold in
+   the decode kernel. (A second possible contributor I haven't isolated:
+   under a 1.4%-divergent final logit, greedy decoding could pick a
+   different token on one side, which would change layer 0's input
+   outright.) The honest, evidence-backed claim is the observation
+   itself: **there is no "layer 0 starts clean" regime once you're
+   decoding.**
 
 3. **token_1 through token_6 (stacked progressively higher):** each
-   successive curve sits above the last. The KV cache lengthens with
-   every generated token and accumulates more diverged outputs, so each
-   new token's forward computation reads from a *progressively more
-   polluted* cache. By token 6, `final_norm` is at 3.7% relative error,
-   up from 1.4% at prefill.
+   successive curve sits above the last. This part *is* a cache-
+   accumulation effect — but within a layer, not across layers: once a
+   layer's self-attn output diverges at a decode step, that position's
+   K/V at *that same layer* is now divergent, so later tokens attending
+   over it read progressively more-divergent cached state. By token 6,
+   `final_norm` is at 3.7% relative error, up from 1.4% at prefill.
 
 In forward order with the unified tap naming (prefill first, then
 token_0, token_1, ... per tap), the *first* divergent tap is
 **`layer.0.self_attn@token_0`**, not `layer.7.self_attn` as it is in
-prefill-only mode. The KV cache propagation makes layer 0 itself the
-entry point of divergence at decode time.
+prefill-only mode. Decode is simply a harsher regime: the masking that
+kept early layers bit-equal in prefill doesn't hold once the decode
+attention path is in play.
 
 This shows that output-level monitoring is insufficient. The final-LayerNorm
 rescales by ~50× by the end of the network — output drift is *small

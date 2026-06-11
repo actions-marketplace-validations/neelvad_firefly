@@ -1,17 +1,27 @@
 # Firefly
 
 A numerical-parity CI gate for ML model deployments. Firefly catches the
-class of bugs that silently change a model's outputs — quantization
-round-trips, kernel swaps (FlashAttention vs xFormers), dependency bumps,
-serving-stack drift — and attributes the divergence to the specific layer
+class of bugs that silently change a model's outputs — kernel swaps
+(FlashAttention vs xFormers), dependency bumps, serving-stack drift,
+hardware moves — and attributes the divergence to the specific layer
 where it originated.
+
+Firefly is fundamentally a **same-weights deployment-parity gate**: the
+reference pins the exact model weights by fingerprint, and `check`
+re-runs *those weights* in the candidate environment to ask "does this
+serving stack still produce the same activations?" Comparing a model
+whose *weights* changed — a new fine-tune, or a quantized build — is a
+different question; it's supported, but you have to opt in with
+`--allow-fingerprint-mismatch` (the action's `allow-fingerprint-mismatch:
+true`), because by default a weight change is treated as "you pointed me
+at the wrong model."
 
 ```yaml
 # .github/workflows/firefly.yml
-- uses: neelvad/firefly@v0.1.0
+- uses: neelvad/firefly@v0.2.0
   with:
-    reference: hf://my-org/my-firefly-ref  # or a local path
-    candidate: my-org/my-finetune-ckpt
+    reference: hf://my-org/my-firefly-ref  # captured from my-org/my-model
+    candidate: my-org/my-model             # same weights, new serving stack
     inputs: tests/firefly-prompts.json
     max-rel-error: 0.001                   # cross-platform safety margin
 ```
@@ -49,9 +59,12 @@ Three findings at once:
 1. **First divergence: `layer.7.self_attn`.** The kernel difference is
    present at every layer, but BF16 rounding masks it until activation
    magnitudes grow large enough to expose it (~layer 7 on SmolLM-135M).
-2. **Decode pollutes immediately.** At the first generated token, *all*
-   layers diverge — the KV cache built during prefill carries diverged
-   activations forward, so even `layer.0.self_attn` reads polluted state.
+2. **Decode exposes layer 0 immediately.** At the first generated
+   token, *all* layers diverge — including `layer.0.self_attn`, which
+   was bit-equal in prefill. The decode attention path is a different
+   kernel from prefill, so the rounding that stayed sub-threshold at
+   layer 0 no longer does. There's no "layer 0 starts clean" regime
+   once you're decoding.
 3. **Divergence compounds with each token.** By token 6 the final-layer
    relative error is **3.7%** vs **1.4%** at prefill. Output monitoring
    gets a longer runway before it sees the drift.
@@ -123,10 +136,10 @@ firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
 The action then reads the same URI in CI:
 
 ```yaml
-- uses: neelvad/firefly@v0.1.0
+- uses: neelvad/firefly@v0.2.0
   with:
     reference: hf://my-org/my-firefly-ref
-    candidate: my-org/my-finetune-ckpt
+    candidate: my-org/my-model
     inputs: tests/firefly-prompts.json
 ```
 

@@ -17,6 +17,7 @@ htmlcov/
 # uv / venv
 .venv/
 venv/
+.uv-cache/
 
 # Editors
 .vscode/

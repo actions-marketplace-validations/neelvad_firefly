@@ -255,3 +255,30 @@ def capture_reference(
         head_counts=head_counts,
     )
     write_reference(out_dir, manifest, captured)
+    clear_stale_tolerances(out_dir)
+
+
+def clear_stale_tolerances(out_dir: Path) -> bool:
+    """Remove a ``tolerances.json`` left in a reference dir by a prior capture.
+
+    A fresh capture produces new weights + manifest, which makes any
+    pre-existing ``tolerances.json`` stale — it was calibrated against the
+    old reference. Leaving it would let ``firefly check`` silently gate
+    against mismatched tolerances, so we delete it and tell the user to
+    recalibrate. Returns True if a file was removed.
+    """
+    from firefly.compare import TOLERANCES_FILE
+
+    stale = out_dir / TOLERANCES_FILE
+    if stale.exists():
+        stale.unlink()
+        import sys
+
+        print(
+            f"[firefly] Removed stale {TOLERANCES_FILE} from {out_dir} "
+            f"(it was calibrated against the previous reference). "
+            f"Run `firefly calibrate` before `firefly check`.",
+            file=sys.stderr,
+        )
+        return True
+    return False
