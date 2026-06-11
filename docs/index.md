@@ -256,9 +256,9 @@ of the universality claim:
 That's a less ambitious universality claim than I led with, but it's
 the claim the data actually supports. Forward-pointer: Finding 4 will
 return to this with FLASHINFER, where the layer-0 finding turns out to
-hold across *all five* models that can use FLASHINFER (one model can't,
-for an architectural reason that's its own finding) — different kernel
-pair, much more robust universality.
+hold across *all eight* supported models that can use FLASHINFER (one
+model can't, for an architectural reason that's its own finding) —
+different kernel pair, much more robust universality.
 
 ## Finding 2: Decode capture exposes that layer 0 itself diverges
 

@@ -59,7 +59,8 @@ def capture(
         "--push",
         help=(
             "If set, publish the artifact to this URI after capture "
-            "(hf://org/repo or s3://bucket/prefix). Equivalent to running "
+            "(hf://org/repo, s3://bucket/prefix, gs://bucket/prefix, or "
+            "az://account/container/prefix). Equivalent to running "
             "`firefly publish` immediately after capture."
         ),
     ),
@@ -102,9 +103,10 @@ def publish(
         "-t",
         help=(
             "Destination URI. Supported: hf://org/repo (optionally with "
-            "@revision and /subpath) or s3://bucket/prefix. HF Hub creates "
-            "the repo if it doesn't exist; both backends use ambient "
-            "credentials (HF_TOKEN for HF, AWS default credential chain for S3)."
+            "@revision and /subpath), s3://bucket/prefix, gs://bucket/prefix, "
+            "or az://account/container/prefix. HF Hub creates the repo if it "
+            "doesn't exist; all backends use ambient credentials (HF_TOKEN for "
+            "HF, and each cloud SDK's default credential chain otherwise)."
         ),
     ),
     message: str = typer.Option(

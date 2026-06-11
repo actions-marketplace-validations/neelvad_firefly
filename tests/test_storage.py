@@ -683,3 +683,24 @@ def test_azure_missing_library_raises_import_error(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(ImportError, match=r"firefly\[azure\]"):
         resolve_reference("az://myaccount/mycontainer/refs/v1")
+
+
+def test_publish_s3_skips_cache_manifest(tmp_path: Path) -> None:
+    """publish_reference must not upload the internal _manifest.json cache
+    sidecar — a resolve-then-publish round-trip would otherwise leak cache
+    bookkeeping into the destination bucket."""
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    (ref / "weights.safetensors").write_bytes(b"weights")
+    (ref / "manifest.json").write_text("{}")
+    (ref / "_manifest.json").write_text('{"etag": "cache-bookkeeping"}')
+
+    fake_client = MagicMock()
+    with patch("boto3.client", return_value=fake_client):
+        publish_reference(ref, "s3://bucket/prefix")
+
+    # client.upload_file(str(file), bucket, key) — first positional is the path.
+    uploaded = [Path(call.args[0]).name for call in fake_client.upload_file.call_args_list]
+    assert "_manifest.json" not in uploaded
+    assert "weights.safetensors" in uploaded
+    assert "manifest.json" in uploaded

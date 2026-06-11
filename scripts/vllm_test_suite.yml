@@ -66,8 +66,8 @@ tests:
     expected:
       # In forward order, every layer-0 position comes before any layer-1
       # position. layer.0.self_attn@prefill is bit-equal (early layers don't
-      # diverge at prefill), but layer.0.self_attn@token_0 sees a polluted
-      # KV cache and is the first divergent tap.
+      # diverge at prefill), but layer.0.self_attn@token_0 runs the decode
+      # attention kernel (distinct from prefill) and is the first divergent tap.
       first_divergence: layer.0.self_attn@token_0
       # Lower bound — actual is ~700 of 728. Pinning a specific number
       # would make this test brittle to upstream vLLM changes that
