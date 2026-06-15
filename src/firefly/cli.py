@@ -15,6 +15,20 @@ app = typer.Typer(
 )
 
 
+def _parse_runner_opts(opts: list[str]) -> dict[str, str]:
+    """Parse repeated ``--runner-opt key=value`` flags into a dict."""
+    parsed: dict[str, str] = {}
+    for item in opts:
+        if "=" not in item:
+            raise typer.BadParameter(
+                f"--runner-opt must be key=value, got {item!r}",
+                param_hint="--runner-opt",
+            )
+        key, value = item.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
+
 def _resolve_or_exit(reference: str) -> Path:
     """Resolve a reference URI to a local path, exiting cleanly on errors."""
     try:
@@ -54,6 +68,25 @@ def capture(
             "divergence to individual attention heads."
         ),
     ),
+    runner: str = typer.Option(
+        "hf",
+        "--runner",
+        help=(
+            "Capture backend: 'hf' (transformers, eager hooks, default) or "
+            "'vllm' (in-process vLLM; needs `pip install firefly[vllm]` + a "
+            "CUDA GPU). A reference and its candidates must use the same runner."
+        ),
+    ),
+    runner_opt: list[str] = typer.Option(
+        [],
+        "--runner-opt",
+        help=(
+            "Engine-specific knob as key=value (repeatable). vLLM: "
+            "attention_backend, engine (v0/v1), max_seq_len, "
+            "gpu_memory_utilization, capture_decode, speculative_tokens. "
+            "E.g. --runner-opt attention_backend=FLASH_ATTN."
+        ),
+    ),
     push: str | None = typer.Option(
         None,
         "--push",
@@ -67,10 +100,17 @@ def capture(
 ) -> None:
     """Capture a reference artifact from a model + golden inputs."""
     from firefly.capture import capture_reference, parse_dtype
+    from firefly.runners import get_runner
+
+    options = _parse_runner_opts(runner_opt)
+    try:
+        active_runner = get_runner(runner)
+    except (ValueError, NotImplementedError) as e:
+        raise typer.BadParameter(str(e), param_hint="--runner") from e
 
     typer.echo(
-        f"Capturing reference: model={model} device={device} dtype={dtype} "
-        f"per_head={per_head}"
+        f"Capturing reference: model={model} runner={runner} device={device} "
+        f"dtype={dtype} per_head={per_head}"
     )
     capture_reference(
         model_id=model,
@@ -80,6 +120,8 @@ def capture(
         seed=seed,
         dtype=parse_dtype(dtype),
         per_head=per_head,
+        runner=active_runner,
+        options=options,
     )
     typer.echo(f"Wrote reference artifact to {out}")
 
@@ -261,6 +303,23 @@ def check(
             "Override only for a deliberate cross-dtype comparison."
         ),
     ),
+    runner: str = typer.Option(
+        "hf",
+        "--runner",
+        help=(
+            "Capture backend for the candidate: 'hf' (default) or 'vllm' "
+            "(in-process vLLM; needs firefly[vllm] + a CUDA GPU). Use the same "
+            "runner the reference was captured with."
+        ),
+    ),
+    runner_opt: list[str] = typer.Option(
+        [],
+        "--runner-opt",
+        help=(
+            "Engine-specific knob as key=value (repeatable); see "
+            "`firefly capture --help`. E.g. --runner-opt attention_backend=XFORMERS."
+        ),
+    ),
     max_rel_error: float = typer.Option(
         0.0,
         "--max-rel-error",
@@ -289,8 +348,15 @@ def check(
     )
     from firefly.reference import read_manifest
     from firefly.report import render_human, render_markdown, write_json
+    from firefly.runners import get_runner
 
     resolved_reference = _resolve_or_exit(reference)
+
+    runner_options = _parse_runner_opts(runner_opt)
+    try:
+        active_runner = get_runner(runner)
+    except (ValueError, NotImplementedError) as e:
+        raise typer.BadParameter(str(e), param_hint="--runner") from e
 
     if ci_format not in {"human", "markdown"}:
         raise typer.BadParameter(
@@ -336,6 +402,8 @@ def check(
             allow_fingerprint_mismatch=allow_fingerprint_mismatch,
             max_rel_error=max_rel,
             candidate_dtype=candidate_dtype,
+            runner=active_runner,
+            options=runner_options,
         )
     else:
         divergences = compare_to_reference(
@@ -347,6 +415,8 @@ def check(
             allow_fingerprint_mismatch=allow_fingerprint_mismatch,
             max_rel_error=max_rel,
             candidate_dtype=candidate_dtype,
+            runner=active_runner,
+            options=runner_options,
         )
         per_head = []
     result = attribute_first_divergence(divergences)

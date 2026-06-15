@@ -219,13 +219,15 @@ def capture_reference(
     dtype: torch.dtype = torch.float32,
     per_head: bool = False,
     runner: object | None = None,
+    options: dict[str, str] | None = None,
 ) -> None:
     """Capture a reference artifact from ``model_id`` + golden inputs.
 
     The capture itself (model load, forward, tap extraction, fingerprint) is
     delegated to a :class:`~firefly.runners.base.Runner` — the HF runner by
     default. This function owns turning the runner's :class:`CaptureResult`
-    into the on-disk artifact.
+    into the on-disk artifact. ``options`` carries engine-specific knobs to
+    the runner (e.g. the vLLM runner's ``attention_backend``).
 
     With ``per_head``, the runner additionally captures per-head attention
     taps and reports head counts in ``manifest.head_counts`` so
@@ -242,6 +244,7 @@ def capture_reference(
         domain=domain,
         dtype=dtype_to_name(dtype),
         per_head=per_head,
+        options=options,
     )
     captured = result.tensors
 

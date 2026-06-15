@@ -64,7 +64,7 @@ class Runner(Protocol):
 
 def available_runners() -> list[str]:
     """Runner names ``get_runner`` accepts."""
-    return ["hf"]  # "vllm" lands when the vLLM runner is extracted from scripts/
+    return ["hf", "vllm"]
 
 
 def get_runner(name: str) -> Runner:
@@ -74,10 +74,9 @@ def get_runner(name: str) -> Runner:
 
         return HFRunner()
     if name == "vllm":
-        raise NotImplementedError(
-            "The vLLM runner is not wired into the CLI yet — the capture logic "
-            "currently lives in scripts/capture_vllm.py. Use --runner hf for now."
-        )
+        from firefly.runners.vllm import VLLMRunner
+
+        return VLLMRunner()
     raise ValueError(
         f"Unknown runner {name!r}. Available: {available_runners()}"
     )

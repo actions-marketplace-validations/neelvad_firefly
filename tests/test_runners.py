@@ -27,11 +27,39 @@ def test_get_runner_unknown_raises() -> None:
         get_runner("sglang")
 
 
-def test_get_runner_vllm_not_yet_wired() -> None:
-    # The vLLM runner is planned; until extracted it raises a clear error
-    # rather than silently falling back to a different engine.
-    with pytest.raises(NotImplementedError, match="vLLM runner"):
-        get_runner("vllm")
+def test_get_runner_vllm_instantiates_without_vllm_installed() -> None:
+    # The runner object constructs without importing vLLM (that happens lazily
+    # in capture()), so it's usable on the dev box for wiring/registry checks.
+    runner = get_runner("vllm")
+    assert runner.name == "vllm"
+
+
+def test_vllm_runner_rejects_unknown_options() -> None:
+    from firefly.runners.vllm import _parse_options
+
+    with pytest.raises(ValueError, match="Unknown vLLM runner option"):
+        _parse_options({"bogus": "1"})
+
+
+def test_vllm_runner_parses_options() -> None:
+    from firefly.runners.vllm import _parse_options
+
+    opt = _parse_options(
+        {"engine": "v0", "attention_backend": "FLASH_ATTN", "max_seq_len": "2048",
+         "capture_decode": "true", "speculative_tokens": "3"}
+    )
+    assert opt["engine"] == "v0"
+    assert opt["attention_backend"] == "FLASH_ATTN"
+    assert opt["max_seq_len"] == 2048
+    assert opt["capture_decode"] is True
+    assert opt["speculative_tokens"] == 3
+
+
+def test_vllm_runner_rejects_non_llm_domain() -> None:
+    from firefly.runners.vllm import VLLMRunner
+
+    with pytest.raises(ValueError, match="only supports the 'llm' domain"):
+        VLLMRunner().capture("m", Path("in.json"), domain="recsys")
 
 
 def test_capture_reference_dispatches_to_runner(tmp_path: Path) -> None:

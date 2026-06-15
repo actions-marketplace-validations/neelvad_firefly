@@ -160,6 +160,7 @@ def _run_candidate(
     allow_fingerprint_mismatch: bool,
     candidate_dtype: str | None = None,
     runner: object | None = None,
+    options: dict[str, str] | None = None,
 ):
     """Load the reference, capture the candidate via a Runner, fingerprint-check.
 
@@ -189,6 +190,7 @@ def _run_candidate(
         domain=manifest.domain,
         dtype=candidate_dtype or manifest.dtype,
         per_head=bool(manifest.head_counts),
+        options=options,
     )
 
     if result.fingerprint != manifest.model_fingerprint and not allow_fingerprint_mismatch:
@@ -218,6 +220,7 @@ def compare_to_reference(
     max_rel_error: float | None = None,
     candidate_dtype: str | None = None,
     runner: object | None = None,
+    options: dict[str, str] | None = None,
 ) -> list[TapDivergence]:
     """Run candidate, diff against reference, return per-tap divergences in forward order.
 
@@ -225,7 +228,7 @@ def compare_to_reference(
     doesn't match the reference manifest, unless ``allow_fingerprint_mismatch``
     is set. The candidate loads at the reference's dtype unless
     ``candidate_dtype`` overrides it. ``runner`` selects the capture backend
-    (defaults to the HF runner).
+    (defaults to the HF runner); ``options`` carries engine-specific knobs.
     """
     manifest, ref_tensors, candidate_tensors, tolerances = _run_candidate(
         reference_dir,
@@ -237,6 +240,7 @@ def compare_to_reference(
         allow_fingerprint_mismatch,
         candidate_dtype,
         runner,
+        options,
     )
     return diff_captures(
         reference_tensors=ref_tensors,
@@ -258,6 +262,7 @@ def compare_to_reference_per_head(
     max_rel_error: float | None = None,
     candidate_dtype: str | None = None,
     runner: object | None = None,
+    options: dict[str, str] | None = None,
 ):
     """Like :func:`compare_to_reference` but also returns per-head attribution.
 
@@ -278,6 +283,7 @@ def compare_to_reference_per_head(
         allow_fingerprint_mismatch,
         candidate_dtype,
         runner,
+        options,
     )
     divergences = diff_captures(
         reference_tensors=ref_tensors,
