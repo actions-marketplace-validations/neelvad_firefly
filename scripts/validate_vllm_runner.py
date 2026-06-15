@@ -1,11 +1,16 @@
 """Step-4 validation: the library VLLMRunner reproduces the script's result.
 
-Runs the *new* in-process `firefly.runners.vllm.VLLMRunner` (via the normal
-`capture_reference` orchestrator) on Modal, captures SmolLM-135M under
-FLASH_ATTN and XFORMERS, diffs them with the library, and asserts the first
-divergence is `layer.7.self_attn` — the result `scripts/capture_vllm.py`
-produced earlier this session. This proves the extracted runner is faithful
-before we route the CLI's `--runner vllm` at it for real.
+Captures SmolLM-135M through the *new* in-process
+`firefly.runners.vllm.VLLMRunner` (via the normal `capture_reference`
+orchestrator), once per attention backend, then diffs with the library and
+asserts the first divergence is `layer.7.self_attn` — the result
+`scripts/capture_vllm.py` produced earlier this session. That proves the
+extracted runner is faithful before the CLI's `--runner vllm` relies on it.
+
+Each backend runs in a **separate Modal invocation** (separate process): vLLM
+caches its attention backend at the first ``LLM()`` construction, so two
+backends in one process would silently share the first one's. The captured
+tensors come back to the laptop and the diff runs locally on CPU.
 
     uv run modal run scripts/validate_vllm_runner.py
 """
@@ -34,15 +39,19 @@ image = (
 
 
 @app.function(image=image, gpu="A10G", timeout=1800, volumes={"/root/.cache/huggingface": _HF_CACHE})
-def validate() -> dict:
+def capture_backend(backend: str) -> dict:
+    """Capture SmolLM under one attention backend; return CPU tensors + meta.
+
+    One backend per call == one fresh process, so vLLM's global backend cache
+    doesn't leak between backends. The runner's _verify_backend guard raises
+    here if the requested backend didn't actually load.
+    """
     import json
     from pathlib import Path
 
     import torch
 
-    from firefly.attribution import attribute_first_divergence
     from firefly.capture import capture_reference
-    from firefly.compare import TapTolerance, diff_captures
     from firefly.reference import read_reference
     from firefly.runners import get_runner
 
@@ -51,58 +60,42 @@ def validate() -> dict:
     inputs = work / "golden.json"
     inputs.write_text(json.dumps({"texts": ["the quick brown fox jumps over the lazy dog"]}))
 
-    runner = get_runner("vllm")
-    common = dict(
+    out_dir = work / backend.lower()
+    capture_reference(
+        "HuggingFaceTB/SmolLM-135M",
         inputs_path=inputs,
+        out_dir=out_dir,
         dtype=torch.bfloat16,
-        runner=runner,
+        runner=get_runner("vllm"),
+        options={"engine": "v0", "attention_backend": backend},
     )
-
-    flash_dir = work / "flash"
-    capture_reference(
-        "HuggingFaceTB/SmolLM-135M", out_dir=flash_dir,
-        options={"engine": "v0", "attention_backend": "FLASH_ATTN"}, **common,
-    )
-    xformers_dir = work / "xformers"
-    capture_reference(
-        "HuggingFaceTB/SmolLM-135M", out_dir=xformers_dir,
-        options={"engine": "v0", "attention_backend": "XFORMERS"}, **common,
-    )
-
-    man_a, ta = read_reference(flash_dir)
-    _, tb = read_reference(xformers_dir)
-    tolerances = {name: TapTolerance(atol=1e-6) for name in man_a.tap_points}
-    divs = diff_captures(ta, tb, man_a.tap_points, tolerances=tolerances)
-    result = attribute_first_divergence(divs)
-
-    # Self-consistency: FLASH vs FLASH (two captures, same backend) is bit-equal.
-    flash2_dir = work / "flash2"
-    capture_reference(
-        "HuggingFaceTB/SmolLM-135M", out_dir=flash2_dir,
-        options={"engine": "v0", "attention_backend": "FLASH_ATTN"}, **common,
-    )
-    _, ta2 = read_reference(flash2_dir)
-    self_divs = diff_captures(ta, ta2, man_a.tap_points, tolerances=tolerances)
-    self_clean = not any(d.exceeds_tolerance for d in self_divs)
-
-    return {
-        "n_taps": len(man_a.tap_points),
-        "first_divergence_flash_vs_xformers": result.first_divergent_tap,
-        "self_compare_flash_vs_flash_clean": self_clean,
-        "manifest_env": man_a.env,
-        "manifest_dtype": man_a.dtype,
-    }
+    manifest, tensors = read_reference(out_dir)
+    return {"tensors": tensors, "tap_points": manifest.tap_points, "env": manifest.env}
 
 
 @app.local_entrypoint()
 def main() -> None:
-    out = validate.remote()
-    print("\n=== VLLMRunner validation ===")
-    for k, v in out.items():
-        print(f"  {k}: {v}")
-    ok = (
-        out["first_divergence_flash_vs_xformers"] == "layer.7.self_attn"
-        and out["self_compare_flash_vs_flash_clean"]
+    from firefly.attribution import attribute_first_divergence
+    from firefly.compare import TapTolerance, diff_captures
+
+    # Separate invocations (.remote()) => separate processes => correct backends.
+    flash = capture_backend.remote("FLASH_ATTN")
+    xformers = capture_backend.remote("XFORMERS")
+
+    tap_points = flash["tap_points"]
+    tolerances = {name: TapTolerance(atol=1e-6) for name in tap_points}
+    divs = diff_captures(flash["tensors"], xformers["tensors"], tap_points, tolerances=tolerances)
+    result = attribute_first_divergence(divs)
+
+    print("\n=== VLLMRunner validation (library path) ===")
+    print(f"  taps: {len(tap_points)}")
+    print(f"  FLASH env:    {flash['env'].get('attn_impl')}")
+    print(f"  XFORMERS env: {xformers['env'].get('attn_impl')}")
+    print(f"  first divergence (FLASH vs XFORMERS): {result.first_divergent_tap}")
+
+    ok = result.first_divergent_tap == "layer.7.self_attn"
+    print(
+        f"\n{'PASS' if ok else 'FAIL'}: library VLLMRunner "
+        f"{'reproduces' if ok else 'does NOT reproduce'} the known "
+        f"FLASH-vs-XFORMERS result (layer.7.self_attn)."
     )
-    print(f"\n{'PASS' if ok else 'FAIL'}: library VLLMRunner "
-          f"{'reproduces' if ok else 'does NOT reproduce'} the known result.")

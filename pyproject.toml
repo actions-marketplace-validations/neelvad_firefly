@@ -30,6 +30,12 @@ azure = [
     "azure-storage-blob>=12.19",
     "azure-identity>=1.15",
 ]
+# In-process vLLM capture (`firefly check --runner vllm`). Heavy + GPU-only;
+# no upper pin since the runner verifies the live attention backend rather
+# than depending on a specific vLLM API surface.
+vllm = [
+    "vllm>=0.8.5",
+]
 
 [project.scripts]
 firefly = "firefly.cli:app"

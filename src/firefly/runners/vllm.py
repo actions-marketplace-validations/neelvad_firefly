@@ -411,14 +411,7 @@ class VLLMRunner:
 
         attn_impl = _unwrap(dispatch(read_impl_fn))
         if opt["attention_backend"]:
-            want = opt["attention_backend"].replace("_", "").lower()
-            got = str(attn_impl).lower()
-            if want.startswith("flashinfer") != got.startswith("flashinfer"):
-                raise RuntimeError(
-                    f"Requested attention backend {opt['attention_backend']!r} but "
-                    f"the model is running {attn_impl!r} — the selector was ignored. "
-                    f"Aborting so a same-backend comparison isn't mislabeled."
-                )
+            _verify_backend(opt["attention_backend"], str(attn_impl))
 
         n_heads = _unwrap(dispatch(read_heads_fn)) if per_head else 0
 
@@ -496,3 +489,37 @@ class VLLMRunner:
 def _unwrap(rpc_result):
     """vLLM dispatch returns a per-worker list; for TP=1 take the head."""
     return rpc_result[0] if isinstance(rpc_result, list) and rpc_result else rpc_result
+
+
+# Substring the live Attention.impl class name must contain for each requested
+# backend. Backend selection has both drifted across vLLM versions (env var ->
+# engine arg) AND silently falls back in-process (vLLM caches the backend at
+# the first LLM() construction), so we verify the impl that actually loaded
+# rather than trusting the request — a mislabeled comparison is worse than a
+# hard failure.
+_EXPECTED_IMPL_SUBSTR = {
+    "FLASH_ATTN": "flashattention",
+    "FLASHINFER": "flashinfer",
+    "XFORMERS": "xformers",
+    "TRITON_ATTN": "triton",
+    "TORCH_SDPA": "torchsdpa",
+}
+
+
+def _verify_backend(requested: str, impl_name: str) -> None:
+    """Raise if the live attention impl doesn't match the requested backend.
+
+    Unknown backends (not in the map) are not verified — we can't know the
+    impl class name to expect, so we trust the request rather than block.
+    """
+    expected = _EXPECTED_IMPL_SUBSTR.get(requested.upper())
+    if expected is None:
+        return
+    if expected not in impl_name.lower().replace("_", ""):
+        raise RuntimeError(
+            f"Requested attention backend {requested!r} but the model is running "
+            f"{impl_name!r} (expected an impl name containing {expected!r}). The "
+            f"backend selector was ignored — likely a cached backend from an "
+            f"earlier LLM() in this process, or a version that dropped this "
+            f"backend. Aborting so a comparison isn't mislabeled."
+        )

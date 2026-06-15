@@ -62,6 +62,27 @@ def test_vllm_runner_rejects_non_llm_domain() -> None:
         VLLMRunner().capture("m", Path("in.json"), domain="recsys")
 
 
+def test_verify_backend_accepts_matching_impl() -> None:
+    from firefly.runners.vllm import _verify_backend
+
+    # No raise when the live impl matches the requested backend.
+    _verify_backend("FLASH_ATTN", "FlashAttentionImpl")
+    _verify_backend("XFORMERS", "XFormersImpl")
+    _verify_backend("FLASHINFER", "FlashInferImpl")
+    _verify_backend("UNKNOWN_BACKEND", "WhateverImpl")  # unverifiable → trusted
+
+
+def test_verify_backend_rejects_silent_fallback() -> None:
+    from firefly.runners.vllm import _verify_backend
+
+    # The exact bug the strengthened guard exists to catch: XFORMERS silently
+    # running FlashAttention (cached backend / dropped backend).
+    with pytest.raises(RuntimeError, match="backend selector was ignored"):
+        _verify_backend("XFORMERS", "FlashAttentionImpl")
+    with pytest.raises(RuntimeError, match="backend selector was ignored"):
+        _verify_backend("FLASHINFER", "FlashAttentionImpl")
+
+
 def test_capture_reference_dispatches_to_runner(tmp_path: Path) -> None:
     """capture_reference turns a runner's CaptureResult into the artifact."""
     import torch
