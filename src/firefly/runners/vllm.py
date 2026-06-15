@@ -273,13 +273,14 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         "max_seq_len",
         "gpu_memory_utilization",
         "capture_decode",
+        "max_tokens",
         "speculative_tokens",
     }
     if unknown:
         raise ValueError(
             f"Unknown vLLM runner option(s): {sorted(unknown)}. "
             f"Supported: engine, attention_backend, max_seq_len, "
-            f"gpu_memory_utilization, capture_decode, speculative_tokens."
+            f"gpu_memory_utilization, capture_decode, max_tokens, speculative_tokens."
         )
     engine = opts.get("engine", "v1")
     if engine not in {"v0", "v1"}:
@@ -290,6 +291,9 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         "max_seq_len": int(opts.get("max_seq_len", "1024")),
         "gpu_memory_utilization": float(opts.get("gpu_memory_utilization", "0.9")),
         "capture_decode": opts.get("capture_decode", "false").lower() in _BOOL_TRUE,
+        # Decode steps to capture (prefill is always 1 forward). Only consulted
+        # when capture_decode is set.
+        "max_tokens": int(opts.get("max_tokens", "8")),
         "speculative_tokens": int(opts.get("speculative_tokens", "0")),
     }
 
@@ -415,7 +419,7 @@ class VLLMRunner:
 
         n_heads = _unwrap(dispatch(read_heads_fn)) if per_head else 0
 
-        max_tokens = 8 if capture_decode else 1
+        max_tokens = opt["max_tokens"] if capture_decode else 1
         params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         llm.generate(prompts, params)
 

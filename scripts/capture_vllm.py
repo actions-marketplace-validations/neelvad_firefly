@@ -43,7 +43,6 @@ Usage:
 from __future__ import annotations
 
 import os
-import re
 
 import modal
 
@@ -161,274 +160,15 @@ def _make_image(pins: dict) -> modal.Image:
 
 
 # ---------------------------------------------------------------------------
-# Worker-side functions (must be top-level so they pickle to vLLM's worker).
+# Capture body: delegates to the in-process firefly VLLMRunner. The worker-side
+# hook/probe/drain logic and the capture orchestration now live in
+# src/firefly/runners/vllm.py; this script is just the Modal harness around it
+# (per-version images + entrypoint). Single source of truth for the capture
+# logic is the library.
 # ---------------------------------------------------------------------------
 
 
-def _find_model_layout(model):
-    """Probe the vLLM model's module tree and return per-layer hook anchors.
-
-    Returns: (layers, attn_attr, mlp_attr, final_norm_module)
-
-    Different model families wrap their per-decoder-layer modules
-    differently:
-
-    * Llama / Gemma / Qwen / Mistral / Yi / SmolLM / Phi-3:
-      ``model.model.layers[i].self_attn`` and ``.mlp``,
-      final norm at ``model.model.norm``.
-    * Falcon / BLOOM family: ``model.transformer.h[i].self_attention``
-      and ``.mlp``, final norm at ``model.transformer.ln_f``.
-    * MPT family: ``model.transformer.blocks[i].attn`` and ``.ffn``,
-      final norm at ``model.transformer.norm_f``.
-
-    Picks the first match. Names are normalized to ``self_attn`` /
-    ``mlp`` in the tap dictionary regardless of source family, so
-    downstream code doesn't need to special-case them.
-    """
-    if hasattr(model, "model") and hasattr(model.model, "layers"):
-        return model.model.layers, "self_attn", "mlp", model.model.norm
-
-    if hasattr(model, "transformer"):
-        t = model.transformer
-        if hasattr(t, "h"):
-            layers = t.h
-            first = layers[0]
-            attn_attr = "self_attention" if hasattr(first, "self_attention") else "attn"
-            mlp_attr = "mlp" if hasattr(first, "mlp") else "ffn"
-            norm = getattr(t, "ln_f", None) or getattr(t, "norm_f", None)
-            return layers, attn_attr, mlp_attr, norm
-        if hasattr(t, "blocks"):
-            layers = t.blocks
-            first = layers[0]
-            attn_attr = "attn" if hasattr(first, "attn") else "self_attn"
-            mlp_attr = "ffn" if hasattr(first, "ffn") else "mlp"
-            norm = getattr(t, "norm_f", None) or getattr(t, "ln_f", None)
-            return layers, attn_attr, mlp_attr, norm
-
-    raise RuntimeError(
-        f"Unknown model layout for {type(model).__name__}; "
-        f"module attrs: {[a for a in dir(model) if not a.startswith('_')][:30]}"
-    )
-
-
-# Attention output-projection attr names, probed under the attn sub-module to
-# place the per-head tap. Mirrors firefly.tap_points._ATTN_OUTPUT_PROJ_NAMES.
-_VLLM_ATTN_OUTPUT_PROJ_NAMES = ("o_proj", "out_proj", "dense", "c_proj")
-
-
-def _find_attn_output_proj(attn_module):
-    """Return the output-projection submodule of a vLLM attention block, or None."""
-    for proj_name in _VLLM_ATTN_OUTPUT_PROJ_NAMES:
-        proj = getattr(attn_module, proj_name, None)
-        if proj is not None:
-            return proj
-    return None
-
-
-def _register_capture_hooks_impl(model, capture_decode: bool, per_head: bool = False) -> int:
-    """Inside vLLM worker: install forward hooks on Firefly's tap points.
-
-    Tap names follow the existing LLM-domain convention: per-layer
-    ``self_attn``, ``mlp``, and full-layer (residual stream) plus a
-    terminal ``final_norm``. Names match the HF reference convention so
-    captures from this script are directly comparable to HF captures.
-
-    When ``capture_decode`` is False (the v1 default), only the prefill
-    forward pass is captured and tap names are unsuffixed: ``layer.7.self_attn``.
-
-    When ``capture_decode`` is True (v1.5), both prefill and per-step
-    decode forwards are captured with suffixed names:
-    ``layer.7.self_attn@prefill`` for the prompt forward,
-    ``layer.7.self_attn@token_0`` for the first decode step, etc.
-    Decode-only diffs are valuable because decode is where vLLM's
-    optimization-heavy path lives (PagedAttention, scheduler, spec decode).
-
-    When ``per_head`` is True, additionally install an *input*-capturing hook
-    on each attention output projection (``o_proj``), named
-    ``layer.{i}.attn_heads``. That input is the concatenated per-head context
-    vectors (shape ``(num_tokens, n_heads*head_dim)`` under vLLM's flattened
-    batching) — the only place heads are still separable, since ``o_proj``
-    linearly mixes them. ``firefly.head_attribution`` splits it by head.
-    Mutually exclusive with ``capture_decode`` here (the per-head divergence
-    demo is prefill-only); combine later if a decode use-case appears.
-    """
-    import torch
-
-    captures: dict[str, torch.Tensor] = {}
-    step_counters: dict[str, int] = {}
-    handles: list = []
-
-    def make_hook(name: str, capture_input: bool = False):
-        def hook(_module, input_, output):
-            if capture_input:
-                tensor = input_[0] if isinstance(input_, tuple) else input_
-            else:
-                tensor = output[0] if isinstance(output, tuple) else output
-            if not isinstance(tensor, torch.Tensor) or tensor.dim() < 1:
-                return
-            leading = tensor.shape[0]
-            if leading > 1:
-                # prefill
-                key = f"{name}@prefill" if capture_decode else name
-                if key in captures:
-                    return
-                captures[key] = tensor.detach()
-            elif capture_decode and leading == 1:
-                # decode step
-                i = step_counters.get(name, 0)
-                step_counters[name] = i + 1
-                captures[f"{name}@token_{i}"] = tensor.detach()
-            # else: drop (e.g., decode without capture_decode)
-
-        return hook
-
-    layers, attn_attr, mlp_attr, final_norm = _find_model_layout(model)
-    for i, layer in enumerate(layers):
-        attn = getattr(layer, attn_attr)
-        handles.append(attn.register_forward_hook(make_hook(f"layer.{i}.self_attn")))
-        if per_head:
-            o_proj = _find_attn_output_proj(attn)
-            if o_proj is not None:
-                handles.append(
-                    o_proj.register_forward_hook(
-                        make_hook(f"layer.{i}.attn_heads", capture_input=True)
-                    )
-                )
-        handles.append(getattr(layer, mlp_attr).register_forward_hook(make_hook(f"layer.{i}.mlp")))
-        handles.append(layer.register_forward_hook(make_hook(f"layer.{i}")))
-    handles.append(final_norm.register_forward_hook(make_hook("final_norm")))
-
-    model._firefly_captures = captures
-    model._firefly_handles = handles
-    return len(handles)
-
-
-def _register_capture_hooks(model) -> int:
-    return _register_capture_hooks_impl(model, capture_decode=False)
-
-
-def _register_capture_hooks_with_decode(model) -> int:
-    return _register_capture_hooks_impl(model, capture_decode=True)
-
-
-def _register_capture_hooks_per_head(model) -> int:
-    return _register_capture_hooks_impl(model, capture_decode=False, per_head=True)
-
-
-# Config attr names for the attention head count (mirrors capture.num_attention_heads,
-# but reads the vLLM model's config inside the worker without importing firefly there).
-_VLLM_NUM_HEADS_ATTRS = ("num_attention_heads", "n_head", "num_heads", "n_heads")
-
-
-def _read_n_heads_impl(model) -> int:
-    """Inside vLLM worker: read the attention head count from model.config.
-
-    Returns 0 if no recognized attribute is found (caller treats 0 as "skip
-    per-head" rather than guessing a head split).
-    """
-    config = getattr(model, "config", None)
-    if config is None:
-        return 0
-    for attr in _VLLM_NUM_HEADS_ATTRS:
-        val = getattr(config, attr, None)
-        if isinstance(val, int) and val > 0:
-            return val
-    return 0
-
-
-def _read_n_heads(model) -> int:
-    return _read_n_heads_impl(model)
-
-
-def _v1_read_n_heads(worker) -> int:
-    return _read_n_heads_impl(worker.model_runner.model)
-
-
-def _read_attn_impl_impl(model) -> str:
-    """Inside vLLM worker: report the attention implementation actually in use.
-
-    vLLM's unified ``Attention`` layer holds its backend implementation as
-    ``self.impl`` (e.g. ``FlashAttentionImpl``, ``FlashInferImpl``) across
-    both the 0.8.x and current lineages. We read it off the live model
-    instead of trusting env vars / kwargs, because backend-selection
-    mechanisms have changed across vLLM versions and a silently ignored
-    selector would otherwise invalidate a whole comparison.
-    """
-    for m in model.modules():
-        impl = getattr(m, "impl", None)
-        if impl is not None and type(impl).__name__.endswith("Impl"):
-            return type(impl).__name__
-    return "unknown"
-
-
-def _read_attn_impl(model) -> str:
-    return _read_attn_impl_impl(model)
-
-
-def _v1_read_attn_impl(worker) -> str:
-    return _read_attn_impl_impl(worker.model_runner.model)
-
-
-def _drain_captures(model) -> dict:
-    """Inside vLLM worker: bulk d2h, remove hooks, return tensor dict."""
-    captures = getattr(model, "_firefly_captures", {})
-    cpu_tensors = {name: t.cpu().contiguous() for name, t in captures.items()}
-
-    for handle in getattr(model, "_firefly_handles", []):
-        handle.remove()
-    if hasattr(model, "_firefly_captures"):
-        del model._firefly_captures
-    if hasattr(model, "_firefly_handles"):
-        del model._firefly_handles
-
-    return cpu_tensors
-
-
-# V1 engine variants: collective_rpc passes a worker instead of the model
-# directly. We navigate worker → model_runner → model and reuse the same
-# hook logic. If vLLM moves this path again, the AttributeError will surface
-# the actual layout in the traceback.
-
-
-def _v1_register_capture_hooks(worker) -> int:
-    return _register_capture_hooks(worker.model_runner.model)
-
-
-def _v1_register_capture_hooks_with_decode(worker) -> int:
-    return _register_capture_hooks_with_decode(worker.model_runner.model)
-
-
-def _v1_register_capture_hooks_per_head(worker) -> int:
-    return _register_capture_hooks_per_head(worker.model_runner.model)
-
-
-def _v1_drain_captures(worker) -> bytes:
-    """V1 drain returns bytes, not a tensor dict.
-
-    vLLM's V1 ``collective_rpc`` summarizes tensor return values into their
-    dtype name string — likely to avoid shipping per-worker tensor payloads
-    over the RPC bus. The workaround is to ``torch.save`` the captures dict
-    into bytes ourselves; bytes pass through the RPC layer unscathed because
-    they don't look like tensors to V1's type-summarization layer.
-    """
-    import io
-
-    import torch
-
-    raw = _drain_captures(worker.model_runner.model)
-    buf = io.BytesIO()
-    torch.save(raw, buf)
-    return buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# Shared capture body. Lives at module level so per-version Modal functions
-# can call it; the actual vllm import happens *inside*, after VLLM_USE_V1 is
-# set, so the env var takes effect.
-# ---------------------------------------------------------------------------
-
-
-def _do_capture(
+def _capture_via_runner(
     model_id: str,
     prompt: str,
     max_seq_len: int,
@@ -442,230 +182,51 @@ def _do_capture(
     gpu_memory_utilization: float = 0.4,
     per_head: bool = False,
 ) -> dict:
-    if engine not in {"v0", "v1"}:
-        raise ValueError(f"engine must be 'v0' or 'v1', got {engine!r}")
-    if per_head and capture_decode:
-        raise ValueError(
-            "per_head and capture_decode are mutually exclusive in this script "
-            "(per-head attribution is prefill-only)."
-        )
-    os.environ["VLLM_USE_V1"] = "0" if engine == "v0" else "1"
-    # Newer vLLM (>=0.9-ish) refuses to msgspec-serialize arbitrary callables
-    # through collective_rpc and asks for this env var to fall back to pickle.
-    # Our register/drain functions are exactly that; harmless on old versions.
-    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-    if attention_backend:
-        os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
+    """Runs in the GPU container: capture via the library VLLMRunner, return a
+    dict the local entrypoint turns into a reference artifact."""
+    import json
+    import tempfile
+    from pathlib import Path as _Path
 
-    import vllm
-    from vllm import LLM, SamplingParams
+    from firefly.runners.vllm import VLLMRunner
 
-    print(
-        f"vllm version: {vllm.__version__}  engine={engine}  "
-        f"VLLM_USE_V1={os.environ.get('VLLM_USE_V1')}  "
-        f"VLLM_ATTENTION_BACKEND={os.environ.get('VLLM_ATTENTION_BACKEND', '(auto)')}  "
-        f"capture_decode={capture_decode}  n_prompts={n_prompts}  "
-        f"speculative_tokens={speculative_tokens}"
-    )
-    # Record the FlashInfer version when present — upstream repro reports
-    # need "which flashinfer" to be unambiguous.
-    try:
-        import flashinfer
-        print(f"flashinfer version: {flashinfer.__version__}")
-    except ImportError:
-        print("flashinfer: not installed")
-    print(f"Loading {model_id} dtype={dtype}")
+    work = _Path(tempfile.mkdtemp())
+    inputs = work / "golden.json"
+    inputs.write_text(json.dumps({"texts": [prompt] * max(1, n_prompts)}))
 
-    llm_kwargs = dict(
-        model=model_id,
-        dtype=dtype,
-        enforce_eager=True,
-        max_model_len=max_seq_len,
-        gpu_memory_utilization=gpu_memory_utilization,
-        # Some HF model repos (e.g., MPT) ship custom modeling code; vLLM
-        # needs trust_remote_code=True to instantiate them. Always-on is
-        # fine here because (a) this script runs in an isolated Modal
-        # container, not on the local machine, and (b) model IDs are
-        # explicit CLI args, not arbitrary inputs.
-        trust_remote_code=True,
-    )
-    if speculative_tokens > 0:
-        # NGram-based speculative decoding: no draft model required, vLLM
-        # uses an n-gram lookup over the prompt to propose draft tokens.
-        # Under greedy sampling (temp=0) the verifier deterministically
-        # accepts/rejects, so outputs should be bit-identical to the
-        # non-spec-decode run. Any divergence is a real bug.
-        llm_kwargs["speculative_config"] = {
-            "method": "ngram",
-            "num_speculative_tokens": speculative_tokens,
-            "prompt_lookup_max": 4,
-        }
-
-    # Modern vLLM removed the VLLM_ATTENTION_BACKEND env var in favor of an
-    # `attention_backend` engine arg (AttentionBackendEnum). Pass it when the
-    # installed version supports it; the env var (set above) covers old
-    # versions. Without this, the env var is silently ignored on new vLLM and
-    # both sides of a "backend comparison" run the default backend.
-    if attention_backend:
-        from vllm.engine.arg_utils import EngineArgs
-        if "attention_backend" in getattr(EngineArgs, "__dataclass_fields__", {}):
-            try:
-                from vllm.v1.attention.backends.registry import AttentionBackendEnum
-                llm_kwargs["attention_backend"] = AttentionBackendEnum[attention_backend]
-            except (ImportError, KeyError):
-                llm_kwargs["attention_backend"] = attention_backend
-            print(f"backend selection via engine arg: {llm_kwargs['attention_backend']}")
-
-    llm = LLM(**llm_kwargs)
-
-    # V0 uses apply_model (worker callable receives the model). V1's
-    # apply_model is broken in 0.8.5 — we use collective_rpc instead, with
-    # worker-shaped wrappers that navigate worker → model_runner → model.
-    # The register fn varies by capture_decode mode; drain is uniform.
-    if engine == "v0":
-        if per_head:
-            register_fn = _register_capture_hooks_per_head
-        elif capture_decode:
-            register_fn = _register_capture_hooks_with_decode
-        else:
-            register_fn = _register_capture_hooks
-        read_heads_fn = _read_n_heads
-        read_attn_impl_fn = _read_attn_impl
-        drain_fn = _drain_captures
-        dispatch = llm.apply_model
-    else:
-        if per_head:
-            register_fn = _v1_register_capture_hooks_per_head
-        elif capture_decode:
-            register_fn = _v1_register_capture_hooks_with_decode
-        else:
-            register_fn = _v1_register_capture_hooks
-        read_heads_fn = _v1_read_n_heads
-        read_attn_impl_fn = _v1_read_attn_impl
-        drain_fn = _v1_drain_captures
-        dispatch = llm.collective_rpc
-
-    n_hooks_raw = dispatch(register_fn)
-    n_hooks = n_hooks_raw[0] if isinstance(n_hooks_raw, list) and n_hooks_raw else n_hooks_raw
-    print(f"Registered {n_hooks} forward hooks")
-
-    # Verify the attention impl actually loaded — selection mechanisms have
-    # drifted across vLLM versions, and a silently ignored selector would
-    # invalidate the comparison this capture is for.
-    attn_impl_raw = dispatch(read_attn_impl_fn)
-    attn_impl = attn_impl_raw[0] if isinstance(attn_impl_raw, list) and attn_impl_raw else attn_impl_raw
-    print(f"attention impl in use: {attn_impl}")
-    if attention_backend:
-        want = attention_backend.replace("_", "").lower()  # FLASH_ATTN → flashattn
-        got = str(attn_impl).lower()
-        if want.startswith("flashinfer") != got.startswith("flashinfer"):
-            raise RuntimeError(
-                f"Requested attention backend {attention_backend!r} but the "
-                f"model is running {attn_impl!r} — the backend selector was "
-                f"ignored. Aborting so a same-backend comparison isn't "
-                f"mislabeled."
-            )
-
-    # Read the head count for per-head taps via the same dispatch mechanism
-    # (plain int return — no tensor-summarization issue like the drain has).
-    n_heads = 0
-    if per_head:
-        n_heads_raw = dispatch(read_heads_fn)
-        n_heads = n_heads_raw[0] if isinstance(n_heads_raw, list) and n_heads_raw else n_heads_raw
-        print(f"Per-head capture enabled: num_attention_heads={n_heads}")
-
-    # With capture_decode=False, max_tokens=1 → only prefill produces a
-    # captured forward (the lone decode step is dropped by the filter).
-    # With capture_decode=True, max_tokens controls how many decode steps
-    # we record (one prefill + (max_tokens - 1) decode steps).
-    effective_max_tokens = max_tokens if capture_decode else 1
-    prompts_batch = [prompt] * max(1, n_prompts)
-    print(f"Generating {effective_max_tokens} token(s) × {len(prompts_batch)} prompt(s)")
-    params = SamplingParams(temperature=0.0, max_tokens=effective_max_tokens)
-    _ = llm.generate(prompts_batch, params)
-
-    import io
-
-    import torch
-
-    captures_raw = dispatch(drain_fn)
-
-    # V1 drain returns bytes (a torch.save'd dict); V0 returns the dict
-    # directly. Both come wrapped in a per-worker outer list — for TP=1
-    # we take the head.
-    payload = captures_raw[0] if isinstance(captures_raw, list) and captures_raw else captures_raw
-
-    if engine == "v1":
-        if not isinstance(payload, (bytes, bytearray)):
-            raise RuntimeError(
-                f"Expected bytes from V1 drain, got {type(payload).__name__}. "
-                "vLLM's RPC layer may have changed its return-summarization rules."
-            )
-        captures = torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
-    else:
-        captures = payload
-
-    # Defensive unwrap if values are per-worker lists (seen on some
-    # V0 + multi-worker configurations).
-    if captures and isinstance(next(iter(captures.values())), list):
-        captures = {k: v[0] for k, v in captures.items() if v}
-
-    non_tensor = [
-        k for k in list(captures)[:3]
-        if not isinstance(captures[k], torch.Tensor)
-    ]
-    if non_tensor:
-        sample = {k: type(captures[k]).__name__ for k in non_tensor}
-        raise RuntimeError(f"Captures contain non-tensor values: {sample}")
-
-    print(f"\nCaptured {len(captures)} taps:")
-    for name in sorted(captures.keys(), key=_tap_order_key):
-        t = captures[name]
-        print(f"  {name:<32} shape={tuple(t.shape)} dtype={str(t.dtype).replace('torch.', '')}")
-
-    return {
-        "vllm_version": vllm.__version__,
-        "model_id": model_id,
-        "dtype": dtype,
-        "prompt": prompt,
-        "attention_backend": attention_backend or "auto",
+    options = {
         "engine": engine,
+        "attention_backend": attention_backend,
+        "max_seq_len": str(max_seq_len),
+        "gpu_memory_utilization": str(gpu_memory_utilization),
+        "capture_decode": str(capture_decode),
+        "max_tokens": str(max_tokens),
+        "speculative_tokens": str(speculative_tokens),
+    }
+    result = VLLMRunner().capture(
+        model_id, inputs, dtype=dtype, per_head=per_head, options=options
+    )
+    env = result.env
+    print(
+        f"vllm={env.get('vllm_version')} engine={env.get('vllm_engine')} "
+        f"backend={env.get('attention_backend')} impl={env.get('attn_impl')} "
+        f"taps={len(result.tensors)} head_taps={len(result.head_counts)}"
+    )
+    return {
+        "vllm_version": env.get("vllm_version", "unknown"),
+        "attention_backend": env.get("attention_backend", "auto"),
+        "engine": env.get("vllm_engine", engine),
         "capture_decode": capture_decode,
-        "max_tokens": effective_max_tokens,
-        "n_prompts": len(prompts_batch),
+        "max_tokens": max_tokens if capture_decode else 1,
+        "n_prompts": max(1, n_prompts),
         "speculative_tokens": speculative_tokens,
         "per_head": per_head,
-        "n_heads": n_heads,
-        "attn_impl": attn_impl,
-        "captures": captures,
+        "n_heads": next(iter(result.head_counts.values()), 0),
+        "attn_impl": env.get("attn_impl", "unknown"),
+        "fingerprint": result.fingerprint,
+        "head_counts": result.head_counts,
+        "captures": result.tensors,
     }
-
-
-def _tap_order_key(name: str) -> tuple:
-    """Sort taps in forward order:
-       self_attn < attn_heads < mlp < layer-level, then final_norm.
-       Within a tap: bare name (legacy prefill-only) ≡ @prefill, then @token_0..N.
-    """
-    base, suffix = (name.rsplit("@", 1) + [""])[:2] if "@" in name else (name, "")
-    if suffix == "" or suffix == "prefill":
-        suffix_key = 0
-    elif suffix.startswith("token_"):
-        try:
-            suffix_key = 1 + int(suffix[len("token_"):])
-        except ValueError:
-            suffix_key = 10**6
-    else:
-        suffix_key = 10**6
-
-    if base == "final_norm":
-        return (10**9, 0, suffix_key, name)
-    m = re.match(r"layer\.(\d+)(?:\.(self_attn|attn_heads|mlp))?$", base)
-    if m:
-        layer_idx = int(m.group(1))
-        sub = m.group(2)
-        within = {"self_attn": 0, "attn_heads": 1, "mlp": 2, None: 3}[sub]
-        return (layer_idx, within, suffix_key, name)
-    return (10**9 - 1, 0, suffix_key, name)
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +256,7 @@ def capture_at_v_0_7_3(
     gpu_memory_utilization: float = 0.4,
     per_head: bool = False,
 ) -> dict:
-    return _do_capture(
+    return _capture_via_runner(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
         speculative_tokens, gpu_memory_utilization, per_head,
@@ -723,7 +284,7 @@ def capture_at_v_0_8_5(
     gpu_memory_utilization: float = 0.4,
     per_head: bool = False,
 ) -> dict:
-    return _do_capture(
+    return _capture_via_runner(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
         speculative_tokens, gpu_memory_utilization, per_head,
@@ -751,7 +312,7 @@ def capture_at_v_0_8_5_fi(
     gpu_memory_utilization: float = 0.4,
     per_head: bool = False,
 ) -> dict:
-    return _do_capture(
+    return _capture_via_runner(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
         speculative_tokens, gpu_memory_utilization, per_head,
@@ -779,7 +340,7 @@ def capture_at_latest_fi(
     gpu_memory_utilization: float = 0.4,
     per_head: bool = False,
 ) -> dict:
-    return _do_capture(
+    return _capture_via_runner(
         model_id, prompt, max_seq_len, dtype,
         attention_backend, engine, capture_decode, max_tokens, n_prompts,
         speculative_tokens, gpu_memory_utilization, per_head,
@@ -876,22 +437,16 @@ def main(
         )
     out_dir = Path(__file__).parent / "results" / out
 
-    tap_points = sorted(captures.keys(), key=_tap_order_key)
-
-    # Per-head taps are head-splittable only when the captured width divides
-    # evenly into the model's head count. Mirrors capture_reference's logic.
-    head_counts: dict[str, int] = {}
-    if per_head_used and n_heads_used > 0:
-        for name in tap_points:
-            if name.endswith(".attn_heads") and captures[name].shape[-1] % n_heads_used == 0:
-                head_counts[name] = n_heads_used
+    # The VLLMRunner already returns tensors in forward order, so insertion
+    # order is the tap order; head_counts comes straight from the runner.
+    tap_points = list(captures.keys())
+    head_counts: dict[str, int] = result.get("head_counts", {})
 
     manifest = ReferenceManifest(
         model_id=model,
         # Placeholder fingerprint — vLLM's parallel-wrapped params don't hash
-        # the same way HF's do. v1 only needs to detect same-model intent;
-        # cross-version weight verification is future work.
-        model_fingerprint=f"vllm-{vllm_version}:{model}",
+        # the same way HF's do; the runner builds the same vllm-<ver>:<model>.
+        model_fingerprint=result.get("fingerprint", f"vllm-{vllm_version}:{model}"),
         tap_points=tap_points,
         shapes={name: list(captures[name].shape) for name in tap_points},
         dtypes={name: str(captures[name].dtype).replace("torch.", "") for name in tap_points},
