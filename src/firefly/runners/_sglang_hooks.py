@@ -19,21 +19,23 @@ Importable in the worker because ``firefly`` is installed in the SGLang image.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from typing import Any
 
 # Worker-process-global accumulator. One capture pass per fresh engine process,
 # so this never leaks across runs in production (each capture() spawns a new
 # scheduler). Tests must clear it between cases.
+#
+# No lock: the hook runs inside the model's (single-threaded) forward, and a
+# `with lock:` context manager is untraceable by Dynamo — SGLang torch.compiles
+# the forward, so the hook body must stay Dynamo-clean (the runner also forces
+# eager, but keeping the hook lock-free is the robust belt).
 _CAPTURES: dict[str, Any] = {}
-_LOCK = threading.Lock()
 
 
 def _reset() -> None:
     """Clear the accumulator (tests / defensive re-use)."""
-    with _LOCK:
-        _CAPTURES.clear()
+    _CAPTURES.clear()
 
 
 def capture_hook_factory(config: dict[str, Any]) -> Callable:
@@ -63,9 +65,8 @@ def capture_hook_factory(config: dict[str, Any]) -> Callable:
         # prefill keeps the diff story aligned with the HF/vLLM runners.
         if tensor.shape[0] <= 1:
             return
-        with _LOCK:
-            _CAPTURES[name] = tensor.detach().cpu().contiguous()
-            if is_flush:
-                torch.save(dict(_CAPTURES), out_path)
+        _CAPTURES[name] = tensor.detach().cpu().contiguous()
+        if is_flush:
+            torch.save(dict(_CAPTURES), out_path)
 
     return hook

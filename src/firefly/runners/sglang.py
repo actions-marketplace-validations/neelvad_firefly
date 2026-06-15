@@ -33,7 +33,7 @@ _BOOL_TRUE = {"1", "true", "yes", "on"}
 def _parse_options(options: dict[str, str] | None) -> dict:
     """Coerce string runner-opts into typed SGLang knobs, with defaults."""
     opts = dict(options or {})
-    known = {"attention_backend", "mem_fraction_static", "tp_size", "disable_cuda_graph"}
+    known = {"attention_backend", "mem_fraction_static", "tp_size"}
     unknown = set(opts) - known
     if unknown:
         raise ValueError(
@@ -44,10 +44,21 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         "attention_backend": opts.get("attention_backend", ""),
         "mem_fraction_static": float(opts.get("mem_fraction_static", "0.85")),
         "tp_size": int(opts.get("tp_size", "1")),
-        # Capture is prefill (eager in SGLang); disabling CUDA graphs is belt-
-        # and-suspenders so forward hooks always fire.
-        "disable_cuda_graph": opts.get("disable_cuda_graph", "true").lower() in _BOOL_TRUE,
     }
+
+
+# Capture requires an EAGER forward: SGLang's piecewise CUDA-graph backend
+# torch.compiles the prefill pass by default, and our hooks do .cpu() + file I/O
+# that can't live in a compiled graph (Dynamo even rejects the hook outright).
+# The exact flag names that force eager have churned across SGLang releases
+# (0.5.12: disable_piecewise_cuda_graph; main: disable_{prefill,decode}_cuda_
+# graph), so we pass every candidate that the installed ServerArgs accepts.
+_EAGER_FLAG_CANDIDATES = {
+    "disable_cuda_graph": True,
+    "disable_piecewise_cuda_graph": True,
+    "disable_prefill_cuda_graph": True,
+    "disable_decode_cuda_graph": True,
+}
 
 
 def _model_dims(model_id: str) -> tuple[int, int]:
@@ -138,12 +149,23 @@ class SGLangRunner:
         specs = build_hook_specs(n_layers, per_head, out_path)
 
         try:
+            import dataclasses
+
             import sglang as sgl
+            from sglang.srt.server_args import ServerArgs
         except ImportError as e:
             raise ImportError(
                 "The SGLang runner needs SGLang installed and a CUDA GPU. "
                 "Install with: pip install 'firefly[sglang]'."
             ) from e
+
+        valid_fields = {f.name for f in dataclasses.fields(ServerArgs)}
+        if "forward_hooks" not in valid_fields:
+            raise RuntimeError(
+                "This SGLang build's ServerArgs has no 'forward_hooks' field — "
+                "the runner needs a version that supports it (recent 0.5.x+). "
+                "Upgrade SGLang."
+            )
 
         engine_kwargs = dict(
             model_path=model_id,
@@ -152,7 +174,10 @@ class SGLangRunner:
             mem_fraction_static=opt["mem_fraction_static"],
             tp_size=opt["tp_size"],
             random_seed=seed,
-            disable_cuda_graph=opt["disable_cuda_graph"],
+        )
+        # Force eager with whatever flags this SGLang version actually exposes.
+        engine_kwargs.update(
+            {k: v for k, v in _EAGER_FLAG_CANDIDATES.items() if k in valid_fields}
         )
         if opt["attention_backend"]:
             engine_kwargs["attention_backend"] = opt["attention_backend"]
