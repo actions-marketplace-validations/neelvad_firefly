@@ -7,10 +7,15 @@ asserts the first divergence is `layer.7.self_attn` — the result
 `scripts/capture_vllm.py` produced earlier this session. That proves the
 extracted runner is faithful before the CLI's `--runner vllm` relies on it.
 
-Each backend runs in a **separate Modal invocation** (separate process): vLLM
-caches its attention backend at the first ``LLM()`` construction, so two
-backends in one process would silently share the first one's. The captured
-tensors come back to the laptop and the diff runs locally on CPU.
+Each backend runs in its **own container**, spawned concurrently: vLLM caches
+its attention backend at the first ``LLM()`` construction, and Modal reuses a
+warm container across sequential ``.remote()`` calls — so two backends would
+silently share the first one's. ``.spawn()`` both at once forces Modal to
+scale out to two containers, each a fresh process that imports vLLM with its
+own backend env var. The captured tensors come back to the laptop and the
+diff runs locally on CPU. (The runner's _verify_backend guard hard-fails if a
+backend didn't actually load, so a reuse slip surfaces loudly, never as a
+wrong "no divergence".)
 
     uv run modal run scripts/validate_vllm_runner.py
 """
@@ -78,9 +83,12 @@ def main() -> None:
     from firefly.attribution import attribute_first_divergence
     from firefly.compare import TapTolerance, diff_captures
 
-    # Separate invocations (.remote()) => separate processes => correct backends.
-    flash = capture_backend.remote("FLASH_ATTN")
-    xformers = capture_backend.remote("XFORMERS")
+    # Spawn both concurrently so Modal scales out to two containers (one warm
+    # container reused sequentially would leak vLLM's cached backend).
+    flash_handle = capture_backend.spawn("FLASH_ATTN")
+    xformers_handle = capture_backend.spawn("XFORMERS")
+    flash = flash_handle.get()
+    xformers = xformers_handle.get()
 
     tap_points = flash["tap_points"]
     tolerances = {name: TapTolerance(atol=1e-6) for name in tap_points}
