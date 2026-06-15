@@ -18,7 +18,7 @@ at the wrong model."
 
 ```yaml
 # .github/workflows/firefly.yml
-- uses: neelvad/firefly@v0.2.0
+- uses: neelvad/firefly@v0.2.1
   with:
     reference: hf://my-org/my-firefly-ref  # captured from my-org/my-model
     candidate: my-org/my-model             # same weights, new serving stack
@@ -136,14 +136,25 @@ firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
 The action then reads the same URI in CI:
 
 ```yaml
-- uses: neelvad/firefly@v0.2.0
+- uses: neelvad/firefly@v0.2.1
   with:
     reference: hf://my-org/my-firefly-ref
     candidate: my-org/my-model
     inputs: tests/firefly-prompts.json
 ```
 
-For S3 references, install boto3 on the runner: `pip install 'firefly[s3]'`.
+For cloud-hosted references, tell the action which extra to install via
+the `firefly-extras` input (`s3`, `gcs`, or `azure`) so the matching SDK
+is present on the runner:
+
+```yaml
+- uses: neelvad/firefly@v0.2.1
+  with:
+    reference: s3://my-bucket/firefly-refs/v1
+    candidate: my-org/my-model
+    inputs: tests/firefly-prompts.json
+    firefly-extras: s3
+```
 
 ## Tolerance knobs
 

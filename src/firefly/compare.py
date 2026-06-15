@@ -23,6 +23,7 @@ from firefly.capture import (
     fingerprint_model,
     load_golden_inputs,
     load_model_and_tokenizer,
+    parse_dtype,
     run_capture,
 )
 from firefly.determinism import set_deterministic
@@ -165,20 +166,31 @@ def _run_candidate(
     seed: int,
     tolerances: dict[str, TapTolerance] | None,
     allow_fingerprint_mismatch: bool,
+    candidate_dtype: str | None = None,
 ):
     """Load reference + candidate, fingerprint-check, capture candidate once.
 
     Returns ``(manifest, ref_tensors, candidate_tensors, tolerances)``. Shared
     by :func:`compare_to_reference` and :func:`compare_to_reference_per_head`
     so the candidate forward pass runs exactly once per check.
+
+    The candidate is loaded at the reference's recorded dtype
+    (``manifest.dtype``) by default — comparing a bf16 reference against an
+    fp32-loaded candidate would report the dtype gap as divergence, not a
+    real regression. ``candidate_dtype`` overrides this for the deliberate
+    cross-dtype comparison.
     """
     manifest, ref_tensors = read_reference(reference_dir)
 
     if tolerances is None:
         tolerances = read_tolerances(reference_dir)
 
+    dtype = parse_dtype(candidate_dtype) if candidate_dtype else parse_dtype(manifest.dtype)
+
     set_deterministic(seed=seed)
-    candidate, tokenizer = load_model_and_tokenizer(candidate_model_id, device=device)
+    candidate, tokenizer = load_model_and_tokenizer(
+        candidate_model_id, device=device, dtype=dtype
+    )
 
     candidate_fp = fingerprint_model(candidate)
     if candidate_fp != manifest.model_fingerprint and not allow_fingerprint_mismatch:
@@ -212,12 +224,14 @@ def compare_to_reference(
     tolerances: dict[str, TapTolerance] | None = None,
     allow_fingerprint_mismatch: bool = False,
     max_rel_error: float | None = None,
+    candidate_dtype: str | None = None,
 ) -> list[TapDivergence]:
     """Run candidate, diff against reference, return per-tap divergences in forward order.
 
     Raises :class:`FingerprintMismatchError` if the candidate's fingerprint
     doesn't match the reference manifest, unless ``allow_fingerprint_mismatch``
-    is set.
+    is set. The candidate loads at the reference's dtype unless
+    ``candidate_dtype`` overrides it.
     """
     manifest, ref_tensors, candidate_tensors, tolerances = _run_candidate(
         reference_dir,
@@ -227,6 +241,7 @@ def compare_to_reference(
         seed,
         tolerances,
         allow_fingerprint_mismatch,
+        candidate_dtype,
     )
     return diff_captures(
         reference_tensors=ref_tensors,
@@ -246,6 +261,7 @@ def compare_to_reference_per_head(
     tolerances: dict[str, TapTolerance] | None = None,
     allow_fingerprint_mismatch: bool = False,
     max_rel_error: float | None = None,
+    candidate_dtype: str | None = None,
 ):
     """Like :func:`compare_to_reference` but also returns per-head attribution.
 
@@ -264,6 +280,7 @@ def compare_to_reference_per_head(
         seed,
         tolerances,
         allow_fingerprint_mismatch,
+        candidate_dtype,
     )
     divergences = diff_captures(
         reference_tensors=ref_tensors,

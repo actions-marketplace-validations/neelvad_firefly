@@ -219,3 +219,75 @@ def test_compare_allow_fingerprint_mismatch_proceeds(tmp_path: Path) -> None:
         allow_fingerprint_mismatch=True,
     )
     assert max(d.max_abs_diff for d in divs) == 0.0
+
+
+def test_check_loads_candidate_at_reference_dtype() -> None:
+    """compare_to_reference must load the candidate at the reference's recorded
+    dtype by default — otherwise a bf16 reference vs an fp32-loaded candidate
+    reports the dtype gap as divergence (the #2 correctness bug)."""
+    from unittest.mock import MagicMock, patch
+
+    from firefly.compare import compare_to_reference
+    from firefly.reference import ReferenceManifest
+
+    manifest = ReferenceManifest(
+        model_id="fake",
+        model_fingerprint="fp",
+        tap_points=[],
+        shapes={},
+        dtypes={},
+        captured_at="2026-06-15T00:00:00+00:00",
+        dtype="bfloat16",
+    )
+
+    with (
+        patch("firefly.compare.read_reference", return_value=(manifest, {})),
+        patch("firefly.compare.read_tolerances", return_value=None),
+        patch("firefly.compare.set_deterministic"),
+        patch("firefly.compare.load_golden_inputs", return_value={}),
+        patch("firefly.compare.run_capture", return_value={}),
+        patch("firefly.compare.fingerprint_model", return_value="fp"),
+        patch(
+            "firefly.compare.load_model_and_tokenizer",
+            return_value=(MagicMock(), MagicMock()),
+        ) as mock_load,
+    ):
+        compare_to_reference(Path("ref"), "cand", Path("inputs.json"))
+
+    assert mock_load.call_args.kwargs["dtype"] is torch.bfloat16
+
+
+def test_check_candidate_dtype_override() -> None:
+    """--candidate-dtype overrides the reference dtype for cross-dtype runs."""
+    from unittest.mock import MagicMock, patch
+
+    from firefly.compare import compare_to_reference
+    from firefly.reference import ReferenceManifest
+
+    manifest = ReferenceManifest(
+        model_id="fake",
+        model_fingerprint="fp",
+        tap_points=[],
+        shapes={},
+        dtypes={},
+        captured_at="2026-06-15T00:00:00+00:00",
+        dtype="bfloat16",
+    )
+
+    with (
+        patch("firefly.compare.read_reference", return_value=(manifest, {})),
+        patch("firefly.compare.read_tolerances", return_value=None),
+        patch("firefly.compare.set_deterministic"),
+        patch("firefly.compare.load_golden_inputs", return_value={}),
+        patch("firefly.compare.run_capture", return_value={}),
+        patch("firefly.compare.fingerprint_model", return_value="fp"),
+        patch(
+            "firefly.compare.load_model_and_tokenizer",
+            return_value=(MagicMock(), MagicMock()),
+        ) as mock_load,
+    ):
+        compare_to_reference(
+            Path("ref"), "cand", Path("inputs.json"), candidate_dtype="fp16"
+        )
+
+    assert mock_load.call_args.kwargs["dtype"] is torch.float16

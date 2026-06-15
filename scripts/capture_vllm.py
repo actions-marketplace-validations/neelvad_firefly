@@ -15,12 +15,15 @@ Design notes:
   * Loaded with ``enforce_eager=True`` to disable CUDA graphs, otherwise
     forward hooks force graph breaks. Acceptable for the CI diagnostic
     use case; not acceptable for shadow-mode capture against production
-    traffic (would need a custom op).
+    traffic — that path uses the CUDA-graph-safe custom op in
+    ``firefly.shadow`` (``capture_static``), which this CI script does
+    not wire up.
   * Hooks store ``.detach()`` only — tensors stay on GPU during forward,
     one bulk d2h via a second ``apply_model`` call at the end. Collapses
     ~90 per-tap sync points into 1.
-  * Prefill-only (v1). Decode capture planned for v1.5 with per-position
-    indexing.
+  * Prefill by default; decode capture (per-position ``@token_N``
+    indexing) via ``capture_decode=True``. Per-head capture via
+    ``per_head=True``.
   * ``VLLM_USE_V1=0`` forces vLLM's V0 engine because V1 in 0.8.5 has a
     broken ``apply_model`` path. V0 also works in 0.7.x.
 

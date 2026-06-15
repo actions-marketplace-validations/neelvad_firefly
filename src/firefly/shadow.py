@@ -28,15 +28,20 @@ Architecture sketch (the design decisions baked in are listed below):
 Decisions baked in:
 
 * Pass-through op semantics: ``y = capture(x, name)`` returns ``x``.
-* Summary stats always, full tensors gated by a policy (every N steps,
-  first N steps, on-alert TBD).
+* Summary stats always, full tensors gated by a policy (first N steps,
+  every N steps, on-alert — all implemented).
 * User-controlled tap-name regex filter, not per-request sampling.
 * Mutex-protected ring buffer first (correctness over performance).
-* Local log sink for prototyping; S3/GCS/Azure sinks reuse v2 storage
-  backends later.
-* Manual + ``@tap`` decorator instrumentation; FX-rewrite deferred.
+* Local log sink plus streaming S3/GCS/Azure sinks (sharded JSONL).
+* Instrumentation: manual ``@tap`` decorators, or ``instrument(model,
+  pattern, ...)`` which auto-wires capture ops via ``torch.fx`` with a
+  ``named_modules`` fallback.
 
-MVP scope: targets eager + torch.compile. CUDA-graph compat deferred.
+Scope: eager + torch.compile via the ``capture`` op, and CUDA-graph
+replay via the Triton-backed ``capture_static`` op (see below). What is
+*not* built is the production loop that drives this against a live
+serving stack — the mechanism is here; the ``firefly check-shadow``
+product flow is future work.
 """
 
 from __future__ import annotations

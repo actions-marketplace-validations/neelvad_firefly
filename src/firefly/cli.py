@@ -251,6 +251,16 @@ def check(
             "Useful for testing or one-off comparisons; not recommended for CI."
         ),
     ),
+    candidate_dtype: str | None = typer.Option(
+        None,
+        "--candidate-dtype",
+        help=(
+            "Dtype to load the candidate at (fp32, bf16, fp16). Defaults to "
+            "the reference's recorded dtype — matching it is almost always "
+            "what you want, since a dtype mismatch shows up as divergence. "
+            "Override only for a deliberate cross-dtype comparison."
+        ),
+    ),
     max_rel_error: float = typer.Option(
         0.0,
         "--max-rel-error",
@@ -325,6 +335,7 @@ def check(
             seed=seed,
             allow_fingerprint_mismatch=allow_fingerprint_mismatch,
             max_rel_error=max_rel,
+            candidate_dtype=candidate_dtype,
         )
     else:
         divergences = compare_to_reference(
@@ -335,6 +346,7 @@ def check(
             seed=seed,
             allow_fingerprint_mismatch=allow_fingerprint_mismatch,
             max_rel_error=max_rel,
+            candidate_dtype=candidate_dtype,
         )
         per_head = []
     result = attribute_first_divergence(divergences)
