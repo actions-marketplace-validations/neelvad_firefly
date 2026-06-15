@@ -18,7 +18,7 @@ at the wrong model."
 
 ```yaml
 # .github/workflows/firefly.yml
-- uses: neelvad/firefly@v0.2.1
+- uses: neelvad/firefly@v0.3.0
   with:
     reference: hf://my-org/my-firefly-ref  # captured from my-org/my-model
     candidate: my-org/my-model             # same weights, new serving stack
@@ -102,6 +102,27 @@ calibrated `tolerances.json` — flat default tolerances either spam
 false positives or silently miss real regressions, neither of which
 delivers product value.
 
+### Capturing from vLLM
+
+By default capture runs the model through HF transformers. To capture
+from a real vLLM engine instead — the configuration your production stack
+actually serves — use `--runner vllm` (needs `pip install 'firefly[vllm]'`
+and a CUDA GPU). Engine knobs go through repeatable `--runner-opt`:
+
+```sh
+firefly capture --runner vllm \
+    --model my-org/my-model --inputs golden.json --out reference/ \
+    --runner-opt attention_backend=FLASH_ATTN --runner-opt engine=v1
+
+firefly check --runner vllm \
+    --reference reference/ --candidate my-org/my-model --inputs golden.json \
+    --runner-opt attention_backend=XFORMERS
+```
+
+A reference and its candidates should use the same runner — vLLM flattens
+batch/seq into one token axis, so its tensor shapes differ from the HF
+runner's padded batches. Compare like with like.
+
 ## Publishing a reference
 
 Small references (≤100 MB) commit cleanly to your repo. Past that —
@@ -136,7 +157,7 @@ firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
 The action then reads the same URI in CI:
 
 ```yaml
-- uses: neelvad/firefly@v0.2.1
+- uses: neelvad/firefly@v0.3.0
   with:
     reference: hf://my-org/my-firefly-ref
     candidate: my-org/my-model
@@ -148,7 +169,7 @@ the `firefly-extras` input (`s3`, `gcs`, or `azure`) so the matching SDK
 is present on the runner:
 
 ```yaml
-- uses: neelvad/firefly@v0.2.1
+- uses: neelvad/firefly@v0.3.0
   with:
     reference: s3://my-bucket/firefly-refs/v1
     candidate: my-org/my-model
@@ -178,7 +199,8 @@ the >1% threshold where real bugs live.
 | Module | Responsibility |
 | --- | --- |
 | `tap_points.py` | Pick stable per-layer hook sites (LLM; recsys planned for v2) |
-| `capture.py` | Register forward hooks, capture activations from a golden batch |
+| `capture.py` | Capture orchestration; dispatches to a `Runner` (HF default) |
+| `runners/` | Pluggable capture backends behind one interface: `hf.py` (transformers, eager hooks), `vllm.py` (in-process vLLM, GPU) |
 | `calibrate.py` | Re-run reference under controlled noise; derive per-tap atol |
 | `reference.py` | Read/write the inspectable reference artifact (safetensors + JSON) |
 | `compare.py` | Per-tap diff with effective-atol composition |
@@ -190,7 +212,7 @@ the >1% threshold where real bugs live.
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
 | `cli.py` | `firefly capture / calibrate / check / quant-risk / publish` |
 | `action.yml` | GitHub Action wrapper for `firefly check` |
-| `scripts/capture_vllm.py` | vLLM-specific capture (V0 + V1 engines, prefill + decode) |
+| `scripts/capture_vllm.py` | Modal harness around the vLLM runner (multi-version blog repros) |
 | `scripts/plot_validation.py` | Diff and magnitude figures for the writeup |
 
 ## Reference storage backends
@@ -219,9 +241,12 @@ changed upstream.
 - Core CI flow: capture / calibrate / check, GitHub Action, markdown
   PR summaries, calibrated per-tap tolerances + `--max-rel-error`
 - Storage backends: local, `hf://`, `s3://`, `gs://`, `az://`
-- vLLM capture (V0 + V1 engines, prefill + decode, attention-backend
-  selection with live verification) and a reproducible parity suite
-- Cross-family validation: 9 models, 8 architecture families
+- **First-class `--runner vllm`** — `firefly capture`/`check --runner vllm`
+  captures in-process from a real vLLM engine (V0 + V1, prefill + decode,
+  attention-backend selection with live verification), behind a pluggable
+  `Runner` seam shared with the HF runner. Engine knobs via `--runner-opt`.
+- Reproducible vLLM parity suite + cross-family validation (9 models,
+  8 architecture families)
 - **Per-head attention attribution** (`capture --per-head`) — drills
   the first divergent layer down to the specific attention head
 - **Quantization-risk attribution** (`firefly quant-risk`) — predicts
@@ -233,9 +258,7 @@ changed upstream.
 
 **Planned:**
 
-- First-class `firefly check --runner vllm` flow (the vLLM evidence
-  today comes from `scripts/capture_vllm.py`; promoting it into the
-  CLI is the top packaging item)
+- **`--runner sglang`** — the next engine behind the `Runner` seam
 - torchao integration — validate the simulated quant-risk rankings
   against real quantized kernels (per-tensor vs per-channel A/B)
 - Recsys capture end-to-end (embedding-table monitoring, O2O
