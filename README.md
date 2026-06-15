@@ -18,7 +18,7 @@ at the wrong model."
 
 ```yaml
 # .github/workflows/firefly.yml
-- uses: neelvad/firefly@v0.3.0
+- uses: neelvad/firefly@v0.4.0
   with:
     reference: hf://my-org/my-firefly-ref  # captured from my-org/my-model
     candidate: my-org/my-model             # same weights, new serving stack
@@ -102,12 +102,13 @@ calibrated `tolerances.json` — flat default tolerances either spam
 false positives or silently miss real regressions, neither of which
 delivers product value.
 
-### Capturing from vLLM
+### Capturing from a serving engine (vLLM / SGLang)
 
 By default capture runs the model through HF transformers. To capture
-from a real vLLM engine instead — the configuration your production stack
-actually serves — use `--runner vllm` (needs `pip install 'firefly[vllm]'`
-and a CUDA GPU). Engine knobs go through repeatable `--runner-opt`:
+from a real serving engine instead — the configuration your production
+stack actually serves — use `--runner vllm` or `--runner sglang` (each
+needs its extra, `pip install 'firefly[vllm]'` / `'firefly[sglang]'`, and
+a CUDA GPU). Engine knobs go through repeatable `--runner-opt`:
 
 ```sh
 firefly capture --runner vllm \
@@ -117,11 +118,15 @@ firefly capture --runner vllm \
 firefly check --runner vllm \
     --reference reference/ --candidate my-org/my-model --inputs golden.json \
     --runner-opt attention_backend=XFORMERS
+
+# SGLang — same flow, its own --runner-opts (attention_backend, tp_size, ...)
+firefly capture --runner sglang \
+    --model my-org/my-model --inputs golden.json --out reference/
 ```
 
-A reference and its candidates should use the same runner — vLLM flattens
-batch/seq into one token axis, so its tensor shapes differ from the HF
-runner's padded batches. Compare like with like.
+A reference and its candidates should use the same runner — the serving
+engines flatten batch/seq into one token axis, so their tensor shapes
+differ from the HF runner's padded batches. Compare like with like.
 
 ## Publishing a reference
 
@@ -157,7 +162,7 @@ firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
 The action then reads the same URI in CI:
 
 ```yaml
-- uses: neelvad/firefly@v0.3.0
+- uses: neelvad/firefly@v0.4.0
   with:
     reference: hf://my-org/my-firefly-ref
     candidate: my-org/my-model
@@ -169,7 +174,7 @@ the `firefly-extras` input (`s3`, `gcs`, or `azure`) so the matching SDK
 is present on the runner:
 
 ```yaml
-- uses: neelvad/firefly@v0.3.0
+- uses: neelvad/firefly@v0.4.0
   with:
     reference: s3://my-bucket/firefly-refs/v1
     candidate: my-org/my-model
@@ -200,7 +205,7 @@ the >1% threshold where real bugs live.
 | --- | --- |
 | `tap_points.py` | Pick stable per-layer hook sites (LLM; recsys planned for v2) |
 | `capture.py` | Capture orchestration; dispatches to a `Runner` (HF default) |
-| `runners/` | Pluggable capture backends behind one interface: `hf.py` (transformers, eager hooks), `vllm.py` (in-process vLLM, GPU) |
+| `runners/` | Pluggable capture backends behind one interface: `hf.py` (transformers, eager hooks), `vllm.py` (in-process vLLM), `sglang.py` (in-process SGLang via its native `forward_hooks`) |
 | `calibrate.py` | Re-run reference under controlled noise; derive per-tap atol |
 | `reference.py` | Read/write the inspectable reference artifact (safetensors + JSON) |
 | `compare.py` | Per-tap diff with effective-atol composition |
@@ -241,10 +246,11 @@ changed upstream.
 - Core CI flow: capture / calibrate / check, GitHub Action, markdown
   PR summaries, calibrated per-tap tolerances + `--max-rel-error`
 - Storage backends: local, `hf://`, `s3://`, `gs://`, `az://`
-- **First-class `--runner vllm`** — `firefly capture`/`check --runner vllm`
-  captures in-process from a real vLLM engine (V0 + V1, prefill + decode,
-  attention-backend selection with live verification), behind a pluggable
-  `Runner` seam shared with the HF runner. Engine knobs via `--runner-opt`.
+- **Pluggable capture runners** — `--runner {hf,vllm,sglang}` behind one
+  `Runner` seam. vLLM (V0 + V1, prefill + decode, attention-backend
+  selection with live verification) and SGLang (in-process via its native
+  `forward_hooks`) both capture from a real serving engine; engine knobs
+  via `--runner-opt`. Adding an engine is one class, not pipeline surgery.
 - Reproducible vLLM parity suite + cross-family validation (9 models,
   8 architecture families)
 - **Per-head attention attribution** (`capture --per-head`) — drills
@@ -258,7 +264,7 @@ changed upstream.
 
 **Planned:**
 
-- **`--runner sglang`** — the next engine behind the `Runner` seam
+- More runners behind the seam (TensorRT-LLM, TGI) as demand warrants
 - torchao integration — validate the simulated quant-risk rankings
   against real quantized kernels (per-tensor vs per-channel A/B)
 - Recsys capture end-to-end (embedding-table monitoring, O2O
