@@ -19,14 +19,6 @@ from typing import Literal
 
 import torch
 
-from firefly.capture import (
-    fingerprint_model,
-    load_golden_inputs,
-    load_model_and_tokenizer,
-    parse_dtype,
-    run_capture,
-)
-from firefly.determinism import set_deterministic
 from firefly.reference import read_reference
 
 DEFAULT_TOLERANCE = 1e-5
@@ -167,52 +159,52 @@ def _run_candidate(
     tolerances: dict[str, TapTolerance] | None,
     allow_fingerprint_mismatch: bool,
     candidate_dtype: str | None = None,
+    runner: object | None = None,
 ):
-    """Load reference + candidate, fingerprint-check, capture candidate once.
+    """Load the reference, capture the candidate via a Runner, fingerprint-check.
 
     Returns ``(manifest, ref_tensors, candidate_tensors, tolerances)``. Shared
     by :func:`compare_to_reference` and :func:`compare_to_reference_per_head`
     so the candidate forward pass runs exactly once per check.
 
-    The candidate is loaded at the reference's recorded dtype
-    (``manifest.dtype``) by default — comparing a bf16 reference against an
-    fp32-loaded candidate would report the dtype gap as divergence, not a
-    real regression. ``candidate_dtype`` overrides this for the deliberate
-    cross-dtype comparison.
+    The candidate is captured to mirror the reference: same dtype
+    (``manifest.dtype`` — comparing a bf16 reference against an fp32-loaded
+    candidate would report the dtype gap as divergence, not a real
+    regression), same domain, and per-head taps iff the reference has them.
+    ``candidate_dtype`` overrides the dtype for a deliberate cross-dtype run.
     """
+    from firefly.runners import get_runner  # local import: avoids an import cycle
+
     manifest, ref_tensors = read_reference(reference_dir)
 
     if tolerances is None:
         tolerances = read_tolerances(reference_dir)
 
-    dtype = parse_dtype(candidate_dtype) if candidate_dtype else parse_dtype(manifest.dtype)
-
-    set_deterministic(seed=seed)
-    candidate, tokenizer = load_model_and_tokenizer(
-        candidate_model_id, device=device, dtype=dtype
+    active_runner = runner if runner is not None else get_runner("hf")
+    result = active_runner.capture(
+        candidate_model_id,
+        inputs_path,
+        device=device,
+        seed=seed,
+        domain=manifest.domain,
+        dtype=candidate_dtype or manifest.dtype,
+        per_head=bool(manifest.head_counts),
     )
 
-    candidate_fp = fingerprint_model(candidate)
-    if candidate_fp != manifest.model_fingerprint and not allow_fingerprint_mismatch:
+    if result.fingerprint != manifest.model_fingerprint and not allow_fingerprint_mismatch:
         raise FingerprintMismatchError(
             f"Candidate fingerprint differs from reference manifest.\n"
             f"  reference model_id:    {manifest.model_id}\n"
             f"  reference fingerprint: {manifest.model_fingerprint}\n"
             f"  candidate model_id:    {candidate_model_id}\n"
-            f"  candidate fingerprint: {candidate_fp}\n"
+            f"  candidate fingerprint: {result.fingerprint}\n"
             f"\n"
             f"The reference was captured against a different version of this model. "
             f"Either re-capture with `firefly capture`, or pass "
             f"--allow-fingerprint-mismatch to proceed anyway."
         )
 
-    batch = load_golden_inputs(inputs_path, tokenizer, device)
-    # per_head mirrors what the reference recorded: if it has head taps, the
-    # candidate must capture them too or the diff would be missing-tap errors.
-    candidate_tensors = run_capture(
-        candidate, batch, domain=manifest.domain, per_head=bool(manifest.head_counts)
-    )
-    return manifest, ref_tensors, candidate_tensors, tolerances
+    return manifest, ref_tensors, result.tensors, tolerances
 
 
 def compare_to_reference(
@@ -225,13 +217,15 @@ def compare_to_reference(
     allow_fingerprint_mismatch: bool = False,
     max_rel_error: float | None = None,
     candidate_dtype: str | None = None,
+    runner: object | None = None,
 ) -> list[TapDivergence]:
     """Run candidate, diff against reference, return per-tap divergences in forward order.
 
     Raises :class:`FingerprintMismatchError` if the candidate's fingerprint
     doesn't match the reference manifest, unless ``allow_fingerprint_mismatch``
     is set. The candidate loads at the reference's dtype unless
-    ``candidate_dtype`` overrides it.
+    ``candidate_dtype`` overrides it. ``runner`` selects the capture backend
+    (defaults to the HF runner).
     """
     manifest, ref_tensors, candidate_tensors, tolerances = _run_candidate(
         reference_dir,
@@ -242,6 +236,7 @@ def compare_to_reference(
         tolerances,
         allow_fingerprint_mismatch,
         candidate_dtype,
+        runner,
     )
     return diff_captures(
         reference_tensors=ref_tensors,
@@ -262,6 +257,7 @@ def compare_to_reference_per_head(
     allow_fingerprint_mismatch: bool = False,
     max_rel_error: float | None = None,
     candidate_dtype: str | None = None,
+    runner: object | None = None,
 ):
     """Like :func:`compare_to_reference` but also returns per-head attribution.
 
@@ -281,6 +277,7 @@ def compare_to_reference_per_head(
         tolerances,
         allow_fingerprint_mismatch,
         candidate_dtype,
+        runner,
     )
     divergences = diff_captures(
         reference_tensors=ref_tensors,

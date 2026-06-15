@@ -21,11 +21,9 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn as nn
 
-from firefly.determinism import set_deterministic
 from firefly.noise import NoiseSpec, register_noise_hook
 from firefly.reference import (
     ReferenceManifest,
-    capture_env,
     write_reference,
 )
 from firefly.tap_points import resolve_module_path, select_tap_points
@@ -220,39 +218,44 @@ def capture_reference(
     domain: str = "llm",
     dtype: torch.dtype = torch.float32,
     per_head: bool = False,
+    runner: object | None = None,
 ) -> None:
-    """Load ``model_id``, run the golden inputs, write a reference artifact.
+    """Capture a reference artifact from ``model_id`` + golden inputs.
 
-    With ``per_head``, additionally captures per-head attention taps and
-    records the head count per such tap in ``manifest.head_counts`` so
+    The capture itself (model load, forward, tap extraction, fingerprint) is
+    delegated to a :class:`~firefly.runners.base.Runner` — the HF runner by
+    default. This function owns turning the runner's :class:`CaptureResult`
+    into the on-disk artifact.
+
+    With ``per_head``, the runner additionally captures per-head attention
+    taps and reports head counts in ``manifest.head_counts`` so
     ``firefly check`` can attribute divergence to individual heads.
     """
-    set_deterministic(seed=seed)
-    model, tokenizer = load_model_and_tokenizer(model_id, device=device, dtype=dtype)
-    batch = load_golden_inputs(inputs_path, tokenizer, device)
-    captured = run_capture(model, batch, domain=domain, per_head=per_head)
+    from firefly.runners import get_runner  # local import: avoids an import cycle
 
-    head_counts: dict[str, int] = {}
-    if per_head:
-        n_heads = num_attention_heads(model)
-        if n_heads is not None:
-            for name, t in captured.items():
-                # Only the per-head taps are head-splittable, and only when
-                # the captured width divides evenly into n_heads.
-                if name.endswith(".attn_heads") and t.shape[-1] % n_heads == 0:
-                    head_counts[name] = n_heads
+    active_runner = runner if runner is not None else get_runner("hf")
+    result = active_runner.capture(
+        model_id,
+        inputs_path,
+        device=device,
+        seed=seed,
+        domain=domain,
+        dtype=dtype_to_name(dtype),
+        per_head=per_head,
+    )
+    captured = result.tensors
 
     manifest = ReferenceManifest(
         model_id=model_id,
-        model_fingerprint=fingerprint_model(model),
+        model_fingerprint=result.fingerprint,
         tap_points=list(captured.keys()),
         shapes={name: list(t.shape) for name, t in captured.items()},
         dtypes={name: _dtype_str(t.dtype) for name, t in captured.items()},
         captured_at=datetime.now(UTC).isoformat(),
-        env=capture_env(),
+        env=result.env,
         domain=domain,
-        dtype=dtype_to_name(dtype),
-        head_counts=head_counts,
+        dtype=result.dtype,
+        head_counts=result.head_counts,
     )
     write_reference(out_dir, manifest, captured)
     clear_stale_tolerances(out_dir)

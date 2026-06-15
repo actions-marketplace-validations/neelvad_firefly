@@ -221,73 +221,66 @@ def test_compare_allow_fingerprint_mismatch_proceeds(tmp_path: Path) -> None:
     assert max(d.max_abs_diff for d in divs) == 0.0
 
 
-def test_check_loads_candidate_at_reference_dtype() -> None:
-    """compare_to_reference must load the candidate at the reference's recorded
-    dtype by default — otherwise a bf16 reference vs an fp32-loaded candidate
-    reports the dtype gap as divergence (the #2 correctness bug)."""
-    from unittest.mock import MagicMock, patch
-
-    from firefly.compare import compare_to_reference
+def _manifest_with_dtype(dtype: str):
     from firefly.reference import ReferenceManifest
 
-    manifest = ReferenceManifest(
+    return ReferenceManifest(
         model_id="fake",
         model_fingerprint="fp",
         tap_points=[],
         shapes={},
         dtypes={},
         captured_at="2026-06-15T00:00:00+00:00",
-        dtype="bfloat16",
+        dtype=dtype,
     )
 
-    with (
-        patch("firefly.compare.read_reference", return_value=(manifest, {})),
-        patch("firefly.compare.read_tolerances", return_value=None),
-        patch("firefly.compare.set_deterministic"),
-        patch("firefly.compare.load_golden_inputs", return_value={}),
-        patch("firefly.compare.run_capture", return_value={}),
-        patch("firefly.compare.fingerprint_model", return_value="fp"),
-        patch(
-            "firefly.compare.load_model_and_tokenizer",
-            return_value=(MagicMock(), MagicMock()),
-        ) as mock_load,
-    ):
-        compare_to_reference(Path("ref"), "cand", Path("inputs.json"))
 
-    assert mock_load.call_args.kwargs["dtype"] is torch.bfloat16
+class _RecordingRunner:
+    """Captures the args compare hands a Runner, returns an empty result."""
+
+    name = "recording"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def capture(self, model_id, inputs_path, **kwargs):
+        from firefly.runners.base import CaptureResult
+
+        self.calls.append({"model_id": model_id, **kwargs})
+        return CaptureResult(tensors={}, fingerprint="fp")
+
+
+def test_check_captures_candidate_at_reference_dtype() -> None:
+    """compare must hand the runner the reference's dtype by default —
+    otherwise a bf16 reference vs an fp32 candidate reports the dtype gap as
+    divergence (the #2 correctness bug)."""
+    from unittest.mock import patch
+
+    from firefly.compare import compare_to_reference
+
+    runner = _RecordingRunner()
+    with (
+        patch("firefly.compare.read_reference", return_value=(_manifest_with_dtype("bfloat16"), {})),
+        patch("firefly.compare.read_tolerances", return_value=None),
+    ):
+        compare_to_reference(Path("ref"), "cand", Path("inputs.json"), runner=runner)
+
+    assert runner.calls[0]["dtype"] == "bfloat16"
 
 
 def test_check_candidate_dtype_override() -> None:
-    """--candidate-dtype overrides the reference dtype for cross-dtype runs."""
-    from unittest.mock import MagicMock, patch
+    """candidate_dtype overrides the reference dtype for cross-dtype runs."""
+    from unittest.mock import patch
 
     from firefly.compare import compare_to_reference
-    from firefly.reference import ReferenceManifest
 
-    manifest = ReferenceManifest(
-        model_id="fake",
-        model_fingerprint="fp",
-        tap_points=[],
-        shapes={},
-        dtypes={},
-        captured_at="2026-06-15T00:00:00+00:00",
-        dtype="bfloat16",
-    )
-
+    runner = _RecordingRunner()
     with (
-        patch("firefly.compare.read_reference", return_value=(manifest, {})),
+        patch("firefly.compare.read_reference", return_value=(_manifest_with_dtype("bfloat16"), {})),
         patch("firefly.compare.read_tolerances", return_value=None),
-        patch("firefly.compare.set_deterministic"),
-        patch("firefly.compare.load_golden_inputs", return_value={}),
-        patch("firefly.compare.run_capture", return_value={}),
-        patch("firefly.compare.fingerprint_model", return_value="fp"),
-        patch(
-            "firefly.compare.load_model_and_tokenizer",
-            return_value=(MagicMock(), MagicMock()),
-        ) as mock_load,
     ):
         compare_to_reference(
-            Path("ref"), "cand", Path("inputs.json"), candidate_dtype="fp16"
+            Path("ref"), "cand", Path("inputs.json"), candidate_dtype="fp16", runner=runner
         )
 
-    assert mock_load.call_args.kwargs["dtype"] is torch.float16
+    assert runner.calls[0]["dtype"] == "fp16"
