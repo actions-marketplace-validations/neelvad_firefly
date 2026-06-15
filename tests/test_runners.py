@@ -24,7 +24,7 @@ def test_available_runners_lists_hf() -> None:
 
 def test_get_runner_unknown_raises() -> None:
     with pytest.raises(ValueError, match="Unknown runner"):
-        get_runner("sglang")
+        get_runner("tensorrt-llm")
 
 
 def test_get_runner_vllm_instantiates_without_vllm_installed() -> None:
@@ -136,3 +136,117 @@ def test_capture_reference_passes_dtype_name_to_runner(tmp_path: Path) -> None:
         "m", inputs, tmp_path / "ref", dtype=torch.bfloat16, runner=_FakeRunner()
     )
     assert recorded["dtype"] == "bfloat16"
+
+
+# --- SGLang runner (pure pieces; engine path needs GPU) ---------------------
+
+
+def test_get_runner_sglang_instantiates_without_sglang() -> None:
+    runner = get_runner("sglang")
+    assert runner.name == "sglang"
+
+
+def test_sglang_available() -> None:
+    assert "sglang" in available_runners()
+
+
+def test_sglang_runner_rejects_unknown_options() -> None:
+    from firefly.runners.sglang import _parse_options
+
+    with pytest.raises(ValueError, match="Unknown SGLang runner option"):
+        _parse_options({"bogus": "1"})
+
+
+def test_sglang_runner_rejects_non_llm_domain() -> None:
+    from firefly.runners.sglang import SGLangRunner
+
+    with pytest.raises(ValueError, match="only supports the 'llm' domain"):
+        SGLangRunner().capture("m", Path("in.json"), domain="recsys")
+
+
+def test_sglang_build_hook_specs_shape() -> None:
+    from firefly.runners.sglang import build_hook_specs
+
+    specs = build_hook_specs(n_layers=2, per_head=False, out_path="/tmp/x.pt")
+    names = [s["name"] for s in specs]
+    assert names == [
+        "layer.0.self_attn", "layer.0.mlp", "layer.0",
+        "layer.1.self_attn", "layer.1.mlp", "layer.1",
+        "final_norm",
+    ]
+    # Each spec targets exactly one module via an exact-match pattern.
+    assert all(len(s["target_modules"]) == 1 for s in specs)
+    assert specs[0]["target_modules"] == ["model.layers.0.self_attn"]
+    assert specs[-1]["target_modules"] == ["model.norm"]
+    # Only the terminal tap flushes.
+    assert specs[-1]["config"]["flush"] is True
+    assert all("flush" not in s["config"] for s in specs[:-1])
+    # The factory path is importable as written.
+    from firefly.runners._sglang_hooks import capture_hook_factory  # noqa: F401
+    assert all(s["hook_factory"].endswith("capture_hook_factory") for s in specs)
+
+
+def test_sglang_build_hook_specs_per_head_adds_o_proj_input_tap() -> None:
+    from firefly.runners.sglang import build_hook_specs
+
+    specs = build_hook_specs(n_layers=1, per_head=True, out_path="/tmp/x.pt")
+    by_name = {s["name"]: s for s in specs}
+    assert "layer.0.attn_heads" in by_name
+    head_spec = by_name["layer.0.attn_heads"]
+    assert head_spec["target_modules"] == ["model.layers.0.self_attn.o_proj"]
+    assert head_spec["config"]["capture_input"] is True
+
+
+def test_sglang_hook_factory_records_prefill_and_flushes(tmp_path: Path) -> None:
+    import torch
+
+    from firefly.runners import _sglang_hooks as H
+
+    H._reset()
+    out = tmp_path / "caps.pt"
+    # Two taps writing to the same accumulator; the second flushes.
+    h_attn = H.capture_hook_factory({"name": "layer.0.self_attn", "out_path": str(out)})
+    h_final = H.capture_hook_factory({"name": "final_norm", "out_path": str(out), "flush": True})
+
+    prefill = torch.randn(4, 8)   # token axis > 1
+    decode = torch.randn(1, 8)    # decode step — must be skipped
+
+    h_attn(None, (prefill,), prefill)
+    h_attn(None, (decode,), decode)        # skipped (leading dim 1)
+    h_final(None, (prefill,), prefill)     # records + flushes
+
+    saved = torch.load(out, weights_only=True)
+    assert set(saved) == {"layer.0.self_attn", "final_norm"}
+    assert saved["layer.0.self_attn"].shape == (4, 8)
+    H._reset()
+
+
+def test_sglang_hook_factory_capture_input(tmp_path: Path) -> None:
+    import torch
+
+    from firefly.runners import _sglang_hooks as H
+
+    H._reset()
+    out = tmp_path / "caps.pt"
+    h = H.capture_hook_factory(
+        {"name": "layer.0.attn_heads", "out_path": str(out), "capture_input": True, "flush": True}
+    )
+    x_in = torch.randn(4, 6)
+    y_out = torch.randn(4, 8)
+    h(None, (x_in,), y_out)
+    saved = torch.load(out, weights_only=True)
+    # capture_input => stored the INPUT (width 6), not the output (width 8).
+    assert saved["layer.0.attn_heads"].shape == (4, 6)
+    H._reset()
+
+
+def test_tap_order_key_forward_order() -> None:
+    from firefly.runners._common import tap_order_key
+
+    names = ["final_norm", "layer.10.mlp", "layer.2.self_attn", "layer.2.attn_heads",
+             "layer.2.mlp", "layer.2", "layer.1.self_attn"]
+    ordered = sorted(names, key=tap_order_key)
+    assert ordered == [
+        "layer.1.self_attn", "layer.2.self_attn", "layer.2.attn_heads",
+        "layer.2.mlp", "layer.2", "layer.10.mlp", "final_norm",
+    ]

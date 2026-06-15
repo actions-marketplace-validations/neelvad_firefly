@@ -36,6 +36,11 @@ azure = [
 vllm = [
     "vllm>=0.8.5",
 ]
+# In-process SGLang capture (`firefly check --runner sglang`). GPU-only;
+# needs a build with ServerArgs.forward_hooks. No upper pin.
+sglang = [
+    "sglang>=0.5",
+]
 
 [project.scripts]
 firefly = "firefly.cli:app"

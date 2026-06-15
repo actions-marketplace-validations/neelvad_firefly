@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from firefly.runners._common import tap_order_key as _tap_order_key
 from firefly.runners.base import CaptureResult
 
 # ---------------------------------------------------------------------------
@@ -231,30 +232,6 @@ def _v1_drain_captures(worker) -> bytes:
     return buf.getvalue()
 
 
-def _tap_order_key(name: str) -> tuple:
-    """Forward order: self_attn < attn_heads < mlp < layer, then final_norm;
-    within a tap, prefill before token_0..N."""
-    base, suffix = (name.rsplit("@", 1) + [""])[:2] if "@" in name else (name, "")
-    if suffix in ("", "prefill"):
-        suffix_key = 0
-    elif suffix.startswith("token_"):
-        try:
-            suffix_key = 1 + int(suffix[len("token_"):])
-        except ValueError:
-            suffix_key = 10**6
-    else:
-        suffix_key = 10**6
-
-    if base == "final_norm":
-        return (10**9, 0, suffix_key, name)
-    import re
-
-    m = re.match(r"layer\.(\d+)(?:\.(self_attn|attn_heads|mlp))?$", base)
-    if m:
-        layer_idx = int(m.group(1))
-        within = {"self_attn": 0, "attn_heads": 1, "mlp": 2, None: 3}[m.group(2)]
-        return (layer_idx, within, suffix_key, name)
-    return (10**9 - 1, 0, suffix_key, name)
 
 
 # ---------------------------------------------------------------------------

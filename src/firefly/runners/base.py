@@ -64,7 +64,7 @@ class Runner(Protocol):
 
 def available_runners() -> list[str]:
     """Runner names ``get_runner`` accepts."""
-    return ["hf", "vllm"]
+    return ["hf", "vllm", "sglang"]
 
 
 def get_runner(name: str) -> Runner:
@@ -77,6 +77,10 @@ def get_runner(name: str) -> Runner:
         from firefly.runners.vllm import VLLMRunner
 
         return VLLMRunner()
+    if name == "sglang":
+        from firefly.runners.sglang import SGLangRunner
+
+        return SGLangRunner()
     raise ValueError(
         f"Unknown runner {name!r}. Available: {available_runners()}"
     )
