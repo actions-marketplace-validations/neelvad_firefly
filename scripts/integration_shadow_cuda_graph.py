@@ -2,7 +2,7 @@
 
 The Spike (scripts/spike_cuda_graph.py) verifies the Triton kernel + CUDA
 graph capture/replay layer in isolation. This script wires the whole
-shadow.py stack together — StaticTapper + @tap_static decorator + drain
+firefly.shadow stack together — StaticTapper + @tap_static decorator + drain
 thread + LocalLogSink — and verifies the output JSONL contains the
 expected records after replays.
 

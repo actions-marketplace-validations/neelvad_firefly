@@ -1,4 +1,4 @@
-"""Tests for shadow-mode capture (src/firefly/shadow.py).
+"""Tests for shadow-mode capture (src/firefly/shadow/).
 
 Covers each of the six MVP layers:
 1. Custom op pass-through semantics

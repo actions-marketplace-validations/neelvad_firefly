@@ -207,7 +207,7 @@ the >1% threshold where real bugs live.
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
 | `quant_risk.py` | Simulated int8/int4 quantization risk from stored activations |
-| `shadow.py` | Shadow-mode capture: custom ops + Triton kernel that survive torch.compile and CUDA graphs |
+| `shadow/` | Shadow-mode capture package: custom ops + Triton kernel + Tappers + sinks that survive torch.compile and CUDA graphs |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
 | `cli.py` | `firefly capture / calibrate / check / quant-risk / publish` |
