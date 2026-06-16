@@ -82,7 +82,13 @@ from firefly.shadow.static import (
     _StaticDrainThread,
     tap_static,
 )
-from firefly.shadow.triton_stats import _STATS_KERNEL, _get_stats_kernel, _import_triton
+from firefly.shadow.triton_stats import (
+    MAX_BLOCKS,
+    REDUCE_BLOCK,
+    _get_kernels,
+    _import_triton,
+    reduction_grid,
+)
 
 __all__ = [
     "AzureSink",
@@ -90,6 +96,8 @@ __all__ = [
     "FullTensorPolicy",
     "GCSSink",
     "LocalLogSink",
+    "MAX_BLOCKS",
+    "REDUCE_BLOCK",
     "S3Sink",
     "SinkHandle",
     "StaticFullTensorPolicy",
@@ -101,7 +109,6 @@ __all__ = [
     "_Event",
     "_SHARD_FLUSH_EVERY_N",
     "_SHARD_FLUSH_EVERY_S",
-    "_STATS_KERNEL",
     "_StaticDrainThread",
     "_TLS",
     "_TapState",
@@ -113,12 +120,13 @@ __all__ = [
     "_capture_static_fake",
     "_firefly_eager_tap",
     "_firefly_static_tap",
-    "_get_stats_kernel",
+    "_get_kernels",
     "_import_triton",
     "_instrument_via_fx",
     "_instrument_via_named_modules",
     "_iter_jsonl_records",
     "_summary_stats",
+    "reduction_grid",
     "_wrap_forward_eager",
     "_wrap_forward_static",
     "aggregate",

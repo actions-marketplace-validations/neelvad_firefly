@@ -14,6 +14,7 @@ import torch
 from firefly.shadow.buffer import _Event
 from firefly.shadow.eager import _TLS, _TapperContextBase
 from firefly.shadow.sinks import make_sink
+from firefly.shadow.triton_stats import MAX_BLOCKS
 
 
 @dataclass
@@ -139,6 +140,12 @@ class StaticTapper(_TapperContextBase):
         # Alert flag: CPU toggles via :meth:`set_alert`, kernel reads each
         # call. Lives on GPU so it's accessible to the captured kernel.
         self.alert_flag = torch.zeros((1,), device=device, dtype=torch.int32)
+        # Two-phase reduction scratch (captured into the graph by pointer):
+        # ``partials`` holds one (sum, abs_sum, sum_sq, abs_max) row per phase-1
+        # program; ``decision`` carries (blob_slot, should_record) from the
+        # finalize kernel to the blob-copy kernel.
+        self.partials = torch.zeros((MAX_BLOCKS, 4), device=device, dtype=torch.float32)
+        self.decision = torch.zeros((2,), device=device, dtype=torch.int32)
 
         # (sink already constructed above; only the blob/stats GPU buffers
         # had to wait for the policy decision.)
@@ -311,20 +318,22 @@ def tap_static(idx: int, name: str | None = None):
             first_n = t.full_tensor_policy.first_n_steps
             every_n = t.full_tensor_policy.every_n_steps
             on_alert_enabled = 1 if t.full_tensor_policy.on_alert else 0
+
+            captured = out if isinstance(out, torch.Tensor) else (
+                out[0] if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor)
+                else None
+            )
+            if captured is None:
+                return out
+            tapped = torch.ops.firefly.capture_static(
+                captured, t.stats_buf, t.counter, idx,
+                t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                t.partials, t.decision,
+                first_n, every_n, on_alert_enabled,
+            )
             if isinstance(out, torch.Tensor):
-                return torch.ops.firefly.capture_static(
-                    out, t.stats_buf, t.counter, idx,
-                    t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
-                    first_n, every_n, on_alert_enabled,
-                )
-            if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
-                head = torch.ops.firefly.capture_static(
-                    out[0], t.stats_buf, t.counter, idx,
-                    t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
-                    first_n, every_n, on_alert_enabled,
-                )
-                return (head, *out[1:])
-            return out
+                return tapped
+            return (tapped, *out[1:])
 
         return wrapper
 

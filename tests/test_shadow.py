@@ -1093,6 +1093,73 @@ def test_tap_static_decorator_registers_name_lazily(tmp_path: Path, monkeypatch)
     assert tapper.index_to_name[42] == "layer.42.mlp"
 
 
+# ---------------------------------------------------------------------------
+# Two-phase reduction: grid bounding (CPU-pure) + kernel correctness (GPU).
+# ---------------------------------------------------------------------------
+
+
+def test_reduction_grid_is_bounded_and_covers() -> None:
+    """The fix for the single-block blow-up: the phase-1 grid is capped at
+    MAX_BLOCKS regardless of tensor size (excess handled by grid-stride), and
+    is the exact block count below that cap. Pure and CPU-testable."""
+    from firefly.shadow.triton_stats import (
+        MAX_BLOCKS,
+        REDUCE_BLOCK,
+        reduction_grid,
+    )
+
+    assert reduction_grid(0) == 1
+    assert reduction_grid(1) == 1
+    assert reduction_grid(REDUCE_BLOCK) == 1
+    assert reduction_grid(REDUCE_BLOCK + 1) == 2
+    # Below the cap: exact ceil-div block count.
+    assert reduction_grid(REDUCE_BLOCK * 100) == 100
+    # A 4M-element activation ([1,1024,4096]) — the case that crashed the old
+    # single-block kernel — is bounded to MAX_BLOCKS, not 4M.
+    assert reduction_grid(1 * 1024 * 4096) == MAX_BLOCKS
+    # Absurdly large stays capped.
+    assert reduction_grid(REDUCE_BLOCK * MAX_BLOCKS * 1000) == MAX_BLOCKS
+
+
+cuda_required = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Triton kernel execution requires CUDA"
+)
+
+
+@cuda_required
+def test_capture_static_reduction_matches_torch_on_large_tensor() -> None:
+    """GPU correctness for the two-phase reduction on a multi-block tensor —
+    the [1,1024,4096] case the single-block kernel couldn't compile. Runs on
+    Modal/GPU CI; skipped on CPU dev boxes."""
+    from firefly.shadow.triton_stats import MAX_BLOCKS
+
+    dev = "cuda"
+    x = torch.randn(1, 1024, 4096, device=dev)
+    stats_buf = torch.zeros((10, 5), device=dev, dtype=torch.float32)
+    counter = torch.zeros((1,), device=dev, dtype=torch.int32)
+    blob_buf = torch.zeros((1, 1), device=dev, dtype=torch.float32)
+    blob_meta = torch.zeros((1, 2), device=dev, dtype=torch.int32)
+    blob_counter = torch.zeros((1,), device=dev, dtype=torch.int32)
+    alert = torch.zeros((1,), device=dev, dtype=torch.int32)
+    partials = torch.zeros((MAX_BLOCKS, 4), device=dev, dtype=torch.float32)
+    decision = torch.zeros((2,), device=dev, dtype=torch.int32)
+
+    torch.ops.firefly.capture_static(
+        x, stats_buf, counter, 3, blob_buf, blob_meta, blob_counter, alert,
+        partials, decision, 0, 0, 0,
+    )
+    torch.cuda.synchronize()
+
+    row = stats_buf[0].cpu()
+    xf = x.float()
+    pop_std = ((xf - xf.mean()) ** 2).mean().sqrt()
+    assert row[0].item() == pytest.approx(xf.mean().item(), abs=1e-4)
+    assert row[1].item() == pytest.approx(xf.abs().mean().item(), abs=1e-4)
+    assert row[2].item() == pytest.approx(xf.abs().max().item(), rel=1e-5)
+    assert row[3].item() == pytest.approx(pop_std.item(), rel=1e-3)
+    assert int(counter.item()) == 1
+
+
 # Silence the re-import-of-shadow-via-firefly bookkeeping check: torch's
 # custom_op registry is global, so re-importing the module would attempt
 # to re-register the op and raise. Importing once at module scope (above)

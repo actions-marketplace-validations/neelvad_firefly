@@ -5,7 +5,13 @@ from __future__ import annotations
 import torch
 
 from firefly.shadow.eager import _active_tapper
-from firefly.shadow.triton_stats import _get_stats_kernel, _import_triton
+from firefly.shadow.triton_stats import (
+    MAX_BLOCKS,
+    REDUCE_BLOCK,
+    _get_kernels,
+    _import_triton,
+    reduction_grid,
+)
 
 
 @torch.library.custom_op("firefly::capture", mutates_args=())
@@ -34,7 +40,10 @@ capture.register_autograd(_capture_backward)
 
 @torch.library.custom_op(
     "firefly::capture_static",
-    mutates_args=("stats_buf", "counter", "blob_buf", "blob_meta", "blob_counter"),
+    mutates_args=(
+        "stats_buf", "counter", "blob_buf", "blob_meta", "blob_counter",
+        "partials", "decision",
+    ),
 )
 def capture_static(
     x: torch.Tensor,
@@ -45,6 +54,8 @@ def capture_static(
     blob_meta: torch.Tensor,
     blob_counter: torch.Tensor,
     alert_flag: torch.Tensor,
+    partials: torch.Tensor,
+    decision: torch.Tensor,
     first_n_steps: int,
     every_n_steps: int,
     on_alert_enabled: int,
@@ -57,24 +68,36 @@ def capture_static(
     of three policies fires: ``first_n_steps``, ``every_n_steps``, or
     ``on_alert_enabled & alert_flag[0]``. Returns ``x`` unchanged.
 
+    The reduction runs as a bounded, two-phase grid-stride kernel (see
+    :mod:`firefly.shadow.triton_stats`): ``partials`` is the per-program
+    scratch buffer and ``decision`` carries the blob slot from the finalize
+    kernel to the copy kernel. Both are pre-allocated by :class:`StaticTapper`.
+
     To opt out of full-tensor recording, pass 1x1 placeholder
-    ``blob_buf`` / ``blob_meta`` buffers and all three policy ints at 0;
-    the kernel runs but all blob writes are masked off. The
-    :class:`StaticTapper` handles this setup automatically.
+    ``blob_buf`` / ``blob_meta`` buffers and all three policy ints at 0; the
+    blob-copy kernel is skipped entirely. :class:`StaticTapper` handles this.
     """
-    triton, _ = _import_triton()
-    kernel = _get_stats_kernel()
+    _import_triton()
+    partial_reduce, finalize, blob_copy = _get_kernels()
     n = x.numel()
-    BLOCK = triton.next_power_of_2(n)
+    grid = reduction_grid(n)
     n_blob_slots = blob_buf.shape[0]
     max_blob_numel = blob_buf.shape[1]
-    kernel[(1,)](
-        x, stats_buf, counter, tap_idx,
-        blob_buf, blob_meta, blob_counter, alert_flag,
-        first_n_steps, every_n_steps, on_alert_enabled,
-        n_blob_slots, max_blob_numel,
-        n, BLOCK_SIZE=BLOCK,
+
+    # Phase 1: bounded grid-stride partial reductions.
+    partial_reduce[(grid,)](x, partials, n, BLOCK=REDUCE_BLOCK)
+    # Phase 2: single-block combine + stats-row + blob decision.
+    finalize[(1,)](
+        partials, grid, n,
+        stats_buf, counter, tap_idx,
+        blob_meta, blob_counter, alert_flag,
+        first_n_steps, every_n_steps, on_alert_enabled, n_blob_slots,
+        decision, MAXB=MAX_BLOCKS,
     )
+    # Phase 3: copy the full tensor into the chosen slot, only when this
+    # tapper records full tensors at all (real, non-placeholder blob buffer).
+    if max_blob_numel > 1:
+        blob_copy[(grid,)](x, blob_buf, decision, n, max_blob_numel, BLOCK=REDUCE_BLOCK)
     return x.clone()
 
 @capture_static.register_fake
@@ -87,6 +110,8 @@ def _capture_static_fake(
     blob_meta: torch.Tensor,
     blob_counter: torch.Tensor,
     alert_flag: torch.Tensor,
+    partials: torch.Tensor,
+    decision: torch.Tensor,
     first_n_steps: int,
     every_n_steps: int,
     on_alert_enabled: int,
