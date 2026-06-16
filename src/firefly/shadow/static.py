@@ -114,6 +114,11 @@ class StaticTapper(_TapperContextBase):
             "tap_index.json",
             json.dumps(self.index_to_name, indent=2, sort_keys=True),
         )
+        # Per-tap dtype/shape, recorded at capture time by ``tap_static`` (the
+        # Triton path casts to fp32 and can't report the source dtype/shape, so
+        # we capture it on the Python side where it's still known — and static
+        # under CUDA graphs, so a single observation per tap is exact).
+        self.tap_meta: dict[int, dict] = {}
 
         self.buffer_size = buffer_size
         self.drain_interval_s = drain_interval_s
@@ -182,6 +187,13 @@ class StaticTapper(_TapperContextBase):
             self._drain_thread.join(timeout=5.0)
         # Final drain pass to flush remaining captures.
         self._drain_once()
+        # Persist the per-tap dtype/shape observed during capture alongside
+        # the stats, so downstream tools can detect precision/shape drift.
+        if self.tap_meta:
+            self.sink.write_sidecar(
+                "tap_meta.json",
+                json.dumps(self.tap_meta, indent=2, sort_keys=True),
+            )
         self.sink.close()
 
     def _drain_once(self) -> int:
@@ -246,14 +258,17 @@ class StaticTapper(_TapperContextBase):
             tap_idx = int(row[4])
             global_idx = self._drained_count + offset
             tensor = blob_by_global_idx.get(global_idx)
+            meta = self.tap_meta.get(tap_idx, {})
             self.sink.write(
                 _Event(
                     request_id=None,
                     tap_name=self.index_to_name.get(tap_idx, f"tap_{tap_idx}"),
                     step=global_idx,
                     stats={
-                        "shape": [],          # not captured in CUDA-graph mode
-                        "dtype": "float32",
+                        # dtype/shape are the source activation's, recorded at
+                        # capture time (the kernel itself only sees fp32).
+                        "shape": meta.get("shape", []),
+                        "dtype": meta.get("dtype", "float32"),
                         "mean": row[0],
                         "abs_mean": row[1],
                         "abs_max": row[2],
@@ -325,6 +340,12 @@ def tap_static(idx: int, name: str | None = None):
             )
             if captured is None:
                 return out
+            # Record the source dtype/shape once (static across graph replays).
+            if idx not in t.tap_meta:
+                t.tap_meta[idx] = {
+                    "dtype": str(captured.dtype).replace("torch.", ""),
+                    "shape": list(captured.shape),
+                }
             tapped = torch.ops.firefly.capture_static(
                 captured, t.stats_buf, t.counter, idx,
                 t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,

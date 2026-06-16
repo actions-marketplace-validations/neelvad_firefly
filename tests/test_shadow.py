@@ -1121,6 +1121,44 @@ def test_reduction_grid_is_bounded_and_covers() -> None:
     assert reduction_grid(REDUCE_BLOCK * MAX_BLOCKS * 1000) == MAX_BLOCKS
 
 
+def test_static_drain_carries_source_dtype_and_shape(tmp_path: Path) -> None:
+    """Fix D: CUDA-graph mode reports the source activation's dtype/shape
+    (recorded at capture time), not the kernel's hardcoded fp32/[]. The drain
+    is pure Python over CPU tensors, so this is testable without a GPU."""
+    with shadow.StaticTapper(
+        tmp_path / "logs", {0: "layer.0.mlp"}, buffer_size=100,
+        drain_interval_s=0.01, device="cpu",
+    ) as t:
+        # Simulate what tap_static records at capture time.
+        t.tap_meta[0] = {"dtype": "bfloat16", "shape": [1, 8, 16]}
+        t.stats_buf[0] = torch.tensor([0.1, 0.2, 0.5, 0.05, 0.0])
+        t.counter[0] = 1
+        _wait_for_lines(tmp_path / "logs" / "stats.jsonl", expected=1)
+
+    record = json.loads((tmp_path / "logs" / "stats.jsonl").read_text().splitlines()[0])
+    assert record["stats"]["dtype"] == "bfloat16"
+    assert record["stats"]["shape"] == [1, 8, 16]
+    # And the metadata is persisted as a sidecar for downstream drift checks.
+    meta = json.loads((tmp_path / "logs" / "tap_meta.json").read_text())
+    assert meta["0"]["dtype"] == "bfloat16"
+
+
+def test_tap_static_records_dtype_shape(tmp_path: Path, monkeypatch) -> None:
+    """The decorator records the source dtype/shape on first call (op patched
+    to a no-op since real execution needs CUDA)."""
+
+    class M(nn.Module):
+        @shadow.tap_static(idx=3, name="t")
+        def forward(self, x):
+            return x * 2
+
+    tapper = shadow.StaticTapper(tmp_path / "logs", {}, device="cpu")
+    monkeypatch.setattr(torch.ops.firefly, "capture_static", lambda x, *a: x)
+    with tapper:
+        M()(torch.ones(4, 5))
+    assert tapper.tap_meta[3] == {"dtype": "float32", "shape": [4, 5]}
+
+
 cuda_required = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Triton kernel execution requires CUDA"
 )
