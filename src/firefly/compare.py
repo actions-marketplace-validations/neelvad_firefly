@@ -88,6 +88,21 @@ class TapDivergence:
     tolerance: TapTolerance
     exceeds_tolerance: bool
     effective_atol: float = 0.0  # the threshold actually applied (atol or rel-error ceiling)
+    ref_max_abs: float = 0.0  # max|ref| — lets reports normalize abs diff to relative
+    ref_mean_abs: float = 0.0  # mean|ref|
+
+    @property
+    def rel_mean(self) -> float:
+        """``mean_abs_diff / mean|ref|`` — scale-free divergence, the right axis
+        for ranking *which* tap a change (e.g. quantization) hurt most. Taps
+        with huge activations (outlier-feature layers) have huge absolute diffs
+        that say nothing about relative damage; this normalizes them."""
+        return self.mean_abs_diff / self.ref_mean_abs if self.ref_mean_abs else 0.0
+
+    @property
+    def rel_max(self) -> float:
+        """``max_abs_diff / max|ref|`` — relative worst-element divergence."""
+        return self.max_abs_diff / self.ref_max_abs if self.ref_max_abs else 0.0
 
 
 def diff_captures(
@@ -128,13 +143,15 @@ def diff_captures(
                 f"reference {tuple(ref_t.shape)} vs candidate {tuple(cand_t.shape)}"
             )
 
+        ref_abs = ref_t.float().abs()
+        ref_max = float(ref_abs.max().item())
+        ref_mean = float(ref_abs.mean().item())
         diff = (cand_t.float() - ref_t.float()).abs()
         max_d = float(diff.max().item())
         mean_d = float(diff.mean().item())
         tol = tolerances.get(tap_name, _default_tolerance())
         effective_atol = tol.atol
         if max_rel_error is not None and max_rel_error > 0:
-            ref_max = float(ref_t.float().abs().max().item())
             effective_atol = max(effective_atol, max_rel_error * ref_max)
         divergences.append(
             TapDivergence(
@@ -144,6 +161,8 @@ def diff_captures(
                 tolerance=tol,
                 exceeds_tolerance=max_d > effective_atol,
                 effective_atol=effective_atol,
+                ref_max_abs=ref_max,
+                ref_mean_abs=ref_mean,
             )
         )
 

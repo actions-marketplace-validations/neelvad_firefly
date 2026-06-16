@@ -90,6 +90,85 @@ def render_human(
     return console.export_text()
 
 
+def render_quant_diff(
+    result: AttributionResult,
+    scheme: str | None = None,
+    top_n: int = 15,
+    per_head: list[PerHeadAttribution] | None = None,
+    rel_threshold: float | None = None,
+    console: Console | None = None,
+) -> str:
+    """Magnitude-ranked divergence report for quantization diffs.
+
+    :func:`render_human` is tuned to find the *first* tap to exceed tolerance —
+    uninformative for quantization, which perturbs every tap from layer 0. This
+    ranks taps by *relative* divergence (``rel_mean``) so the layers a quant
+    scheme actually damaged most surface first, and reports the accumulated
+    divergence at the network output.
+    """
+    console = console or Console(record=True, width=100)
+    divs = result.divergences
+    if not divs:
+        console.print("[yellow]No taps to compare.[/]")
+        return console.export_text()
+
+    ranked = sorted(divs, key=lambda d: d.rel_mean, reverse=True)
+    worst = ranked[0]
+    output_tap = divs[-1]  # forward-order last tap ≈ the network output
+
+    title = "Firefly quantization diff" + (f" — {scheme}" if scheme else "")
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("#", justify="right")
+    table.add_column("Tap", no_wrap=True)
+    table.add_column("rel mean", justify="right")
+    table.add_column("rel max", justify="right")
+    table.add_column("mean |Δ|", justify="right")
+    for i, d in enumerate(ranked[:top_n], 1):
+        over = rel_threshold is not None and d.rel_mean > rel_threshold
+        style = "bold red" if d is worst else ("red" if over else None)
+        table.add_row(
+            str(i), d.tap_name,
+            f"{d.rel_mean:.2%}", f"{d.rel_max:.2%}", f"{d.mean_abs_diff:.3e}",
+            style=style,
+        )
+    console.print(table)
+    if len(ranked) > top_n:
+        console.print(
+            f"[dim]… {len(ranked) - top_n} more taps "
+            f"(showing top {top_n} by relative divergence)[/]"
+        )
+
+    console.print(
+        f"[bold]worst layer:[/] {worst.tap_name} "
+        f"({worst.rel_mean:.2%} mean relative divergence)"
+    )
+    console.print(
+        f"[bold]accumulated at output[/] ({output_tap.tap_name}): "
+        f"{output_tap.rel_mean:.2%}"
+    )
+
+    if per_head:
+        wh = max(per_head, key=lambda ph: ph.worst_max_abs_diff)
+        console.print(
+            f"[bold]worst head:[/] {wh.tap_name} head {wh.worst_head}/{wh.n_heads} "
+            f"({wh.concentration:.1f}× concentration)"
+        )
+
+    if rel_threshold is not None:
+        n_over = sum(1 for d in divs if d.rel_mean > rel_threshold)
+        if n_over:
+            console.print(
+                f"[bold red]{n_over} tap(s) exceed {rel_threshold:.1%} "
+                f"relative divergence.[/]"
+            )
+        else:
+            console.print(
+                f"[bold green]All taps within {rel_threshold:.1%} "
+                f"relative divergence.[/]"
+            )
+    return console.export_text()
+
+
 def write_json(
     result: AttributionResult,
     path: Path,

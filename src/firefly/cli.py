@@ -529,5 +529,103 @@ def quant_risk(
             raise typer.Exit(1)
 
 
+@app.command("quant-diff")
+def quant_diff(
+    reference: str = typer.Option(
+        ..., "--reference", "-r",
+        help="Reference artifact directory (the fp baseline to diff against).",
+    ),
+    inputs: Path = typer.Option(
+        ..., "--inputs", "-i", help="Same golden-inputs JSON used at capture time."
+    ),
+    candidate: str | None = typer.Option(
+        None, "--candidate", "-c",
+        help="Model to quantize and diff. Defaults to the reference's model_id "
+        "(quantization is a transform of the same model).",
+    ),
+    scheme: str = typer.Option(
+        "w8a8", "--scheme",
+        help="torchao quant scheme: w8a8 (int8 dynamic act + int8 weight) or "
+        "int4wo (int4 weight-only; needs CUDA).",
+    ),
+    group_size: int = typer.Option(32, "--group-size", help="int4wo group size."),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
+    seed: int = typer.Option(0, "--seed", help="Determinism seed."),
+    candidate_dtype: str | None = typer.Option(
+        None, "--candidate-dtype",
+        help="Base dtype to quantize from. Defaults to the reference's dtype, so "
+        "the only delta is the quantization (recommended).",
+    ),
+    top_n: int = typer.Option(15, "--top-n", help="How many worst taps to show."),
+    rel_threshold: float = typer.Option(
+        0.0, "--rel-threshold",
+        help="Exit non-zero if any tap's mean relative divergence exceeds this "
+        "(e.g. 0.05 = 5%). 0 = report only, always exit 0.",
+    ),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write the structured divergence report here."
+    ),
+) -> None:
+    """Diff a torchao-quantized model against its fp baseline, ranked by divergence.
+
+    Quantization is run as a candidate through the standard capture/compare
+    pipeline, then divergences are ranked by *relative* magnitude so the layers
+    the quant scheme damaged most surface first — with per-head attribution when
+    the reference has per-head taps. This measures (and attributes) what
+    quantization did; it does not predict it.
+    """
+    from firefly.attribution import attribute_first_divergence
+    from firefly.compare import compare_to_reference, compare_to_reference_per_head
+    from firefly.quant_validate import QUANT_SCHEMES
+    from firefly.reference import read_manifest
+    from firefly.report import render_quant_diff, write_json
+    from firefly.runners import get_runner
+
+    if scheme not in QUANT_SCHEMES:
+        raise typer.BadParameter(
+            f"--scheme must be one of {QUANT_SCHEMES}, got {scheme!r}",
+            param_hint="--scheme",
+        )
+
+    resolved_reference = _resolve_or_exit(reference)
+    manifest = read_manifest(resolved_reference)
+    candidate_id = candidate or manifest.model_id
+    options = {"quantize": scheme, "group_size": str(group_size)}
+    threshold = rel_threshold if rel_threshold > 0 else None
+
+    common = dict(
+        reference_dir=resolved_reference,
+        candidate_model_id=candidate_id,
+        inputs_path=inputs,
+        device=device,
+        seed=seed,
+        allow_fingerprint_mismatch=False,  # pre-quant fingerprint matches baseline
+        candidate_dtype=candidate_dtype,
+        runner=get_runner("hf"),
+        options=options,
+    )
+    try:
+        if manifest.head_counts:
+            divergences, per_head = compare_to_reference_per_head(**common)
+        else:
+            divergences, per_head = compare_to_reference(**common), []
+    except ImportError as e:  # torchao extra missing
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    result = attribute_first_divergence(divergences)
+    typer.echo(
+        render_quant_diff(
+            result, scheme=scheme, top_n=top_n, per_head=per_head,
+            rel_threshold=threshold,
+        )
+    )
+    if report_json is not None:
+        write_json(result, report_json, per_head=per_head)
+
+    if threshold is not None and any(d.rel_mean > threshold for d in divergences):
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

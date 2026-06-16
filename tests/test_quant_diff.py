@@ -61,6 +61,33 @@ def test_quant_candidate_diffs_against_fp_baseline(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+def test_quant_diff_cli_end_to_end(tmp_path: Path) -> None:
+    """`firefly capture` then `firefly quant-diff` through the CLI: the
+    magnitude-ranked report renders and the --rel-threshold gate trips."""
+    from typer.testing import CliRunner
+
+    from firefly.cli import app
+
+    inputs = _golden(tmp_path)
+    baseline = tmp_path / "baseline"
+    runner = CliRunner()
+
+    r1 = runner.invoke(app, ["capture", "--model", _MODEL, "--inputs", str(inputs), "--out", str(baseline)])
+    assert r1.exit_code == 0, r1.output
+
+    r2 = runner.invoke(
+        app,
+        ["quant-diff", "-r", str(baseline), "-i", str(inputs),
+         "--scheme", "w8a8", "--rel-threshold", "0.05"],
+    )
+    # W8A8 perturbs many taps past 5% → gate trips (exit 1).
+    assert r2.exit_code == 1, r2.output
+    assert "quantization diff" in r2.output.lower()
+    assert "worst layer" in r2.output
+    assert "accumulated at output" in r2.output
+
+
+@pytest.mark.slow
 def test_quant_candidate_is_deterministic(tmp_path: Path) -> None:
     """Two quant captures of the same model agree bit-for-bit, so any diff a
     user sees is the quantization, not run-to-run noise."""
