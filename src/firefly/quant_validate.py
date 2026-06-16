@@ -185,12 +185,23 @@ def _quant_config(scheme: str, group_size: int = 32):
     if scheme == "int4wo":
         try:
             from torchao.quantization import Int4WeightOnlyConfig
-
-            return Int4WeightOnlyConfig(group_size=group_size)
         except ImportError:  # older torchao API
             from torchao.quantization import int4_weight_only
 
             return int4_weight_only(group_size=group_size)
+        # torchao >= 0.x defaults int4 to the PLAIN packing format, which needs
+        # an external 'mslk' kernel lib not shipped in our images. The
+        # tile_packed_to_4d format uses the built-in tinygemm kernels and is the
+        # only int4 config that runs cleanly on our GPUs (verified by
+        # scripts/probe_int4_torchao.py on A10G, torchao 0.17). Pass the format
+        # as a string so we don't depend on the enum's import path; fall back
+        # for older torchao that lacks the kwarg.
+        try:
+            return Int4WeightOnlyConfig(
+                group_size=group_size, int4_packing_format="tile_packed_to_4d"
+            )
+        except TypeError:
+            return Int4WeightOnlyConfig(group_size=group_size)
     raise ValueError(f"unknown quant scheme {scheme!r}; choose from {QUANT_SCHEMES}")
 
 
