@@ -81,7 +81,9 @@ def capture(
         [],
         "--runner-opt",
         help=(
-            "Engine-specific knob as key=value (repeatable). vLLM: "
+            "Engine-specific knob as key=value (repeatable). HF: "
+            "quantize (w8a8/int4wo — apply real torchao quant, needs "
+            "firefly[torchao]), group_size (int4 only). vLLM: "
             "attention_backend, engine (v0/v1), max_seq_len, "
             "gpu_memory_utilization, capture_decode, speculative_tokens. "
             "E.g. --runner-opt attention_backend=FLASH_ATTN."
@@ -317,7 +319,9 @@ def check(
         "--runner-opt",
         help=(
             "Engine-specific knob as key=value (repeatable); see "
-            "`firefly capture --help`. E.g. --runner-opt attention_backend=XFORMERS."
+            "`firefly capture --help`. E.g. --runner-opt attention_backend=XFORMERS, "
+            "or --runner-opt quantize=w8a8 to diff a torchao-quantized model "
+            "against an fp baseline."
         ),
     ),
     max_rel_error: float = typer.Option(

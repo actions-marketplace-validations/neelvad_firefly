@@ -46,6 +46,25 @@ class HFRunner:
         model, tokenizer = load_model_and_tokenizer(
             model_id, device=device, dtype=torch_dtype
         )
+
+        # Fingerprint the model BEFORE any quantization. Quantization is a
+        # transform of the *same* model, not a different one — so a quant
+        # candidate should still match its fp baseline's fingerprint (the diff
+        # we go on to measure is the quantization itself, not a model swap). A
+        # genuinely different candidate still mismatches and is caught upstream.
+        fingerprint = fingerprint_model(model)
+
+        # ``quantize=<scheme>`` (HF runner only) applies real torchao quant in
+        # place after load — turning quantization into a candidate in the
+        # standard capture/compare/attribute pipeline. ``group_size`` (int4
+        # only) defaults to 32 to tolerate non-128-divisible weight dims.
+        scheme = (options or {}).get("quantize")
+        if scheme:
+            from firefly.quant_validate import quantize_model
+
+            group_size = int((options or {}).get("group_size", 32))
+            quantize_model(model, scheme=scheme, group_size=group_size)
+
         batch = load_golden_inputs(inputs_path, tokenizer, device)
         captured = run_capture(model, batch, domain=domain, per_head=per_head)
 
@@ -59,7 +78,7 @@ class HFRunner:
 
         return CaptureResult(
             tensors=captured,
-            fingerprint=fingerprint_model(model),
+            fingerprint=fingerprint,
             head_counts=head_counts,
             env=capture_env(),
             dtype=dtype_to_name(torch_dtype),
