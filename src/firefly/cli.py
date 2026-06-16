@@ -550,7 +550,11 @@ def quant_diff(
     """
     from firefly.attribution import attribute_first_divergence
     from firefly.compare import compare_to_reference, compare_to_reference_per_head
-    from firefly.quant_validate import QUANT_SCHEMES
+    from firefly.quant_validate import (
+        QUANT_SCHEMES,
+        QuantCompatibilityError,
+        quant_preflight,
+    )
     from firefly.reference import read_manifest
     from firefly.report import render_quant_diff, write_json
     from firefly.runners import get_runner
@@ -560,6 +564,12 @@ def quant_diff(
             f"--scheme must be one of {QUANT_SCHEMES}, got {scheme!r}",
             param_hint="--scheme",
         )
+    # Fast-fail known-incompatible combos (e.g. int4wo on CPU) before the load.
+    try:
+        quant_preflight(scheme, device)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
 
     resolved_reference = _resolve_or_exit(reference)
     manifest = read_manifest(resolved_reference)
@@ -583,7 +593,7 @@ def quant_diff(
             divergences, per_head = compare_to_reference_per_head(**common)
         else:
             divergences, per_head = compare_to_reference(**common), []
-    except ImportError as e:  # torchao extra missing
+    except (ImportError, QuantCompatibilityError) as e:  # missing extra / bad config
         typer.echo(str(e), err=True)
         raise typer.Exit(2) from e
 

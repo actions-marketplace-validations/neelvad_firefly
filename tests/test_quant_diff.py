@@ -33,6 +33,47 @@ def _golden(tmp_path: Path) -> Path:
     return p
 
 
+def test_quant_preflight_rejects_int4_on_cpu() -> None:
+    from firefly.quant_validate import QuantCompatibilityError, quant_preflight
+
+    with pytest.raises(QuantCompatibilityError, match="CUDA"):
+        quant_preflight("int4wo", "cpu")
+
+
+def test_quant_preflight_allows_valid_combos() -> None:
+    from firefly.quant_validate import quant_preflight
+
+    quant_preflight("w8a8", "cpu")  # CPU is fine for w8a8
+    quant_preflight("int4wo", "cuda")  # int4 on GPU is fine
+    quant_preflight("int4wo", "cuda:0")  # device index variant
+
+
+def test_translate_quant_error_recognizes_mslk() -> None:
+    from firefly.quant_validate import QuantCompatibilityError, _translate_quant_error
+
+    translated = _translate_quant_error("int4wo", ImportError("Requires mslk >= 1.0.0"))
+    assert isinstance(translated, QuantCompatibilityError)
+    assert "mslk" in str(translated) and "w8a8" in str(translated)
+    # Unrecognized errors pass through (never mask a genuine bug behind a guess).
+    assert _translate_quant_error("w8a8", RuntimeError("kernel exploded")) is None
+
+
+def test_quant_diff_cli_rejects_int4_on_cpu(tmp_path: Path) -> None:
+    """Preflight short-circuits before any model load, so this is fast — no
+    reference/inputs need to exist for the incompatible-config message."""
+    from typer.testing import CliRunner
+
+    from firefly.cli import app
+
+    r = CliRunner().invoke(
+        app,
+        ["quant-diff", "-r", str(tmp_path / "nope"), "-i", str(tmp_path / "nope.json"),
+         "--scheme", "int4wo", "--device", "cpu"],
+    )
+    assert r.exit_code == 2, r.output
+    assert "cuda" in r.output.lower()
+
+
 @pytest.mark.slow
 def test_quant_candidate_diffs_against_fp_baseline(tmp_path: Path) -> None:
     inputs = _golden(tmp_path)

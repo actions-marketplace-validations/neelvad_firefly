@@ -124,6 +124,51 @@ class TorchaoValidationResult:
 QUANT_SCHEMES = ("w8a8", "int4wo")
 
 
+class QuantCompatibilityError(RuntimeError):
+    """A model/scheme/device combination torchao can't quantize cleanly.
+
+    Raised with actionable guidance instead of letting torchao's lower-level
+    (often cryptic) errors surface raw — e.g. int4 on CPU, a missing int4
+    kernel library, or a group_size that doesn't divide a weight dimension.
+    """
+
+
+def quant_preflight(scheme: str, device: str) -> None:
+    """Cheap static checks before loading the model, so known-incompatible
+    combinations fail fast with guidance rather than after a long download +
+    load. Does not import torchao. Raises :class:`QuantCompatibilityError`."""
+    if scheme not in QUANT_SCHEMES:
+        raise QuantCompatibilityError(
+            f"unknown quant scheme {scheme!r}; choose from {QUANT_SCHEMES}"
+        )
+    if scheme == "int4wo" and not str(device).startswith("cuda"):
+        raise QuantCompatibilityError(
+            "int4 weight-only (int4wo) needs a CUDA GPU — torchao's int4 kernels "
+            "aren't available on CPU. Re-run with --device cuda, or use "
+            "--scheme w8a8 (which runs on CPU)."
+        )
+
+
+def _translate_quant_error(scheme: str, exc: Exception) -> QuantCompatibilityError | None:
+    """Map a known torchao quantization failure to actionable guidance.
+
+    Returns ``None`` for unrecognized errors (the caller re-raises the
+    original, so we never swallow a genuine bug behind a guess)."""
+    low = str(exc).lower()
+    if "mslk" in low:
+        return QuantCompatibilityError(
+            f"torchao's {scheme} path needs the 'mslk' int4 kernel library, which "
+            f"isn't available in this environment ({str(exc).strip()}). Install it "
+            f"on the GPU image, or use --scheme w8a8."
+        )
+    if "divisible" in low or "group_size" in low or "group size" in low:
+        return QuantCompatibilityError(
+            f"{scheme}: the group_size doesn't divide a weight dimension "
+            f"({str(exc).strip()}). Try a smaller --group-size (e.g. 16)."
+        )
+    return None
+
+
 def _quant_config(scheme: str, group_size: int = 32):
     """Build the torchao config for ``scheme``, handling API churn across
     torchao versions. ``group_size`` only applies to ``int4wo`` (smaller groups
@@ -162,7 +207,13 @@ def quantize_model(model: nn.Module, scheme: str = "w8a8", group_size: int = 32)
             "Install it with: uv pip install 'firefly[torchao]'"
         ) from e
 
-    quantize_(model, _quant_config(scheme, group_size=group_size))
+    try:
+        quantize_(model, _quant_config(scheme, group_size=group_size))
+    except Exception as e:  # translate known torchao failures; re-raise the rest
+        translated = _translate_quant_error(scheme, e)
+        if translated is not None:
+            raise translated from e
+        raise
     return model
 
 
