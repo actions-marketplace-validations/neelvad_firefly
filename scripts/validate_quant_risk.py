@@ -34,7 +34,7 @@ from firefly.capture import load_golden_inputs, load_model_and_tokenizer, run_ca
 from firefly.determinism import set_deterministic
 from firefly.quant_risk import analyze_quant_risk
 from firefly.quant_validate import (
-    quantize_w8a8,
+    quantize_model,
     rel_l1,
     spearman,
     validate_against_torchao,
@@ -57,7 +57,7 @@ def _naive_contrast(model_id: str, device: str, bits: int) -> None:
 
     set_deterministic()
     q_model, _ = load_model_and_tokenizer(model_id, device=device, dtype=torch.float32)
-    quantize_w8a8(q_model)
+    quantize_model(q_model)
     q_caps = run_capture(q_model, batch)
 
     pred = [risks[t].per_tensor_rel_err for t in taps]

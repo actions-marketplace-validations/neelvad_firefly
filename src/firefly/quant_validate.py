@@ -85,10 +85,11 @@ class LinearRisk:
 
 @dataclass
 class TorchaoValidationResult:
-    """Outcome of confronting quant-risk with real torchao W8A8 kernels."""
+    """Outcome of confronting quant-risk with real torchao kernels."""
 
     model_id: str
     bits: int
+    scheme: str = "w8a8"
     records: list[LinearRisk] = field(default_factory=list)
 
     @property
@@ -122,8 +123,42 @@ class TorchaoValidationResult:
         return self.best_spearman > PASS_THRESHOLD
 
 
-def quantize_w8a8(model: nn.Module) -> nn.Module:
-    """Apply real int8 dynamic-activation + int8-weight quant in place.
+#: Quant schemes we validate against. ``w8a8`` quantizes *activations*
+#: (per-token int8) + weights (per-channel int8) — the scheme quant-risk's
+#: activation analysis is designed to predict. ``int4wo`` is int4 weight-only
+#: (W4A16): activations stay in fp, only weights are quantized. quant-risk
+#: looks at activations, so it is *expected* not to predict int4wo — running it
+#: maps the tool's boundary, it isn't a target we expect to hit.
+QUANT_SCHEMES = ("w8a8", "int4wo")
+
+
+def _quant_config(scheme: str, group_size: int = 32):
+    """Build the torchao config for ``scheme``, handling API churn across
+    torchao versions. ``group_size`` only applies to ``int4wo`` (smaller groups
+    tolerate weight dims that aren't multiples of 128, e.g. SmolLM's 576)."""
+    if scheme == "w8a8":
+        try:
+            from torchao.quantization import Int8DynamicActivationInt8WeightConfig
+
+            return Int8DynamicActivationInt8WeightConfig()
+        except ImportError:  # older torchao API
+            from torchao.quantization import int8_dynamic_activation_int8_weight
+
+            return int8_dynamic_activation_int8_weight()
+    if scheme == "int4wo":
+        try:
+            from torchao.quantization import Int4WeightOnlyConfig
+
+            return Int4WeightOnlyConfig(group_size=group_size)
+        except ImportError:  # older torchao API
+            from torchao.quantization import int4_weight_only
+
+            return int4_weight_only(group_size=group_size)
+    raise ValueError(f"unknown quant scheme {scheme!r}; choose from {QUANT_SCHEMES}")
+
+
+def quantize_model(model: nn.Module, scheme: str = "w8a8", group_size: int = 32) -> nn.Module:
+    """Apply real torchao quantization (``scheme``) in place.
 
     Raises a clear error if the optional ``torchao`` extra is not installed.
     """
@@ -135,15 +170,7 @@ def quantize_w8a8(model: nn.Module) -> nn.Module:
             "Install it with: uv pip install 'firefly[torchao]'"
         ) from e
 
-    try:
-        from torchao.quantization import Int8DynamicActivationInt8WeightConfig
-
-        cfg = Int8DynamicActivationInt8WeightConfig()
-    except ImportError:  # older torchao API
-        from torchao.quantization import int8_dynamic_activation_int8_weight
-
-        cfg = int8_dynamic_activation_int8_weight()
-    quantize_(model, cfg)
+    quantize_(model, _quant_config(scheme, group_size=group_size))
     return model
 
 
@@ -191,12 +218,15 @@ def validate_against_torchao(
     prompt: str = _DEFAULT_PROMPT,
     max_length: int = 16,
     dtype: torch.dtype = torch.float32,
+    scheme: str = "w8a8",
+    group_size: int = 32,
 ) -> TorchaoValidationResult:
     """Run the local confrontation and return per-Linear predictions vs reality.
 
-    Loads two copies of ``model_id`` (one stays fp, one is torchao-quantized),
-    captures each Linear's fp input, and measures the local output error of the
-    real int8 Linear on that input. Deterministic on CPU.
+    Loads two copies of ``model_id`` (one stays fp, one is torchao-quantized
+    with ``scheme``), captures each Linear's fp input, and measures the local
+    output error of the real quantized Linear on that input. Deterministic on
+    CPU; ``int4wo`` needs CUDA.
     """
     set_deterministic()
     fp_model, tok = load_model_and_tokenizer(model_id, device=device, dtype=dtype)
@@ -206,7 +236,7 @@ def validate_against_torchao(
 
     set_deterministic()
     q_model, _ = load_model_and_tokenizer(model_id, device=device, dtype=dtype)
-    quantize_w8a8(q_model)
+    quantize_model(q_model, scheme=scheme, group_size=group_size)
     q_linears = {n: m for n, m in q_model.named_modules() if isinstance(m, nn.Linear)}
 
     records: list[LinearRisk] = []
@@ -226,4 +256,6 @@ def validate_against_torchao(
                 actual_local_err=rel_l1(y_fp, y_q),
             )
         )
-    return TorchaoValidationResult(model_id=model_id, bits=bits, records=records)
+    return TorchaoValidationResult(
+        model_id=model_id, bits=bits, scheme=scheme, records=records
+    )

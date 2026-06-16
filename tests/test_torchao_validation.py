@@ -18,6 +18,18 @@ pytest.importorskip("torchao", reason="quant-risk validation needs the torchao e
 from firefly.quant_validate import PASS_THRESHOLD, validate_against_torchao
 
 
+def test_quant_config_selects_scheme() -> None:
+    """Scheme selection is CPU-fast (builds a config object, no quantization).
+    Guards the W8A8 / int4-weight-only fork the breadth sweep relies on."""
+    from firefly.quant_validate import QUANT_SCHEMES, _quant_config
+
+    assert set(QUANT_SCHEMES) == {"w8a8", "int4wo"}
+    assert _quant_config("w8a8") is not None
+    assert _quant_config("int4wo", group_size=32) is not None
+    with pytest.raises(ValueError, match="unknown quant scheme"):
+        _quant_config("bogus")
+
+
 @pytest.mark.slow
 def test_quant_risk_ranking_validates_against_real_torchao() -> None:
     result = validate_against_torchao("HuggingFaceTB/SmolLM-135M", device="cpu")
