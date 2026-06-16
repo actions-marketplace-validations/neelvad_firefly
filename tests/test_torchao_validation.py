@@ -1,9 +1,10 @@
-"""Slow regression guard for the quant-risk → real-torchao claim.
+"""Smoke test for the torchao quant *measurement* utilities.
 
-`firefly.quant_validate` confronts quant-risk's *simulated* int8 prediction
-with real torchao W8A8 kernels. The product claim is that quant-risk's
-per-input ranking predicts where real int8 quantization hurts locally; this
-test pins that claim so it can't silently rot.
+`firefly.quant_validate` quantizes a model with real torchao kernels and
+measures the per-Linear local divergence. The breadth sweep uses it as a
+measurement tool. (The earlier "quant-risk predicts where int8 hurts" claim was
+falsified by the breadth sweep — these utilities no longer assert a verdict, so
+this no longer pins a PASS threshold.)
 
 Marked ``slow``: it downloads SmolLM-135M and needs the optional ``torchao``
 extra. Run with ``pytest -m slow``.
@@ -15,7 +16,7 @@ import pytest
 
 pytest.importorskip("torchao", reason="quant-risk validation needs the torchao extra")
 
-from firefly.quant_validate import PASS_THRESHOLD, validate_against_torchao
+from firefly.quant_validate import validate_against_torchao
 
 
 def test_quant_config_selects_scheme() -> None:
@@ -31,18 +32,14 @@ def test_quant_config_selects_scheme() -> None:
 
 
 @pytest.mark.slow
-def test_quant_risk_ranking_validates_against_real_torchao() -> None:
+def test_validate_against_torchao_measures_local_divergence() -> None:
     result = validate_against_torchao("HuggingFaceTB/SmolLM-135M", device="cpu")
 
-    # A representative sample of Linears, all with a measured local error.
+    # A representative sample of Linears, each with a measured local error.
     assert len(result.records) > 100
     assert all(r.actual_local_err >= 0.0 for r in result.records)
 
-    # The load-bearing claim: per-input prediction ranks real torchao pain.
-    assert result.spearman_concentration > PASS_THRESHOLD
-    assert result.passed
-
-    # The mechanism: the worst real-divergence layer is an outlier-feature
-    # layer (high channel concentration), not a flat one.
-    worst = max(result.records, key=lambda r: r.actual_local_err)
-    assert worst.channel_concentration > 5.0
+    # The rank-correlation measurements are well-formed (in [-1, 1]); we do NOT
+    # assert they clear any threshold — that was the falsified claim.
+    assert -1.0 <= result.spearman_concentration <= 1.0
+    assert -1.0 <= result.spearman_per_tensor <= 1.0

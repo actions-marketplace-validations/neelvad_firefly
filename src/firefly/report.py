@@ -19,7 +19,6 @@ from firefly.attribution import AttributionResult
 if TYPE_CHECKING:
     from firefly.head_attribution import PerHeadAttribution
     from firefly.quant_risk import TapQuantRisk
-    from firefly.quant_validate import TorchaoValidationResult
 
 
 def render_human(
@@ -248,70 +247,6 @@ def render_quant_risk(
             f"simulated int{bits} error.[/]"
         )
 
-    return console.export_text()
-
-
-def render_torchao_validation(
-    result: TorchaoValidationResult,
-    top_n: int = 12,
-    console: Console | None = None,
-) -> str:
-    """Render the torchao-validation verdict: Spearman correlations + top layers.
-
-    Confirms (or refutes) that quant-risk's per-input prediction ranks the
-    Linear layers where real torchao W8A8 actually diverges most.
-    """
-    from firefly.quant_validate import PASS_THRESHOLD
-
-    console = console or Console(record=True, width=120)
-
-    table = Table(
-        title=f"Firefly quant-risk validation vs real torchao W8A8 (int{result.bits})",
-        show_header=True,
-        header_style="bold",
-    )
-    table.add_column("Predictor (on Linear input)", no_wrap=True)
-    table.add_column("Spearman vs local torchao err", justify="right")
-    for label, rho in (
-        ("channel concentration", result.spearman_concentration),
-        ("per-tensor err", result.spearman_per_tensor),
-        ("mitigation gain", result.spearman_mitigation_gain),
-    ):
-        strong = rho > PASS_THRESHOLD
-        table.add_row(label, f"[{'green' if strong else 'yellow'}]{rho:+.3f}[/]")
-    console.print(table)
-
-    top = sorted(result.records, key=lambda r: r.actual_local_err, reverse=True)[:top_n]
-    detail = Table(
-        title=f"Top {len(top)} layers by ACTUAL local torchao divergence",
-        show_header=True,
-        header_style="bold",
-    )
-    detail.add_column("Linear", no_wrap=True)
-    detail.add_column("channel conc.", justify="right")
-    detail.add_column("pred per-tensor err", justify="right")
-    detail.add_column("actual local err", justify="right")
-    for r in top:
-        detail.add_row(
-            r.name,
-            f"{r.channel_concentration:.1f}×",
-            f"{r.per_tensor_rel_err:.1%}",
-            f"{r.actual_local_err:.2%}",
-        )
-    console.print(detail)
-
-    if result.passed:
-        console.print(
-            f"[bold green]PASS[/] ({len(result.records)} Linears): quant-risk's per-input "
-            f"ranking predicts where real int{result.bits} W8A8 hurts locally "
-            f"(best Spearman {result.best_spearman:+.3f} > {PASS_THRESHOLD:.2f})."
-        )
-    else:
-        console.print(
-            f"[bold red]WEAK[/] ({len(result.records)} Linears): quant-risk's ranking does "
-            f"NOT clearly predict real int{result.bits} W8A8 divergence "
-            f"(best Spearman {result.best_spearman:+.3f} ≤ {PASS_THRESHOLD:.2f})."
-        )
     return console.export_text()
 
 

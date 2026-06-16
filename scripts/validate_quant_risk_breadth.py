@@ -64,14 +64,14 @@ SCHEMES = ["w8a8", "int4wo"]
 def sweep() -> dict:
     import torch
 
-    from firefly.quant_validate import (
-        PASS_THRESHOLD,
-        spearman,
-        validate_against_torchao,
-    )
+    from firefly.quant_validate import spearman, validate_against_torchao
+
+    # Descriptive threshold for "a strong rank correlation" in this research
+    # sweep — NOT a product gate (the predictor was falsified; see the reframe).
+    STRONG_RHO = 0.5
 
     print(f"torch: {torch.__version__}  device: {torch.cuda.get_device_name(0)}")
-    print(f"PASS_THRESHOLD={PASS_THRESHOLD}")
+    print(f"STRONG_RHO={STRONG_RHO}")
     print()
 
     def analyze(result) -> dict:
@@ -87,7 +87,7 @@ def sweep() -> dict:
             "rho_concentration": round(result.spearman_concentration, 3),
             "rho_per_tensor": round(result.spearman_per_tensor, 3),
             "rho_concentration_no_downproj": round(rho_no_dp, 3),
-            "passed": result.passed,
+            "strong": result.spearman_concentration > STRONG_RHO,
             "worst_layer": worst.name if worst else None,
             "worst_layer_err": round(worst.actual_local_err, 4) if worst else None,
             "worst_layer_conc": round(worst.channel_concentration, 1) if worst else None,
@@ -123,7 +123,7 @@ def sweep() -> dict:
     int4wo_rhos = {m: rho(m, "int4wo") for m in MODELS}
 
     w8a8_vals = [v for v in w8a8_rhos.values() if v is not None]
-    w8a8_generalizes = bool(w8a8_vals) and all(v > PASS_THRESHOLD for v in w8a8_vals)
+    w8a8_generalizes = bool(w8a8_vals) and all(v > STRONG_RHO for v in w8a8_vals)
     # Boundary: where both ran, W8A8 should clearly out-predict int4 weight-only.
     gaps = [
         w8a8_rhos[m] - int4wo_rhos[m]
@@ -142,7 +142,7 @@ def sweep() -> dict:
 
     print()
     print("=" * 64)
-    print(f"W8A8 generalizes (all rho > {PASS_THRESHOLD}): {w8a8_generalizes}")
+    print(f"W8A8 generalizes (all rho > {STRONG_RHO}): {w8a8_generalizes}")
     print(f"  by model: {w8a8_rhos}")
     print(f"int4wo boundary confirmed (W8A8 >> int4wo): {boundary_confirmed}")
     print(f"  int4wo by model: {int4wo_rhos}")

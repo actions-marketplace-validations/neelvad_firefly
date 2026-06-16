@@ -36,10 +36,6 @@ from firefly.capture import load_model_and_tokenizer
 from firefly.determinism import set_deterministic
 from firefly.quant_risk import tap_quant_risk
 
-#: Spearman above which we call quant-risk's ranking validated. 0.5 is a
-#: deliberately modest bar — a clear positive rank correlation, not a fit.
-PASS_THRESHOLD = 0.5
-
 _DEFAULT_PROMPT = "the quick brown fox jumps over the lazy dog"
 
 
@@ -85,7 +81,12 @@ class LinearRisk:
 
 @dataclass
 class TorchaoValidationResult:
-    """Outcome of confronting quant-risk with real torchao kernels."""
+    """Per-Linear measurement of real torchao quant divergence + how well the
+    quant-risk proxies rank it. These are *measurements*, not a pass/fail
+    verdict: the breadth sweep showed the proxies don't reliably rank divergence
+    across model families, so this no longer carries a "validated" gate. The
+    product surface for measuring real quant divergence is ``firefly quant-diff``.
+    """
 
     model_id: str
     bits: int
@@ -112,15 +113,6 @@ class TorchaoValidationResult:
             [r.mitigation_gain for r in self.records],
             [r.actual_local_err for r in self.records],
         )
-
-    @property
-    def best_spearman(self) -> float:
-        """The strongest predictor — what the PASS/WEAK verdict keys on."""
-        return max(self.spearman_concentration, self.spearman_per_tensor)
-
-    @property
-    def passed(self) -> bool:
-        return self.best_spearman > PASS_THRESHOLD
 
 
 #: Quant schemes we validate against. ``w8a8`` quantizes *activations*
