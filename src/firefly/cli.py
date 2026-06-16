@@ -461,6 +461,19 @@ def quant_risk(
     report_json: Path | None = typer.Option(
         None, "--report-json", help="Write the structured per-tap report to this path."
     ),
+    validate: bool = typer.Option(
+        False,
+        "--validate",
+        help=(
+            "Confront the prediction with REAL torchao W8A8 kernels: reload the "
+            "reference's model, quantize it, and check whether quant-risk's "
+            "per-input ranking predicts where int8 actually diverges. Requires "
+            "the 'torchao' extra. Exits non-zero if the correlation is weak."
+        ),
+    ),
+    device: str = typer.Option(
+        "cpu", "--device", help="Device for --validate's model run (cpu/cuda)."
+    ),
 ) -> None:
     """Predict which layers will degrade under quantization, from stored activations.
 
@@ -468,6 +481,9 @@ def quant_risk(
     activation (per-tensor and per-channel) and reports the taps where
     per-tensor quantization breaks down — typically outlier-feature layers
     whose few extreme channels force a scale that crushes the rest.
+
+    With ``--validate``, additionally confronts that prediction with real
+    torchao W8A8 kernels and exits non-zero if the ranking doesn't hold up.
     """
     import json
     from dataclasses import asdict
@@ -492,6 +508,21 @@ def quant_risk(
         with report_json.open("w") as f:
             json.dump(payload, f, indent=2)
         typer.echo(f"Wrote quant-risk report to {report_json}")
+
+    if validate:
+        from firefly.quant_validate import validate_against_torchao
+        from firefly.report import render_torchao_validation
+
+        try:
+            result = validate_against_torchao(
+                manifest.model_id, device=device, bits=bits
+            )
+        except ImportError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(2) from e
+        typer.echo(render_torchao_validation(result))
+        if not result.passed:
+            raise typer.Exit(1)
 
 
 if __name__ == "__main__":
