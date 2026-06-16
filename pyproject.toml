@@ -41,6 +41,11 @@ vllm = [
 sglang = [
     "sglang>=0.5",
 ]
+# Validating quant-risk predictions against real quantized kernels
+# (scripts/validate_quant_risk.py).
+torchao = [
+    "torchao>=0.7",
+]
 
 [project.scripts]
 firefly = "firefly.cli:app"

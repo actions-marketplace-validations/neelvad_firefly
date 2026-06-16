@@ -1274,7 +1274,7 @@ wheels = [
 
 [[package]]
 name = "firefly"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
@@ -1303,6 +1303,9 @@ s3 = [
 ]
 sglang = [
     { name = "sglang" },
+]
+torchao = [
+    { name = "torchao" },
 ]
 vllm = [
     { name = "vllm" },
@@ -1333,11 +1336,12 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.4" },
     { name = "sglang", marker = "extra == 'sglang'", specifier = ">=0.5" },
     { name = "torch", specifier = ">=2.3", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torchao", marker = "extra == 'torchao'", specifier = ">=0.7" },
     { name = "transformers", specifier = ">=4.40" },
     { name = "typer", specifier = ">=0.12" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.8.5" },
 ]
-provides-extras = ["dev", "s3", "gcs", "azure", "vllm", "sglang"]
+provides-extras = ["dev", "s3", "gcs", "azure", "vllm", "sglang", "torchao"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -5536,6 +5540,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/20/62/11c05b99f69aa5152bca0313e0dfa6d125a020cf890dc888ef009aa7891c/torch_c_dlpack_ext-0.1.5-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3a58fdf45fb0bda7bc459632cec891570f31c11636d5851c825cf308ec8b73c2", size = 163825, upload-time = "2026-01-12T11:24:59.474Z" },
     { url = "https://files.pythonhosted.org/packages/15/b5/be613cd8e71c9982bd07af530f86c5a7f30df7831d14cec5414857af7149/torch_c_dlpack_ext-0.1.5-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:7b985a324c68241cf83a9474b28015524b66775b12a91930dd4c0760aa628d01", size = 171740, upload-time = "2026-01-12T11:25:00.776Z" },
     { url = "https://files.pythonhosted.org/packages/5c/11/52e291f1659e2ec70a09f5ca4ad27e015eb4f0a1371ae68d23a9fbd1c704/torch_c_dlpack_ext-0.1.5-cp314-cp314-win_amd64.whl", hash = "sha256:d794e19fa3f330ab7a29987c07e031fc08e4953aec516d35701d0827863e356b", size = 277086, upload-time = "2026-01-12T11:25:01.901Z" },
+]
+
+[[package]]
+name = "torchao"
+version = "0.17.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/fe/a4036a8e80fa800c92dbcbf75f541cd4c106248b6b579db6dab1800f616a/torchao-0.17.0-cp310-abi3-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:87a418ce0ec064a821ceab83c921b501acef0ce9a6ccd1be358fcd16c3ae8c58", size = 3206172, upload-time = "2026-03-30T22:25:52.974Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/37/ef37ca885265e5f79a168616767dd416a3cea1cc3b28bb6b503ce4a5b652/torchao-0.17.0-py3-none-any.whl", hash = "sha256:02eba449036715b9ae784fbaa1a6f97994bb7b0421ce92d1d5d1c08e5bd6d349", size = 1200680, upload-time = "2026-03-30T22:25:54.457Z" },
 ]
 
 [[package]]
