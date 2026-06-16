@@ -257,9 +257,14 @@ changed upstream.
   the first divergent layer down to the specific attention head
 - **Quantization-risk attribution** (`firefly quant-risk`) — predicts
   which layers break under int8/int4 from stored activations alone
-- **Shadow-mode capture** (`firefly.shadow`) — custom-op + Triton-kernel
-  taps that survive torch.compile and CUDA-graph replay, with local and
-  S3/GCS/Azure streaming sinks
+- **Shadow-mode capture mechanism** (`firefly.shadow`) — custom ops + a
+  Triton kernel that survive `torch.compile` and CUDA-graph replay, with
+  local and S3/GCS/Azure streaming sinks. This is a *mechanism*, not yet a
+  product: it's unit-tested and passes a synthetic-model integration test,
+  but overhead is unmeasured and it hasn't been run against a real serving
+  stack. It targets teams that can instrument their **own** torch model
+  (`instrument()` / `@tap`) — vLLM and SGLang own their model forward, so
+  this does not capture from those engines.
 - Recsys domain selector (TorchRec / DLRM / DCN-v2 tap conventions)
 
 **Planned:**

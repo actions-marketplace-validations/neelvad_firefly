@@ -18,6 +18,13 @@ working. Layout:
 * ``static``       — StaticTapper, @tap_static (CUDA-graph replay)
 * ``ops``          — the firefly::capture / firefly::capture_static custom ops
 * ``instrument``   — instrument(): torch.fx / named_modules auto-wiring
+
+Status: this is a capture *mechanism*, validated at the unit level and against
+a synthetic compiled model. It is **not** a production-ready monitor — overhead
+is unbenchmarked, there's no live-traffic integration, and no
+``firefly check-shadow`` product loop. It applies to torch models you
+instrument directly; it cannot capture from vLLM/SGLang, which own their model
+forward.
 """
 
 from __future__ import annotations

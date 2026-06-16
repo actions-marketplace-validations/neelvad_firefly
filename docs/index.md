@@ -848,15 +848,17 @@ will miss most real upgrade-time bugs.
   capture path. SGLang and TGI would each need their own. The engine-
   internal differences (apply_model vs collective_rpc, etc.) are the
   per-engine engineering cost.
-- **The measurements here are eager-mode CI captures, not live shadow
-  capture.** Forward hooks can't survive CUDA graphs, so every number in
-  this post came from an eager-mode vLLM that Firefly stood up for the
-  diagnostic. The CUDA-graph-safe custom op needed for capturing against
-  live, compiled production traffic is built (`firefly.shadow`, validated
-  by a Modal integration test) but not yet wired into a `firefly check
-  --runner vllm` product flow — so "Firefly watches your prod serving
-  stack" is a real mechanism without the packaging to make it one command
-  yet.
+- **Live shadow capture is a built mechanism, not a proven product.**
+  Every number in this post came from eager-mode CI capture (forward hooks
+  can't survive CUDA graphs). The CUDA-graph-safe custom op for capturing
+  against live compiled traffic exists in `firefly.shadow` and survives a
+  synthetic compiled model, but two things are open: I haven't measured its
+  per-token overhead (the first question any latency-sensitive team asks),
+  and I haven't run it against a real serving deployment. It's also
+  structurally limited to models you instrument yourself — vLLM and SGLang
+  compile their own model code, so you can't inject the capture op into
+  them. Honest status: a promising primitive, not a drop-in production
+  monitor.
 
 ## Reproduce
 
