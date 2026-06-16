@@ -168,6 +168,57 @@ def render_quant_diff(
     return console.export_text()
 
 
+def render_quant_diff_markdown(
+    result: AttributionResult,
+    scheme: str | None = None,
+    top_n: int = 10,
+    per_head: list[PerHeadAttribution] | None = None,
+    rel_threshold: float | None = None,
+) -> str:
+    """PR-comment-friendly markdown for a quantization diff.
+
+    Markdown counterpart of :func:`render_quant_diff`: a one-line headline
+    (worst layer + accumulated output divergence) then a compact table of the
+    top taps by *relative* divergence. For ``$GITHUB_STEP_SUMMARY`` / PR comments.
+    """
+    divs = result.divergences
+    label = f" — `{scheme}`" if scheme else ""
+    if not divs:
+        return f"## Firefly quant-diff{label}: no taps to compare\n"
+
+    ranked = sorted(divs, key=lambda d: d.rel_mean, reverse=True)
+    worst = ranked[0]
+    output_tap = divs[-1]
+
+    lines = [
+        f"## Firefly quant-diff{label}",
+        "",
+        f"Worst layer **`{worst.tap_name}`** ({worst.rel_mean:.2%} mean rel divergence); "
+        f"accumulated at output (`{output_tap.tap_name}`): **{output_tap.rel_mean:.2%}**.",
+    ]
+    if rel_threshold is not None:
+        n_over = sum(1 for d in divs if d.rel_mean > rel_threshold)
+        lines += [
+            "",
+            f"⚠️ {n_over} of {len(divs)} taps exceed {rel_threshold:.1%} relative divergence."
+            if n_over
+            else f"✅ all {len(divs)} taps within {rel_threshold:.1%} relative divergence.",
+        ]
+    lines += [
+        "",
+        "| # | Tap | rel mean | rel max | mean \\|Δ\\| |",
+        "| ---: | --- | ---: | ---: | ---: |",
+    ]
+    for i, d in enumerate(ranked[:top_n], 1):
+        lines.append(
+            f"| {i} | `{d.tap_name}` | {d.rel_mean:.2%} | {d.rel_max:.2%} | {d.mean_abs_diff:.3e} |"
+        )
+    if len(ranked) > top_n:
+        lines.append(f"| | _… and {len(ranked) - top_n} more_ | | | |")
+    _append_per_head_markdown(lines, per_head, top_n)
+    return "\n".join(lines) + "\n"
+
+
 def write_json(
     result: AttributionResult,
     path: Path,

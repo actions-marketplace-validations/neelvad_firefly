@@ -11,6 +11,7 @@ from firefly.report import (
     render_human,
     render_markdown,
     render_quant_diff,
+    render_quant_diff_markdown,
     write_json,
 )
 
@@ -58,6 +59,28 @@ def test_render_quant_diff_ranks_by_relative_not_absolute() -> None:
     assert "final_norm" in out
     # Exactly one tap (layer.5.mlp at 20%) exceeds the 5% threshold.
     assert "1 tap(s) exceed 5.0%" in out
+
+
+def test_render_quant_diff_markdown_headline_and_ranking() -> None:
+    result = AttributionResult(
+        first_divergent_tap=None,
+        any_exceeded=True,
+        divergences=[
+            _qdiv("layer.5.mlp", 2.0, 10.0),      # 20% rel — worst
+            _qdiv("layer.28.mlp", 20.0, 1.0e4),   # 0.2% rel (biggest abs)
+            _qdiv("final_norm", 0.5, 50.0),       # 1% rel, output
+        ],
+    )
+    md = render_quant_diff_markdown(result, scheme="int4wo", rel_threshold=0.05)
+
+    assert md.startswith("## Firefly quant-diff — `int4wo`")
+    # Worst layer is the highest relative divergence, not the abs outlier.
+    assert "`layer.5.mlp`" in md and "20.00%" in md
+    # Accumulated headline uses the forward-order-last tap.
+    assert "`final_norm`" in md
+    # Markdown table header + threshold verdict line.
+    assert "| # | Tap | rel mean | rel max |" in md
+    assert "exceed 5.0% relative divergence" in md
 
 
 def _clean_result() -> AttributionResult:

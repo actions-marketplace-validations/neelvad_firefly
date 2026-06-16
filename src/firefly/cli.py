@@ -539,6 +539,11 @@ def quant_diff(
     report_json: Path | None = typer.Option(
         None, "--report-json", help="Write the structured divergence report here."
     ),
+    ci_format: str = typer.Option(
+        "human", "--ci-format",
+        help="Output format: 'human' (rich terminal table) or 'markdown' "
+        "(PR-comment-friendly, for $GITHUB_STEP_SUMMARY / gh pr comment).",
+    ),
 ) -> None:
     """Diff a torchao-quantized model against its fp baseline, ranked by divergence.
 
@@ -556,13 +561,18 @@ def quant_diff(
         quant_preflight,
     )
     from firefly.reference import read_manifest
-    from firefly.report import render_quant_diff, write_json
+    from firefly.report import render_quant_diff, render_quant_diff_markdown, write_json
     from firefly.runners import get_runner
 
     if scheme not in QUANT_SCHEMES:
         raise typer.BadParameter(
             f"--scheme must be one of {QUANT_SCHEMES}, got {scheme!r}",
             param_hint="--scheme",
+        )
+    if ci_format not in {"human", "markdown"}:
+        raise typer.BadParameter(
+            f"--ci-format must be 'human' or 'markdown', got {ci_format!r}",
+            param_hint="--ci-format",
         )
     # Fast-fail known-incompatible combos (e.g. int4wo on CPU) before the load.
     try:
@@ -598,8 +608,9 @@ def quant_diff(
         raise typer.Exit(2) from e
 
     result = attribute_first_divergence(divergences)
+    render = render_quant_diff_markdown if ci_format == "markdown" else render_quant_diff
     typer.echo(
-        render_quant_diff(
+        render(
             result, scheme=scheme, top_n=top_n, per_head=per_head,
             rel_threshold=threshold,
         )
