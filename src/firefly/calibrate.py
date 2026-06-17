@@ -91,27 +91,22 @@ def calibrate(
     tolerances dict so callers can introspect without reloading.
     """
     manifest, reference_tensors = read_reference(reference_dir)
-    model_dtype = parse_dtype(manifest.dtype)
 
-    if noise is not None and noise.mode == "hardware":
-        set_hardware_noise_baseline(seed=seed, allow_tf32=noise.allow_tf32)
+    # Calibrate through the *same* engine the reference was captured with, so
+    # the noise floor reflects that engine's nondeterminism (not HF's). The HF
+    # path stays the efficient one-load/N-forward route and is the only one that
+    # supports synthetic-noise injection (hook-based); other engines measure
+    # their intrinsic nondeterminism via the runner seam.
+    if manifest.runner == "hf":
+        captures = _calibrate_hf(manifest, inputs_path, runs, noise, device, seed)
     else:
-        set_deterministic(seed=seed)
-    model, tokenizer = load_model_and_tokenizer(
-        manifest.model_id, device=device, dtype=model_dtype,
-    )
-    batch = load_golden_inputs(inputs_path, tokenizer, device)
-
-    captures = run_capture_repeated(
-        model,
-        batch,
-        runs=runs,
-        domain=manifest.domain,
-        noise=noise,
-        # Match the reference: if it has per-head taps, calibrate them too so
-        # they get an empirical tolerance instead of falling to the flat default.
-        per_head=bool(manifest.head_counts),
-    )
+        if noise is not None and noise.mode != "none":
+            raise ValueError(
+                f"synthetic noise injection is HF-only; the reference was captured "
+                f"with runner {manifest.runner!r}, which calibrates intrinsic "
+                f"nondeterminism (noise.mode='none') only."
+            )
+        captures = _calibrate_via_seam(manifest, inputs_path, runs, device, seed)
 
     tolerances = derive_tolerances(
         reference_tensors=reference_tensors,
@@ -121,3 +116,44 @@ def calibrate(
     )
     write_tolerances(reference_dir, tolerances)
     return tolerances
+
+
+def _calibrate_hf(
+    manifest, inputs_path: Path, runs: int, noise: NoiseSpec | None, device: str, seed: int
+) -> dict[str, list[torch.Tensor]]:
+    """HF path: one model load, N forwards (hooks registered once), with
+    optional synthetic-noise injection."""
+    if noise is not None and noise.mode == "hardware":
+        set_hardware_noise_baseline(seed=seed, allow_tf32=noise.allow_tf32)
+    else:
+        set_deterministic(seed=seed)
+    model, tokenizer = load_model_and_tokenizer(
+        manifest.model_id, device=device, dtype=parse_dtype(manifest.dtype)
+    )
+    batch = load_golden_inputs(inputs_path, tokenizer, device)
+    return run_capture_repeated(
+        model, batch, runs=runs, domain=manifest.domain, noise=noise,
+        # Match the reference: calibrate per-head taps too if it has them.
+        per_head=bool(manifest.head_counts),
+    )
+
+
+def _calibrate_via_seam(
+    manifest, inputs_path: Path, runs: int, device: str, seed: int
+) -> dict[str, list[torch.Tensor]]:
+    """Non-HF path: re-run the candidate ``runs`` times through its Runner (one
+    load each — calibration is a one-time setup) and collect per-tap tensors.
+    Captures the engine's intrinsic run-to-run nondeterminism."""
+    from firefly.runners import get_runner
+
+    runner = get_runner(manifest.runner)
+    captures: dict[str, list[torch.Tensor]] = {}
+    for _ in range(runs):
+        result = runner.capture(
+            manifest.model_id, inputs_path,
+            device=device, seed=seed, domain=manifest.domain, dtype=manifest.dtype,
+            per_head=bool(manifest.head_counts), options=manifest.runner_options,
+        )
+        for name, tensor in result.tensors.items():
+            captures.setdefault(name, []).append(tensor)
+    return captures

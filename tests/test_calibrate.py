@@ -167,3 +167,62 @@ def test_calibrate_with_synthetic_noise_propagates_with_depth(tmp_path: Path) ->
     assert on_disk is not None
     assert on_disk["layer.0"].source == "calibrated"
     assert on_disk["layer.0"].atol == tols["layer.0"].atol
+
+
+# --- runner-seam routing (calibrate respects manifest.runner) ----------------
+
+
+def _write_reference(tmp_path: Path, runner: str) -> tuple[Path, Path, dict]:
+    """A minimal on-disk reference whose manifest records ``runner``."""
+    from firefly.reference import ReferenceManifest, write_reference
+
+    taps = ("layer.0", "final_norm")
+    tensors = {t: torch.randn(1, 4) for t in taps}
+    manifest = ReferenceManifest(
+        model_id="m",
+        model_fingerprint="x",
+        tap_points=list(taps),
+        shapes={t: list(v.shape) for t, v in tensors.items()},
+        dtypes={t: "float32" for t in taps},
+        captured_at="2026-01-01T00:00:00+00:00",
+        runner=runner,
+    )
+    write_reference(tmp_path, manifest, tensors)
+    inputs = tmp_path / "golden.json"
+    inputs.write_text(json.dumps({"texts": ["hi"], "max_length": 4}))
+    return tmp_path, inputs, tensors
+
+
+def test_calibrate_rejects_synthetic_noise_on_non_hf_reference(tmp_path: Path) -> None:
+    from firefly.calibrate import calibrate
+    from firefly.noise import NoiseSpec
+
+    ref, inputs, _ = _write_reference(tmp_path, runner="vllm")
+    with pytest.raises(ValueError, match="HF-only"):
+        calibrate(ref, inputs, runs=2,
+                  noise=NoiseSpec(mode="synthetic", sigma=0.01, inject_at="layer.0"))
+
+
+def test_calibrate_routes_non_hf_through_runner_seam(tmp_path: Path, monkeypatch) -> None:
+    import firefly.runners as runners_mod
+    from firefly.calibrate import calibrate
+    from firefly.runners.base import CaptureResult
+
+    ref, inputs, tensors = _write_reference(tmp_path, runner="vllm")
+    calls = {"n": 0}
+
+    class _FakeRunner:
+        name = "vllm"
+
+        def capture(self, model_id, inputs_path, **kw):
+            calls["n"] += 1
+            return CaptureResult(
+                tensors={k: v.clone() for k, v in tensors.items()}, fingerprint="x"
+            )
+
+    monkeypatch.setattr(runners_mod, "get_runner", lambda name: _FakeRunner())
+
+    tols = calibrate(ref, inputs, runs=3)  # no synthetic noise → seam path
+    assert calls["n"] == 3  # one capture per run, via the runner seam (not HF)
+    assert set(tols) == set(tensors)
+    assert all(t.source == "calibrated" for t in tols.values())
