@@ -636,24 +636,30 @@ def quant_sensitivity(
         "time and measure its output divergence alone. More strategies (marginal) "
         "trade compute for resolution.",
     ),
+    granularity: str = typer.Option(
+        "layer", "--granularity",
+        help="Unit of analysis: 'layer' (a decoder layer's Linears together) or "
+        "'linear' (each Linear separately — finer recipes, ~7x more units/compute).",
+    ),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
     dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
-    top_n: int = typer.Option(15, "--top-n", help="How many most-sensitive layers to show."),
-    keep_k: int = typer.Option(4, "--keep-k", help="Suggest keeping this many layers high-precision."),
+    top_n: int = typer.Option(15, "--top-n", help="How many most-sensitive units to show."),
+    keep_k: int = typer.Option(4, "--keep-k", help="Suggest keeping this many units high-precision."),
     report_json: Path | None = typer.Option(
         None, "--report-json", help="Write the structured sensitivity report here."
     ),
 ) -> None:
-    """Rank decoder layers by how much their quantization hurts the model output.
+    """Rank units by how much their quantization hurts the model output.
 
-    Quantizes one layer at a time (the 'isolated' strategy) and measures the
-    resulting divergence at the output, so you can see *which* layers to keep in
+    Quantizes one unit at a time (the 'isolated' strategy) and measures the
+    resulting divergence at the output, so you can see *which* units to keep in
     higher precision — the attribution that guides mixed-precision quantization.
-    Runs N+1 forwards for N decoder layers; use a small model or --device cuda.
+    Runs N+1 forwards for N units; use a small model or --device cuda (and
+    --granularity linear multiplies the unit count ~7x).
     """
     from dataclasses import asdict
 
-    from firefly.quant_sensitivity import STRATEGIES, compute_sensitivity
+    from firefly.quant_sensitivity import GRANULARITIES, STRATEGIES, compute_sensitivity
     from firefly.quant_validate import QuantCompatibilityError, quant_preflight
     from firefly.report import render_sensitivity
 
@@ -661,6 +667,11 @@ def quant_sensitivity(
         raise typer.BadParameter(
             f"--strategy must be one of {sorted(STRATEGIES)}, got {strategy!r}",
             param_hint="--strategy",
+        )
+    if granularity not in GRANULARITIES:
+        raise typer.BadParameter(
+            f"--granularity must be one of {list(GRANULARITIES)}, got {granularity!r}",
+            param_hint="--granularity",
         )
     try:
         quant_preflight(scheme, device)
@@ -671,7 +682,7 @@ def quant_sensitivity(
     try:
         result = compute_sensitivity(
             model, inputs, device=device, dtype=dtype, scheme=scheme,
-            group_size=group_size, strategy=strategy,
+            group_size=group_size, strategy=strategy, granularity=granularity,
         )
     except (ImportError, QuantCompatibilityError) as e:
         typer.echo(str(e), err=True)
@@ -686,10 +697,11 @@ def quant_sensitivity(
             "model_id": result.model_id,
             "scheme": result.scheme,
             "strategy": result.strategy,
+            "granularity": result.granularity,
             "full_quant_divergence": result.full_quant_divergence,
             "output_tap": result.output_tap,
             "keep_high_precision": result.keep_high_precision(keep_k),
-            "layers": [asdict(x) for x in result.ranked],
+            "units": [asdict(x) for x in result.ranked],
         }
         with report_json.open("w") as f:
             json.dump(payload, f, indent=2)
@@ -708,6 +720,11 @@ def quant_recipe(
         "or greedy (sequential forward selection — more compute, accounts for "
         "layer interactions).",
     ),
+    granularity: str = typer.Option(
+        "layer", "--granularity",
+        help="Unit of analysis: 'layer' or 'linear' (finer recipes, ~7x more "
+        "units — greedy gets ~7^2x slower).",
+    ),
     k_values: str = typer.Option(
         "1,2,4,8", "--k-values",
         help="Comma-separated keep-high-precision counts to evaluate (the curve).",
@@ -724,11 +741,11 @@ def quant_recipe(
     ),
 ) -> None:
     """Build and VERIFY a mixed-precision recipe: keep the most quant-sensitive
-    layers in high precision, quantize the rest, and measure the recovered output
-    fidelity. The curve shows how few high-precision layers recover most of the
+    units in high precision, quantize the rest, and measure the recovered output
+    fidelity. The curve shows how few high-precision units recover most of the
     fidelity — the attribution-guided answer torchao autoquant can't explain.
     """
-    from firefly.quant_sensitivity import RECIPE_STRATEGIES, compute_recipe
+    from firefly.quant_sensitivity import GRANULARITIES, RECIPE_STRATEGIES, compute_recipe
     from firefly.quant_validate import QuantCompatibilityError, quant_preflight
     from firefly.report import render_recipe
 
@@ -736,6 +753,11 @@ def quant_recipe(
         raise typer.BadParameter(
             f"--strategy must be one of {list(RECIPE_STRATEGIES)}, got {strategy!r}",
             param_hint="--strategy",
+        )
+    if granularity not in GRANULARITIES:
+        raise typer.BadParameter(
+            f"--granularity must be one of {list(GRANULARITIES)}, got {granularity!r}",
+            param_hint="--granularity",
         )
     try:
         ks = [int(x) for x in k_values.split(",") if x.strip()]
@@ -750,8 +772,8 @@ def quant_recipe(
     try:
         result = compute_recipe(
             model, inputs, device=device, dtype=dtype, scheme=scheme,
-            group_size=group_size, strategy=strategy, k_values=ks,
-            recovery_target=recovery_target,
+            group_size=group_size, strategy=strategy, granularity=granularity,
+            k_values=ks, recovery_target=recovery_target,
         )
     except (ImportError, QuantCompatibilityError) as e:
         typer.echo(str(e), err=True)
@@ -767,6 +789,7 @@ def quant_recipe(
             "model_id": result.sensitivity.model_id,
             "scheme": result.sensitivity.scheme,
             "strategy": result.sensitivity.strategy,
+            "granularity": result.sensitivity.granularity,
             "full_quant_divergence": result.sensitivity.full_quant_divergence,
             "recovery_target": result.recovery_target,
             "recommended_k": result.recommended_k,

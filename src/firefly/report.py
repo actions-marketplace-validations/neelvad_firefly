@@ -226,40 +226,41 @@ def render_sensitivity(
     keep_k: int = 4,
     console: Console | None = None,
 ) -> str:
-    """Render per-layer quantization sensitivity, ranked most-sensitive first.
+    """Render per-unit quantization sensitivity, ranked most-sensitive first.
 
     The headline is the all-quantized output divergence we're decomposing; the
-    table ranks decoder layers by how much keeping them in high precision
-    matters, and the footer suggests the top-``keep_k`` to keep high-precision
-    (a recipe that ``firefly quant-recipe`` will verify).
+    table ranks units by how much keeping them in high precision matters, and
+    the footer suggests the top-``keep_k`` to keep high-precision (a recipe that
+    ``firefly quant-recipe`` will verify).
     """
     console = console or Console(record=True, width=100)
     ranked = result.ranked
+    noun = "Linears" if result.granularity == "linear" else "layers"
 
     table = Table(
-        title=f"Firefly quant sensitivity — {result.scheme} ({result.strategy} strategy)",
+        title=f"Firefly quant sensitivity — {result.scheme} "
+        f"({result.strategy} strategy, {result.granularity} granularity)",
         show_header=True,
         header_style="bold",
     )
     table.add_column("#", justify="right")
-    table.add_column("Layer", no_wrap=True)
+    table.add_column("Unit", no_wrap=True)
     table.add_column("sensitivity", justify="right")
     table.add_column("Linears", justify="right")
     for i, ls in enumerate(ranked[:top_n], 1):
         style = "bold red" if i == 1 else None
-        table.add_row(str(i), f"layer.{ls.layer}", f"{ls.sensitivity:.2%}", str(ls.n_linears), style=style)
+        table.add_row(str(i), ls.unit, f"{ls.sensitivity:.2%}", str(ls.n_linears), style=style)
     console.print(table)
     if len(ranked) > top_n:
-        console.print(f"[dim]… {len(ranked) - top_n} more layers (showing top {top_n})[/]")
+        console.print(f"[dim]… {len(ranked) - top_n} more {noun} (showing top {top_n})[/]")
 
     console.print(
-        f"[bold]all {len(result.layers)} layers quantized[/] ({result.scheme}) → "
+        f"[bold]all {len(result.units)} {noun} quantized[/] ({result.scheme}) → "
         f"{result.full_quant_divergence:.2%} output divergence at {result.output_tap}"
     )
     keep = result.keep_high_precision(keep_k)
     console.print(
-        f"[bold]suggested keep-in-high-precision[/] (top {keep_k}): "
-        f"{', '.join(f'layer.{k}' for k in keep)}"
+        f"[bold]suggested keep-in-high-precision[/] (top {keep_k}): {', '.join(keep)}"
     )
     return console.export_text()
 
@@ -277,11 +278,12 @@ def render_recipe(
     """
     console = console or Console(record=True, width=100)
     sens = result.sensitivity
+    noun = "Linears" if sens.granularity == "linear" else "layers"
 
     console.print(
-        f"[bold]all {len(sens.layers)} layers quantized[/] ({sens.scheme}) → "
+        f"[bold]all {len(sens.units)} {noun} quantized[/] ({sens.scheme}) → "
         f"{sens.full_quant_divergence:.2%} output divergence "
-        f"[dim](strategy: {sens.strategy})[/]"
+        f"[dim](strategy: {sens.strategy}, granularity: {sens.granularity})[/]"
     )
 
     table = Table(
@@ -290,11 +292,11 @@ def render_recipe(
         header_style="bold",
     )
     table.add_column("keep hi-prec", justify="right")
-    table.add_column("layers kept", no_wrap=False)
+    table.add_column("units kept", no_wrap=False)
     table.add_column("output Δ", justify="right")
     table.add_column("recovery", justify="right")
     for p in sorted(result.curve, key=lambda p: p.k):
-        kept = ", ".join(f"layer.{i}" for i in p.kept_layers)
+        kept = ", ".join(p.kept_units)
         style = "bold green" if p.k == result.recommended_k else None
         table.add_row(str(p.k), kept, f"{p.output_divergence:.2%}", f"{p.recovery:.1%}", style=style)
     console.print(table)
@@ -302,8 +304,8 @@ def render_recipe(
     rec = result.recommended_point
     if rec is not None:
         console.print(
-            f"[bold green]recommended:[/] keep {rec.k} layers in high precision "
-            f"({', '.join(f'layer.{i}' for i in rec.kept_layers)}) → "
+            f"[bold green]recommended:[/] keep {rec.k} {noun} in high precision "
+            f"({', '.join(rec.kept_units)}) → "
             f"{rec.output_divergence:.2%} divergence, {rec.recovery:.0%} of the "
             f"degradation recovered (target {result.recovery_target:.0%})."
         )

@@ -55,7 +55,7 @@ def main() -> None:
         )
 
     full_div = results["isolated"].sensitivity.full_quant_divergence
-    print(f"\nall {len(results['isolated'].sensitivity.layers)} layers quantized "
+    print(f"\nall {len(results['isolated'].sensitivity.units)} layers quantized "
           f"({args.scheme}) -> {full_div:.2%} output divergence\n")
     by_strat = {s: {p.k: p for p in results[s].curve} for s in _STRATEGIES}
     header = "  ".join(f"{s:>12} recov" for s in _STRATEGIES)
@@ -76,7 +76,7 @@ def main() -> None:
         "full_quant_divergence": full_div,
         "strategies": {
             s: [
-                {"k": p.k, "kept_layers": p.kept_layers,
+                {"k": p.k, "kept_units": p.kept_units,
                  "output_divergence": p.output_divergence, "recovery": p.recovery}
                 for p in sorted(results[s].curve, key=lambda p: p.k)
             ]

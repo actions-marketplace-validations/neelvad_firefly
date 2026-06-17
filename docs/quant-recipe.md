@@ -77,6 +77,18 @@ widen on models where sensitivity is more distributed — bigger models, int4. S
 the practical rule is the feature-selection rule: **use the cheap filter when
 one item dominates; spend the wrapper compute when interactions matter.**
 
+## Granularity: layer vs Linear
+
+The keep-or-quantize *unit* is also a knob (`--granularity`). By default it's a
+whole decoder layer (its 7 Linears together). At `--granularity linear`, each
+`nn.Linear` is its own unit — finer recipes at ~7x the units (and ~7² the greedy
+compute). On SmolLM-135M, going per-Linear sharpens the diagnosis: the most
+quant-sensitive units are specifically the **MLP projections** of the late
+layers (`layer.28.mlp.up_proj` tops it; attention barely registers). So you can
+keep just a couple of Linears in fp rather than whole layers — cheaper for the
+same recovery. (This is the same drill-down ladder as the parity tool's
+layer→head attribution; the floor for *quant* recipes is the Linear.)
+
 ## Reproduce it
 
 ```sh

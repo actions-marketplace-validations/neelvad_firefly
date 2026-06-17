@@ -1,8 +1,8 @@
-"""Per-layer quantization sensitivity (phase 2 P0).
+"""Per-unit quantization sensitivity (phase 2).
 
-Fast tests cover the pure parts (layer discovery, the strategy seam, the
-renderer). The slow test runs the real isolated sweep on SmolLM-135M (needs
-torchao); W8A8 runs on CPU.
+Fast tests cover the pure parts (unit discovery + granularity, the strategy
+seam, greedy selection, the renderers). Slow tests run the real sweeps on
+SmolLM-135M (need torchao); W8A8 runs on CPU.
 """
 
 from __future__ import annotations
@@ -14,16 +14,17 @@ import pytest
 import torch.nn as nn
 
 from firefly.quant_sensitivity import (
+    GRANULARITIES,
     ISOLATED,
     MARGINAL,
     STRATEGIES,
-    LayerSensitivity,
     RecipePoint,
     RecipeResult,
     SensitivityResult,
+    UnitSensitivity,
     _recommend_k,
     _recovery,
-    discover_layers,
+    discover_units,
 )
 
 
@@ -41,104 +42,152 @@ class _Tiny(nn.Module):
         self.lm_head = nn.Linear(8, 8)  # non-layer Linear, must be excluded
 
 
-def test_discover_layers_groups_and_excludes_non_layer() -> None:
-    layers = discover_layers(_Tiny(3))
-    assert sorted(layers) == [0, 1, 2]
-    assert layers[0] == ["layers.0.attn", "layers.0.mlp"]
-    # lm_head has no layer index → excluded.
-    assert all("lm_head" not in fqn for fqns in layers.values() for fqn in fqns)
+def test_discover_units_layer_granularity() -> None:
+    units = discover_units(_Tiny(3), "layer")
+    assert list(units) == ["layer.0", "layer.1", "layer.2"]
+    assert units["layer.0"] == ["layers.0.attn", "layers.0.mlp"]
+    assert all("lm_head" not in fqn for fqns in units.values() for fqn in fqns)
+
+
+def test_discover_units_linear_granularity() -> None:
+    units = discover_units(_Tiny(2), "linear")
+    # Each Linear is its own unit, FQN as the name; ~2 layers * 2 Linears.
+    assert list(units) == ["layers.0.attn", "layers.0.mlp", "layers.1.attn", "layers.1.mlp"]
+    assert units["layers.0.attn"] == ["layers.0.attn"]
+    # Same Linear set as layer granularity → same all-quantized baseline.
+    layer_fqns = {f for fqns in discover_units(_Tiny(2), "layer").values() for f in fqns}
+    assert set(units) == layer_fqns
+
+
+def test_discover_units_rejects_unknown_granularity() -> None:
+    assert set(GRANULARITIES) == {"layer", "linear"}
+    with pytest.raises(ValueError, match="unknown granularity"):
+        discover_units(_Tiny(1), "bogus")
 
 
 def test_isolated_strategy_targets_and_score() -> None:
-    layer = {"layers.1.attn", "layers.1.mlp"}
-    all_fqns = layer | {"layers.0.attn", "layers.2.mlp"}
-    # isolated quantizes only this layer ...
-    assert ISOLATED.targets(layer, all_fqns) == layer
-    # ... and scores by the measured divergence directly (full-quant ignored).
+    unit = {"layers.1.attn", "layers.1.mlp"}
+    all_fqns = unit | {"layers.0.attn", "layers.2.mlp"}
+    assert ISOLATED.targets(unit, all_fqns) == unit
     assert ISOLATED.score(0.42, 0.99) == 0.42
     assert "isolated" in STRATEGIES
 
 
 def test_marginal_strategy_targets_and_score() -> None:
-    layer = {"layers.1.attn", "layers.1.mlp"}
-    all_fqns = layer | {"layers.0.attn", "layers.2.mlp"}
-    # marginal quantizes everything EXCEPT this layer ...
-    assert MARGINAL.targets(layer, all_fqns) == all_fqns - layer
-    # ... and scores by recovery: full-quant divergence minus the measured one.
+    unit = {"layers.1.attn", "layers.1.mlp"}
+    all_fqns = unit | {"layers.0.attn", "layers.2.mlp"}
+    assert MARGINAL.targets(unit, all_fqns) == all_fqns - unit
     assert MARGINAL.score(0.40, 0.66) == pytest.approx(0.26)
-    # recovery clamps at 0 if keeping the layer fp somehow didn't help.
-    assert MARGINAL.score(0.70, 0.66) == 0.0
+    assert MARGINAL.score(0.70, 0.66) == 0.0  # recovery clamps at 0
     assert "marginal" in STRATEGIES
+
+
+def _us(unit: str, s: float) -> UnitSensitivity:
+    return UnitSensitivity(unit=unit, sensitivity=s, raw_divergence=s, n_linears=7)
 
 
 def test_sensitivity_result_ranks_and_suggests() -> None:
     result = SensitivityResult(
-        model_id="m", scheme="int4wo", strategy="isolated", full_quant_divergence=0.7,
-        layers=[
-            LayerSensitivity(layer=0, sensitivity=0.05, raw_divergence=0.05, n_linears=7),
-            LayerSensitivity(layer=5, sensitivity=0.30, raw_divergence=0.30, n_linears=7),
-            LayerSensitivity(layer=2, sensitivity=0.12, raw_divergence=0.12, n_linears=7),
-        ],
+        model_id="m", scheme="int4wo", strategy="isolated", granularity="layer",
+        full_quant_divergence=0.7,
+        units=[_us("layer.0", 0.05), _us("layer.5", 0.30), _us("layer.2", 0.12)],
     )
-    assert [x.layer for x in result.ranked] == [5, 2, 0]
-    assert result.keep_high_precision(2) == [5, 2]
+    assert [x.unit for x in result.ranked] == ["layer.5", "layer.2", "layer.0"]
+    assert result.keep_high_precision(2) == ["layer.5", "layer.2"]
 
 
 def test_render_sensitivity_headline_and_ranking() -> None:
     from firefly.report import render_sensitivity
 
     result = SensitivityResult(
-        model_id="m", scheme="w8a8", strategy="isolated", full_quant_divergence=0.66,
-        layers=[
-            LayerSensitivity(layer=29, sensitivity=0.40, raw_divergence=0.40, n_linears=7),
-            LayerSensitivity(layer=1, sensitivity=0.02, raw_divergence=0.02, n_linears=7),
-        ],
+        model_id="m", scheme="w8a8", strategy="isolated", granularity="layer",
+        full_quant_divergence=0.66,
+        units=[_us("layer.29", 0.40), _us("layer.1", 0.02)],
     )
     out = render_sensitivity(result, keep_k=1)
     assert "layer.29" in out
-    assert "66.00%" in out  # full-quant output divergence headline
+    assert "66.00%" in out
     assert "keep-in-high-precision (top 1): layer.29" in out
+
+
+def test_render_sensitivity_linear_granularity_wording() -> None:
+    from firefly.report import render_sensitivity
+
+    result = SensitivityResult(
+        model_id="m", scheme="w8a8", strategy="isolated", granularity="linear",
+        full_quant_divergence=0.5,
+        units=[_us("model.layers.28.mlp.down_proj", 0.3)],
+    )
+    out = render_sensitivity(result, keep_k=1)
+    assert "model.layers.28.mlp.down_proj" in out
+    assert "Linears quantized" in out  # granularity-aware noun
 
 
 def test_recovery_fraction() -> None:
     assert _recovery(0.66, 0.10) == pytest.approx((0.66 - 0.10) / 0.66)
     assert _recovery(0.66, 0.66) == 0.0
-    assert _recovery(0.0, 0.0) == 1.0  # no degradation to recover
-    assert _recovery(0.5, 0.8) == 0.0  # worse than full-quant clamps to 0
+    assert _recovery(0.0, 0.0) == 1.0
+    assert _recovery(0.5, 0.8) == 0.0
 
 
 def test_recommend_k_smallest_meeting_target() -> None:
     curve = [
-        RecipePoint(k=1, kept_layers=[28], output_divergence=0.20, recovery=0.70),
-        RecipePoint(k=4, kept_layers=[28, 29, 11, 27], output_divergence=0.07, recovery=0.92),
-        RecipePoint(k=8, kept_layers=list(range(8)), output_divergence=0.03, recovery=0.96),
+        RecipePoint(k=1, kept_units=["layer.28"], output_divergence=0.20, recovery=0.70),
+        RecipePoint(k=4, kept_units=["layer.28", "layer.29"], output_divergence=0.07, recovery=0.92),
+        RecipePoint(k=8, kept_units=[f"layer.{i}" for i in range(8)], output_divergence=0.03, recovery=0.96),
     ]
-    assert _recommend_k(curve, target=0.9) == 4   # smallest clearing 90%
+    assert _recommend_k(curve, target=0.9) == 4
     assert _recommend_k(curve, target=0.5) == 1
-    assert _recommend_k(curve, target=0.99) == 8  # none clear it → largest k
+    assert _recommend_k(curve, target=0.99) == 8
 
 
 def test_render_recipe_curve_and_recommendation() -> None:
     from firefly.report import render_recipe
 
     sens = SensitivityResult(
-        model_id="m", scheme="int4wo", strategy="isolated", full_quant_divergence=0.66,
-        layers=[LayerSensitivity(layer=28, sensitivity=0.58, raw_divergence=0.58, n_linears=7)],
+        model_id="m", scheme="int4wo", strategy="isolated", granularity="layer",
+        full_quant_divergence=0.66, units=[_us("layer.28", 0.58)],
     )
     result = RecipeResult(
         sensitivity=sens,
         curve=[
-            RecipePoint(k=1, kept_layers=[28], output_divergence=0.20, recovery=0.70),
-            RecipePoint(k=4, kept_layers=[28, 29, 11, 27], output_divergence=0.07, recovery=0.92),
+            RecipePoint(k=1, kept_units=["layer.28"], output_divergence=0.20, recovery=0.70),
+            RecipePoint(k=4, kept_units=["layer.28", "layer.29", "layer.11", "layer.27"],
+                        output_divergence=0.07, recovery=0.92),
         ],
-        recommended_k=4,
-        recovery_target=0.9,
+        recommended_k=4, recovery_target=0.9,
     )
     out = render_recipe(result)
-    assert "66.00%" in out  # full-quant headline
+    assert "66.00%" in out
     assert "Mixed-precision recipe curve" in out
     assert "recommended: keep 4 layers" in out
     assert "92%" in out
+
+
+def test_greedy_select_picks_highest_impact_first() -> None:
+    from firefly.quant_sensitivity import _greedy_select
+
+    units = {"a": ["l0"], "b": ["l1"], "c": ["l2"]}
+    all_fqns = {"l0", "l1", "l2"}
+    # Synthetic oracle: divergence = sum of penalties for the QUANTIZED fqns.
+    penalty = {"l0": 0.1, "l1": 0.2, "l2": 0.5}
+
+    def measure(targets: set[str]) -> float:
+        return sum(penalty[f] for f in targets)
+
+    order = _greedy_select(units, all_fqns, measure, max_k=3)
+    # Greedy keeps the unit whose fp-keeping helps most first (c → b → a).
+    assert [name for name, _ in order] == ["c", "b", "a"]
+    divs = [d for _, d in order]
+    assert divs == sorted(divs, reverse=True)
+    assert divs[-1] == pytest.approx(0.0)
+
+
+def test_greedy_is_a_recipe_strategy_not_a_score_strategy() -> None:
+    from firefly.quant_sensitivity import GREEDY, RECIPE_STRATEGIES
+
+    assert GREEDY in RECIPE_STRATEGIES
+    assert GREEDY not in STRATEGIES
 
 
 @pytest.mark.slow
@@ -152,75 +201,18 @@ def test_compute_recipe_smollm_recovers_fidelity() -> None:
     inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
 
     result = compute_recipe(
-        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8",
-        k_values=[1, 2, 4, 8],
+        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8", k_values=[1, 2, 4, 8]
     )
-
     assert len(result.curve) == 4
-    # Keeping any layers high-precision recovers some fidelity vs all-quantized.
     assert all(0.0 <= p.recovery <= 1.0 for p in result.curve)
     by_k = sorted(result.curve, key=lambda p: p.k)
-    # More high-precision layers ⇒ at least as much recovery (allow fp noise).
     assert by_k[-1].recovery >= by_k[0].recovery - 1e-6
-    # The strong isolated signal (layer.28) means even k=1 recovers meaningfully.
     assert by_k[0].recovery > 0.1
     assert result.recommended_k in {1, 2, 4, 8}
 
 
-def test_greedy_select_picks_highest_impact_first() -> None:
-    from firefly.quant_sensitivity import _greedy_select
-
-    layers = {0: ["l0"], 1: ["l1"], 2: ["l2"]}
-    all_fqns = {"l0", "l1", "l2"}
-    # Synthetic oracle: divergence = sum of penalties for the QUANTIZED layers.
-    # Keeping a high-penalty layer fp (out of `targets`) reduces divergence most.
-    penalty = {"l0": 0.1, "l1": 0.2, "l2": 0.5}
-
-    def measure(targets: set[str]) -> float:
-        return sum(penalty[f] for f in targets)
-
-    order = _greedy_select(layers, all_fqns, measure, max_k=3)
-    # Greedy keeps the biggest-penalty layer first, then next, then last.
-    assert [idx for idx, _ in order] == [2, 1, 0]
-    # Divergence after each step decreases monotonically (0.3, 0.1, 0.0).
-    divs = [d for _, d in order]
-    assert divs == sorted(divs, reverse=True)
-    assert divs[-1] == pytest.approx(0.0)
-
-
-def test_greedy_is_a_recipe_strategy_not_a_score_strategy() -> None:
-    from firefly.quant_sensitivity import GREEDY, RECIPE_STRATEGIES
-
-    assert GREEDY in RECIPE_STRATEGIES
-    assert GREEDY not in STRATEGIES  # greedy is a search, not a per-layer score
-
-
 @pytest.mark.slow
-def test_compute_recipe_smollm_greedy_runs() -> None:
-    pytest.importorskip("torchao", reason="quant recipe needs the torchao extra")
-    import tempfile
-
-    from firefly.quant_sensitivity import compute_recipe
-
-    inputs = Path(tempfile.mkdtemp()) / "golden.json"
-    inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
-
-    result = compute_recipe(
-        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8",
-        strategy="greedy", k_values=[1, 2, 4],
-    )
-    assert result.sensitivity.strategy == "greedy"
-    assert len(result.curve) == 3
-    by_k = sorted(result.curve, key=lambda p: p.k)
-    # Greedy recovery is monotonic non-decreasing in k (each step only helps).
-    assert all(a.recovery <= b.recovery + 1e-6 for a, b in zip(by_k, by_k[1:], strict=False))
-
-
-@pytest.mark.slow
-def test_compute_sensitivity_smollm_marginal_runs() -> None:
-    """The marginal strategy runs end-to-end and yields valid recovery scores.
-    (Empirically it builds worse recipes than isolated on SmolLM/W8A8 — that's a
-    finding, not a test assertion; we only guard that it runs and is well-formed.)"""
+def test_compute_sensitivity_smollm_linear_granularity() -> None:
     pytest.importorskip("torchao", reason="quant sensitivity needs the torchao extra")
     import tempfile
 
@@ -230,12 +222,13 @@ def test_compute_sensitivity_smollm_marginal_runs() -> None:
     inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
 
     result = compute_sensitivity(
-        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8", strategy="marginal"
+        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8", granularity="linear"
     )
-    assert result.strategy == "marginal"
-    assert len(result.layers) == 30
-    # marginal score is a recovery (full - measured), clamped non-negative.
-    assert all(x.sensitivity >= 0.0 for x in result.layers)
+    assert result.granularity == "linear"
+    # 30 layers * 7 Linears each = 210 units; each unit is a single Linear.
+    assert len(result.units) == 210
+    assert all(u.n_linears == 1 for u in result.units)
+    assert all(u.unit.startswith("model.layers.") for u in result.units)
 
 
 @pytest.mark.slow
@@ -251,14 +244,7 @@ def test_compute_sensitivity_smollm_isolated() -> None:
     result = compute_sensitivity(
         "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8", strategy="isolated"
     )
-
-    assert len(result.layers) == 30  # SmolLM-135M decoder layers
+    assert len(result.units) == 30
     assert result.full_quant_divergence > 0.0
-    # Every isolated measurement is a non-negative output divergence, and at
-    # least one layer is meaningfully sensitive.
-    assert all(x.sensitivity >= 0.0 for x in result.layers)
-    assert max(x.sensitivity for x in result.layers) > 0.0
-    # Ranking is sorted; the suggested keep-set is the top of it.
-    ranked = result.ranked
-    assert ranked == sorted(result.layers, key=lambda x: x.sensitivity, reverse=True)
-    assert result.keep_high_precision(3) == [x.layer for x in ranked[:3]]
+    assert max(x.sensitivity for x in result.units) > 0.0
+    assert result.keep_high_precision(3) == [x.unit for x in result.ranked[:3]]
