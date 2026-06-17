@@ -266,13 +266,13 @@ the >1% threshold where real bugs live.
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
 | `quant_risk.py` | Simulated int8/int4 quantization risk from stored activations (heuristic) |
-| `quant_validate.py` | Real torchao quantization (w8a8 / int4wo) for quant-diff + sensitivity |
+| `quant_torchao.py` | Real torchao quantization (w8a8 / int4wo) for quant-diff + sensitivity |
 | `quant_sensitivity.py` | Attribution-guided mixed precision: per-unit sensitivity + verified recipe (isolated / marginal / greedy; layer or linear granularity) |
 | `op_drill.py` | Op-level drill-down: `TorchDispatchMode` scoped to a module → first diverging ATen op |
 | `shadow/` | Shadow-mode capture package: custom ops + Triton kernel + Tappers + sinks that survive torch.compile and CUDA graphs |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
-| `cli.py` | `firefly capture / calibrate / check / quant-risk / quant-diff / quant-sensitivity / quant-recipe / op-diff / publish` |
+| `cli/` | Flat `firefly` command surface in command modules (parity / quant / drill): capture / calibrate / check / quant-risk / quant-diff / quant-sensitivity / quant-recipe / op-diff / publish |
 | `action.yml` | GitHub Action wrapper for `firefly check` and `quant-diff` (`mode:` input) |
 | `scripts/capture_vllm.py` | Modal harness around the vLLM runner (multi-version blog repros) |
 | `scripts/plot_validation.py` | Diff and magnitude figures for the writeup |
