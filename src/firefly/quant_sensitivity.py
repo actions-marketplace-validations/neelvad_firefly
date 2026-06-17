@@ -140,6 +140,57 @@ def _measure(
     return rel_l1(ref_output, caps[_OUTPUT_TAP])
 
 
+@dataclass
+class _Ctx:
+    """Shared measurement context — one fp model load reused across all sweeps."""
+
+    model_id: str
+    fp_model: nn.Module
+    batch: dict
+    ref_output: torch.Tensor
+    layers: dict[int, list[str]]
+    all_fqns: set[str]
+    scheme: str
+    group_size: int
+
+    def measure(self, targets: set[str]) -> float:
+        return _measure(
+            self.fp_model, self.batch, self.ref_output, targets, self.scheme, self.group_size
+        )
+
+
+def _setup(
+    model_id: str, inputs_path: Path, device: str, dtype: str, scheme: str, group_size: int
+) -> _Ctx:
+    set_deterministic()
+    fp_model, tok = load_model_and_tokenizer(model_id, device=device, dtype=parse_dtype(dtype))
+    batch = load_golden_inputs(inputs_path, tok, device)
+    ref_output = run_capture(fp_model, batch)[_OUTPUT_TAP]
+    layers = discover_layers(fp_model)
+    all_fqns = {fqn for fqns in layers.values() for fqn in fqns}
+    return _Ctx(model_id, fp_model, batch, ref_output, layers, all_fqns, scheme, group_size)
+
+
+def _run_sensitivity(ctx: _Ctx, strategy: str) -> SensitivityResult:
+    strat = STRATEGIES[strategy]
+    full_div = ctx.measure(ctx.all_fqns)
+    out: list[LayerSensitivity] = []
+    for idx, fqns in ctx.layers.items():
+        measured = ctx.measure(strat.targets(set(fqns), ctx.all_fqns))
+        out.append(
+            LayerSensitivity(
+                layer=idx,
+                sensitivity=strat.score(measured, full_div),
+                raw_divergence=measured,
+                n_linears=len(fqns),
+            )
+        )
+    return SensitivityResult(
+        model_id=ctx.model_id, scheme=ctx.scheme, strategy=strategy,
+        full_quant_divergence=full_div, layers=out,
+    )
+
+
 def compute_sensitivity(
     model_id: str,
     inputs_path: Path,
@@ -153,31 +204,78 @@ def compute_sensitivity(
     all-quantized baseline, then one measurement per decoder layer."""
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; choose from {sorted(STRATEGIES)}")
-    strat = STRATEGIES[strategy]
-
-    set_deterministic()
-    fp_model, tok = load_model_and_tokenizer(model_id, device=device, dtype=parse_dtype(dtype))
-    batch = load_golden_inputs(inputs_path, tok, device)
-    ref_output = run_capture(fp_model, batch)[_OUTPUT_TAP]
-
-    layers = discover_layers(fp_model)
-    all_fqns = {fqn for fqns in layers.values() for fqn in fqns}
-
-    full_div = _measure(fp_model, batch, ref_output, all_fqns, scheme, group_size)
-
-    out: list[LayerSensitivity] = []
-    for idx, fqns in layers.items():
-        targets = strat.targets(set(fqns), all_fqns)
-        measured = _measure(fp_model, batch, ref_output, targets, scheme, group_size)
-        out.append(
-            LayerSensitivity(
-                layer=idx,
-                sensitivity=strat.score(measured, full_div),
-                raw_divergence=measured,
-                n_linears=len(fqns),
-            )
-        )
-    return SensitivityResult(
-        model_id=model_id, scheme=scheme, strategy=strategy,
-        full_quant_divergence=full_div, layers=out,
+    return _run_sensitivity(
+        _setup(model_id, inputs_path, device, dtype, scheme, group_size), strategy
     )
+
+
+@dataclass
+class RecipePoint:
+    """One mixed-precision recipe: keep the top-``k`` sensitive layers in high
+    precision, quantize the rest, and the output fidelity it achieves."""
+
+    k: int
+    kept_layers: list[int]
+    output_divergence: float
+    recovery: float
+    """Fraction of the all-quantized degradation recovered: (full - this) / full."""
+
+
+@dataclass
+class RecipeResult:
+    sensitivity: SensitivityResult
+    curve: list[RecipePoint]
+    recommended_k: int
+    recovery_target: float
+
+    @property
+    def recommended_point(self) -> RecipePoint | None:
+        return next((p for p in self.curve if p.k == self.recommended_k), None)
+
+
+def _recovery(full_div: float, recipe_div: float) -> float:
+    if full_div <= 0:
+        return 1.0
+    return max(0.0, (full_div - recipe_div) / full_div)
+
+
+def _recommend_k(curve: list[RecipePoint], target: float) -> int:
+    """Smallest swept k whose recovery clears ``target``; else the largest k."""
+    for p in sorted(curve, key=lambda p: p.k):
+        if p.recovery >= target:
+            return p.k
+    return max((p.k for p in curve), default=0)
+
+
+def compute_recipe(
+    model_id: str,
+    inputs_path: Path,
+    device: str = "cpu",
+    dtype: str = "float32",
+    scheme: str = "w8a8",
+    group_size: int = 32,
+    strategy: str = "isolated",
+    k_values: list[int] | None = None,
+    recovery_target: float = 0.9,
+) -> RecipeResult:
+    """Rank layers, then build + **verify** mixed-precision recipes: for each k,
+    keep the top-k sensitive layers in high precision, quantize the rest, and
+    measure the recovered output fidelity. The curve both delivers the recipe
+    and verifies the ranking actually predicts good recipes."""
+    if strategy not in STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}; choose from {sorted(STRATEGIES)}")
+    ctx = _setup(model_id, inputs_path, device, dtype, scheme, group_size)
+    sens = _run_sensitivity(ctx, strategy)
+    full_div = sens.full_quant_divergence
+    n_layers = len(ctx.layers)
+
+    if k_values is None:
+        k_values = [k for k in (1, 2, 4, 8, 16) if k < n_layers]
+    curve: list[RecipePoint] = []
+    for k in sorted({k for k in k_values if 0 < k < n_layers}):
+        keep = sens.keep_high_precision(k)
+        keep_fqns = {fqn for idx in keep for fqn in ctx.layers[idx]}
+        div = ctx.measure(ctx.all_fqns - keep_fqns)  # quantize all EXCEPT kept layers
+        curve.append(RecipePoint(k, keep, div, _recovery(full_div, div)))
+
+    return RecipeResult(sens, curve, _recommend_k(curve, recovery_target), recovery_target)

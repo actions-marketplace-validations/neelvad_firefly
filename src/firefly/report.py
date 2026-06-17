@@ -19,7 +19,7 @@ from firefly.attribution import AttributionResult
 if TYPE_CHECKING:
     from firefly.head_attribution import PerHeadAttribution
     from firefly.quant_risk import TapQuantRisk
-    from firefly.quant_sensitivity import SensitivityResult
+    from firefly.quant_sensitivity import RecipeResult, SensitivityResult
 
 
 def render_human(
@@ -261,6 +261,54 @@ def render_sensitivity(
         f"[bold]suggested keep-in-high-precision[/] (top {keep_k}): "
         f"{', '.join(f'layer.{k}' for k in keep)}"
     )
+    return console.export_text()
+
+
+def render_recipe(
+    result: RecipeResult,
+    console: Console | None = None,
+) -> str:
+    """Render the verified mixed-precision recipe curve.
+
+    Shows, for each k, the divergence achieved by keeping the top-k sensitive
+    layers in high precision and quantizing the rest — and how much of the
+    all-quantized degradation that recovers. The recommendation is the smallest
+    k that clears the recovery target.
+    """
+    console = console or Console(record=True, width=100)
+    sens = result.sensitivity
+
+    console.print(
+        f"[bold]all {len(sens.layers)} layers quantized[/] ({sens.scheme}) → "
+        f"{sens.full_quant_divergence:.2%} output divergence "
+        f"[dim](strategy: {sens.strategy})[/]"
+    )
+
+    table = Table(
+        title="Mixed-precision recipe curve (verified)",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("keep hi-prec", justify="right")
+    table.add_column("layers kept", no_wrap=False)
+    table.add_column("output Δ", justify="right")
+    table.add_column("recovery", justify="right")
+    for p in sorted(result.curve, key=lambda p: p.k):
+        kept = ", ".join(f"layer.{i}" for i in p.kept_layers)
+        style = "bold green" if p.k == result.recommended_k else None
+        table.add_row(str(p.k), kept, f"{p.output_divergence:.2%}", f"{p.recovery:.1%}", style=style)
+    console.print(table)
+
+    rec = result.recommended_point
+    if rec is not None:
+        console.print(
+            f"[bold green]recommended:[/] keep {rec.k} layers in high precision "
+            f"({', '.join(f'layer.{i}' for i in rec.kept_layers)}) → "
+            f"{rec.output_divergence:.2%} divergence, {rec.recovery:.0%} of the "
+            f"degradation recovered (target {result.recovery_target:.0%})."
+        )
+    else:
+        console.print("[yellow]No recipe points evaluated.[/]")
     return console.export_text()
 
 

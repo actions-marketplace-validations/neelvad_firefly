@@ -696,5 +696,81 @@ def quant_sensitivity(
         typer.echo(f"Wrote sensitivity report to {report_json}")
 
 
+@app.command("quant-recipe")
+def quant_recipe(
+    model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Golden-inputs JSON."),
+    scheme: str = typer.Option("w8a8", "--scheme", help="torchao scheme: w8a8 or int4wo."),
+    group_size: int = typer.Option(32, "--group-size", help="int4wo group size."),
+    strategy: str = typer.Option("isolated", "--strategy", help="Sensitivity strategy."),
+    k_values: str = typer.Option(
+        "1,2,4,8", "--k-values",
+        help="Comma-separated keep-high-precision counts to evaluate (the curve).",
+    ),
+    recovery_target: float = typer.Option(
+        0.9, "--recovery-target",
+        help="Recommend the smallest k recovering at least this fraction of the "
+        "all-quantized degradation (default 0.9 = 90%%).",
+    ),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
+    dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write the structured recipe report here."
+    ),
+) -> None:
+    """Build and VERIFY a mixed-precision recipe: keep the most quant-sensitive
+    layers in high precision, quantize the rest, and measure the recovered output
+    fidelity. The curve shows how few high-precision layers recover most of the
+    fidelity — the attribution-guided answer torchao autoquant can't explain.
+    """
+    from firefly.quant_sensitivity import STRATEGIES, compute_recipe
+    from firefly.quant_validate import QuantCompatibilityError, quant_preflight
+    from firefly.report import render_recipe
+
+    if strategy not in STRATEGIES:
+        raise typer.BadParameter(
+            f"--strategy must be one of {sorted(STRATEGIES)}, got {strategy!r}",
+            param_hint="--strategy",
+        )
+    try:
+        ks = [int(x) for x in k_values.split(",") if x.strip()]
+    except ValueError as e:
+        raise typer.BadParameter("--k-values must be comma-separated integers", param_hint="--k-values") from e
+    try:
+        quant_preflight(scheme, device)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    try:
+        result = compute_recipe(
+            model, inputs, device=device, dtype=dtype, scheme=scheme,
+            group_size=group_size, strategy=strategy, k_values=ks,
+            recovery_target=recovery_target,
+        )
+    except (ImportError, QuantCompatibilityError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(render_recipe(result))
+
+    if report_json is not None:
+        import json
+        from dataclasses import asdict
+
+        payload = {
+            "model_id": result.sensitivity.model_id,
+            "scheme": result.sensitivity.scheme,
+            "strategy": result.sensitivity.strategy,
+            "full_quant_divergence": result.sensitivity.full_quant_divergence,
+            "recovery_target": result.recovery_target,
+            "recommended_k": result.recommended_k,
+            "curve": [asdict(p) for p in sorted(result.curve, key=lambda p: p.k)],
+        }
+        with report_json.open("w") as f:
+            json.dump(payload, f, indent=2)
+        typer.echo(f"Wrote recipe report to {report_json}")
+
+
 if __name__ == "__main__":
     app()

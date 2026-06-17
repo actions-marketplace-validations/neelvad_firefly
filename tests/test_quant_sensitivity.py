@@ -17,7 +17,11 @@ from firefly.quant_sensitivity import (
     ISOLATED,
     STRATEGIES,
     LayerSensitivity,
+    RecipePoint,
+    RecipeResult,
     SensitivityResult,
+    _recommend_k,
+    _recovery,
     discover_layers,
 )
 
@@ -81,6 +85,73 @@ def test_render_sensitivity_headline_and_ranking() -> None:
     assert "layer.29" in out
     assert "66.00%" in out  # full-quant output divergence headline
     assert "keep-in-high-precision (top 1): layer.29" in out
+
+
+def test_recovery_fraction() -> None:
+    assert _recovery(0.66, 0.10) == pytest.approx((0.66 - 0.10) / 0.66)
+    assert _recovery(0.66, 0.66) == 0.0
+    assert _recovery(0.0, 0.0) == 1.0  # no degradation to recover
+    assert _recovery(0.5, 0.8) == 0.0  # worse than full-quant clamps to 0
+
+
+def test_recommend_k_smallest_meeting_target() -> None:
+    curve = [
+        RecipePoint(k=1, kept_layers=[28], output_divergence=0.20, recovery=0.70),
+        RecipePoint(k=4, kept_layers=[28, 29, 11, 27], output_divergence=0.07, recovery=0.92),
+        RecipePoint(k=8, kept_layers=list(range(8)), output_divergence=0.03, recovery=0.96),
+    ]
+    assert _recommend_k(curve, target=0.9) == 4   # smallest clearing 90%
+    assert _recommend_k(curve, target=0.5) == 1
+    assert _recommend_k(curve, target=0.99) == 8  # none clear it → largest k
+
+
+def test_render_recipe_curve_and_recommendation() -> None:
+    from firefly.report import render_recipe
+
+    sens = SensitivityResult(
+        model_id="m", scheme="int4wo", strategy="isolated", full_quant_divergence=0.66,
+        layers=[LayerSensitivity(layer=28, sensitivity=0.58, raw_divergence=0.58, n_linears=7)],
+    )
+    result = RecipeResult(
+        sensitivity=sens,
+        curve=[
+            RecipePoint(k=1, kept_layers=[28], output_divergence=0.20, recovery=0.70),
+            RecipePoint(k=4, kept_layers=[28, 29, 11, 27], output_divergence=0.07, recovery=0.92),
+        ],
+        recommended_k=4,
+        recovery_target=0.9,
+    )
+    out = render_recipe(result)
+    assert "66.00%" in out  # full-quant headline
+    assert "Mixed-precision recipe curve" in out
+    assert "recommended: keep 4 layers" in out
+    assert "92%" in out
+
+
+@pytest.mark.slow
+def test_compute_recipe_smollm_recovers_fidelity() -> None:
+    pytest.importorskip("torchao", reason="quant recipe needs the torchao extra")
+    import tempfile
+
+    from firefly.quant_sensitivity import compute_recipe
+
+    inputs = Path(tempfile.mkdtemp()) / "golden.json"
+    inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
+
+    result = compute_recipe(
+        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8",
+        k_values=[1, 2, 4, 8],
+    )
+
+    assert len(result.curve) == 4
+    # Keeping any layers high-precision recovers some fidelity vs all-quantized.
+    assert all(0.0 <= p.recovery <= 1.0 for p in result.curve)
+    by_k = sorted(result.curve, key=lambda p: p.k)
+    # More high-precision layers ⇒ at least as much recovery (allow fp noise).
+    assert by_k[-1].recovery >= by_k[0].recovery - 1e-6
+    # The strong isolated signal (layer.28) means even k=1 recovers meaningfully.
+    assert by_k[0].recovery > 0.1
+    assert result.recommended_k in {1, 2, 4, 8}
 
 
 @pytest.mark.slow
