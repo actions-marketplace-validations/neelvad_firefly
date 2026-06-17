@@ -15,6 +15,7 @@ import torch.nn as nn
 
 from firefly.quant_sensitivity import (
     ISOLATED,
+    MARGINAL,
     STRATEGIES,
     LayerSensitivity,
     RecipePoint,
@@ -56,6 +57,18 @@ def test_isolated_strategy_targets_and_score() -> None:
     # ... and scores by the measured divergence directly (full-quant ignored).
     assert ISOLATED.score(0.42, 0.99) == 0.42
     assert "isolated" in STRATEGIES
+
+
+def test_marginal_strategy_targets_and_score() -> None:
+    layer = {"layers.1.attn", "layers.1.mlp"}
+    all_fqns = layer | {"layers.0.attn", "layers.2.mlp"}
+    # marginal quantizes everything EXCEPT this layer ...
+    assert MARGINAL.targets(layer, all_fqns) == all_fqns - layer
+    # ... and scores by recovery: full-quant divergence minus the measured one.
+    assert MARGINAL.score(0.40, 0.66) == pytest.approx(0.26)
+    # recovery clamps at 0 if keeping the layer fp somehow didn't help.
+    assert MARGINAL.score(0.70, 0.66) == 0.0
+    assert "marginal" in STRATEGIES
 
 
 def test_sensitivity_result_ranks_and_suggests() -> None:
@@ -152,6 +165,28 @@ def test_compute_recipe_smollm_recovers_fidelity() -> None:
     # The strong isolated signal (layer.28) means even k=1 recovers meaningfully.
     assert by_k[0].recovery > 0.1
     assert result.recommended_k in {1, 2, 4, 8}
+
+
+@pytest.mark.slow
+def test_compute_sensitivity_smollm_marginal_runs() -> None:
+    """The marginal strategy runs end-to-end and yields valid recovery scores.
+    (Empirically it builds worse recipes than isolated on SmolLM/W8A8 — that's a
+    finding, not a test assertion; we only guard that it runs and is well-formed.)"""
+    pytest.importorskip("torchao", reason="quant sensitivity needs the torchao extra")
+    import tempfile
+
+    from firefly.quant_sensitivity import compute_sensitivity
+
+    inputs = Path(tempfile.mkdtemp()) / "golden.json"
+    inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
+
+    result = compute_sensitivity(
+        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8", strategy="marginal"
+    )
+    assert result.strategy == "marginal"
+    assert len(result.layers) == 30
+    # marginal score is a recovery (full - measured), clamped non-negative.
+    assert all(x.sensitivity >= 0.0 for x in result.layers)
 
 
 @pytest.mark.slow

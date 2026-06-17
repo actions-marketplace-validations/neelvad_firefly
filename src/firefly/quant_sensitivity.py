@@ -97,10 +97,18 @@ ISOLATED = Strategy(
     score=lambda measured, _full: measured,
 )
 
-# Next strategy plugs in here (same shape), e.g. marginal:
-#   targets=lambda layer_fqns, all_fqns: all_fqns - set(layer_fqns)
-#   score=lambda measured, full: full - measured   # recovery from keeping layer fp
-STRATEGIES: dict[str, Strategy] = {ISOLATED.name: ISOLATED}
+MARGINAL = Strategy(
+    name="marginal",
+    describe="quantize all but this layer; sensitivity = the output fidelity recovered by keeping it fp",
+    targets=lambda layer_fqns, all_fqns: all_fqns - set(layer_fqns),
+    # measured = divergence with every layer but this one quantized; full - measured
+    # is how much keeping this layer fp recovers vs all-quantized. This measures
+    # marginal contribution directly, so it predicts recipes better than isolated
+    # (isolated overstates single-layer importance — see the P1 finding).
+    score=lambda measured, full: max(0.0, full - measured),
+)
+
+STRATEGIES: dict[str, Strategy] = {ISOLATED.name: ISOLATED, MARGINAL.name: MARGINAL}
 
 
 def discover_layers(model: nn.Module) -> dict[int, list[str]]:
