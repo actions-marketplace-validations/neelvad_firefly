@@ -27,6 +27,7 @@ errors for ``torchao`` are surfaced with an actionable message.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -205,10 +206,18 @@ def _quant_config(scheme: str, group_size: int = 32):
     raise ValueError(f"unknown quant scheme {scheme!r}; choose from {QUANT_SCHEMES}")
 
 
-def quantize_model(model: nn.Module, scheme: str = "w8a8", group_size: int = 32) -> nn.Module:
+def quantize_model(
+    model: nn.Module,
+    scheme: str = "w8a8",
+    group_size: int = 32,
+    module_filter: Callable[[nn.Module, str], bool] | None = None,
+) -> nn.Module:
     """Apply real torchao quantization (``scheme``) in place.
 
-    Raises a clear error if the optional ``torchao`` extra is not installed.
+    ``module_filter(module, fully_qualified_name) -> bool`` selects which
+    modules to quantize (torchao's ``filter_fn``); ``None`` quantizes every
+    Linear (torchao's default). The filter is what lets the sensitivity loop
+    quantize one layer at a time. Raises a clear error if ``torchao`` is absent.
     """
     try:
         from torchao.quantization import quantize_
@@ -218,8 +227,12 @@ def quantize_model(model: nn.Module, scheme: str = "w8a8", group_size: int = 32)
             "Install it with: uv pip install 'firefly[torchao]'"
         ) from e
 
+    cfg = _quant_config(scheme, group_size=group_size)
     try:
-        quantize_(model, _quant_config(scheme, group_size=group_size))
+        if module_filter is not None:
+            quantize_(model, cfg, filter_fn=module_filter)
+        else:
+            quantize_(model, cfg)
     except Exception as e:  # translate known torchao failures; re-raise the rest
         translated = _translate_quant_error(scheme, e)
         if translated is not None:

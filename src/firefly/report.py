@@ -19,6 +19,7 @@ from firefly.attribution import AttributionResult
 if TYPE_CHECKING:
     from firefly.head_attribution import PerHeadAttribution
     from firefly.quant_risk import TapQuantRisk
+    from firefly.quant_sensitivity import SensitivityResult
 
 
 def render_human(
@@ -217,6 +218,50 @@ def render_quant_diff_markdown(
         lines.append(f"| | _… and {len(ranked) - top_n} more_ | | | |")
     _append_per_head_markdown(lines, per_head, top_n)
     return "\n".join(lines) + "\n"
+
+
+def render_sensitivity(
+    result: SensitivityResult,
+    top_n: int = 15,
+    keep_k: int = 4,
+    console: Console | None = None,
+) -> str:
+    """Render per-layer quantization sensitivity, ranked most-sensitive first.
+
+    The headline is the all-quantized output divergence we're decomposing; the
+    table ranks decoder layers by how much keeping them in high precision
+    matters, and the footer suggests the top-``keep_k`` to keep high-precision
+    (a recipe that ``firefly quant-recipe`` will verify).
+    """
+    console = console or Console(record=True, width=100)
+    ranked = result.ranked
+
+    table = Table(
+        title=f"Firefly quant sensitivity — {result.scheme} ({result.strategy} strategy)",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("#", justify="right")
+    table.add_column("Layer", no_wrap=True)
+    table.add_column("sensitivity", justify="right")
+    table.add_column("Linears", justify="right")
+    for i, ls in enumerate(ranked[:top_n], 1):
+        style = "bold red" if i == 1 else None
+        table.add_row(str(i), f"layer.{ls.layer}", f"{ls.sensitivity:.2%}", str(ls.n_linears), style=style)
+    console.print(table)
+    if len(ranked) > top_n:
+        console.print(f"[dim]… {len(ranked) - top_n} more layers (showing top {top_n})[/]")
+
+    console.print(
+        f"[bold]all {len(result.layers)} layers quantized[/] ({result.scheme}) → "
+        f"{result.full_quant_divergence:.2%} output divergence at {result.output_tap}"
+    )
+    keep = result.keep_high_precision(keep_k)
+    console.print(
+        f"[bold]suggested keep-in-high-precision[/] (top {keep_k}): "
+        f"{', '.join(f'layer.{k}' for k in keep)}"
+    )
+    return console.export_text()
 
 
 def write_json(

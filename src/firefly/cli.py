@@ -622,5 +622,79 @@ def quant_diff(
         raise typer.Exit(1)
 
 
+@app.command("quant-sensitivity")
+def quant_sensitivity(
+    model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Golden-inputs JSON."),
+    scheme: str = typer.Option(
+        "w8a8", "--scheme", help="torchao quant scheme: w8a8 or int4wo (needs CUDA)."
+    ),
+    group_size: int = typer.Option(32, "--group-size", help="int4wo group size."),
+    strategy: str = typer.Option(
+        "isolated", "--strategy",
+        help="Sensitivity strategy. 'isolated' (default): quantize one layer at a "
+        "time and measure its output divergence alone. More strategies (marginal) "
+        "trade compute for resolution.",
+    ),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
+    dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
+    top_n: int = typer.Option(15, "--top-n", help="How many most-sensitive layers to show."),
+    keep_k: int = typer.Option(4, "--keep-k", help="Suggest keeping this many layers high-precision."),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write the structured sensitivity report here."
+    ),
+) -> None:
+    """Rank decoder layers by how much their quantization hurts the model output.
+
+    Quantizes one layer at a time (the 'isolated' strategy) and measures the
+    resulting divergence at the output, so you can see *which* layers to keep in
+    higher precision — the attribution that guides mixed-precision quantization.
+    Runs N+1 forwards for N decoder layers; use a small model or --device cuda.
+    """
+    from dataclasses import asdict
+
+    from firefly.quant_sensitivity import STRATEGIES, compute_sensitivity
+    from firefly.quant_validate import QuantCompatibilityError, quant_preflight
+    from firefly.report import render_sensitivity
+
+    if strategy not in STRATEGIES:
+        raise typer.BadParameter(
+            f"--strategy must be one of {sorted(STRATEGIES)}, got {strategy!r}",
+            param_hint="--strategy",
+        )
+    try:
+        quant_preflight(scheme, device)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    try:
+        result = compute_sensitivity(
+            model, inputs, device=device, dtype=dtype, scheme=scheme,
+            group_size=group_size, strategy=strategy,
+        )
+    except (ImportError, QuantCompatibilityError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(render_sensitivity(result, top_n=top_n, keep_k=keep_k))
+
+    if report_json is not None:
+        import json
+
+        payload = {
+            "model_id": result.model_id,
+            "scheme": result.scheme,
+            "strategy": result.strategy,
+            "full_quant_divergence": result.full_quant_divergence,
+            "output_tap": result.output_tap,
+            "keep_high_precision": result.keep_high_precision(keep_k),
+            "layers": [asdict(x) for x in result.ranked],
+        }
+        with report_json.open("w") as f:
+            json.dump(payload, f, indent=2)
+        typer.echo(f"Wrote sensitivity report to {report_json}")
+
+
 if __name__ == "__main__":
     app()
