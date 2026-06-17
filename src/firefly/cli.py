@@ -570,7 +570,7 @@ def quant_diff(
     """
     from firefly.attribution import attribute_first_divergence
     from firefly.compare import compare_to_reference, compare_to_reference_per_head
-    from firefly.quant_validate import (
+    from firefly.quant_torchao import (
         QUANT_SCHEMES,
         QuantCompatibilityError,
         quant_preflight,
@@ -675,7 +675,7 @@ def quant_sensitivity(
     from dataclasses import asdict
 
     from firefly.quant_sensitivity import GRANULARITIES, STRATEGIES, compute_sensitivity
-    from firefly.quant_validate import QuantCompatibilityError, quant_preflight
+    from firefly.quant_torchao import QuantCompatibilityError, quant_preflight
     from firefly.report import render_sensitivity
 
     if strategy not in STRATEGIES:
@@ -761,7 +761,7 @@ def quant_recipe(
     fidelity — the attribution-guided answer torchao autoquant can't explain.
     """
     from firefly.quant_sensitivity import GRANULARITIES, RECIPE_STRATEGIES, compute_recipe
-    from firefly.quant_validate import QuantCompatibilityError, quant_preflight
+    from firefly.quant_torchao import QuantCompatibilityError, quant_preflight
     from firefly.report import render_recipe
 
     if strategy not in RECIPE_STRATEGIES:

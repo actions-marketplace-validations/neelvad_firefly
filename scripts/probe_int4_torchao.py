@@ -7,7 +7,7 @@ the installed torchao on real hardware: print the config signature + available
 layouts/packing-formats, then try a matrix of int4 configs, reporting which one
 both quantizes AND runs a forward cleanly.
 
-The winner gets wired into firefly.quant_validate._quant_config.
+The winner gets wired into firefly.quant_torchao._quant_config.
 
 Run:  uv run modal run scripts/probe_int4_torchao.py
 """
