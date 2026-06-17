@@ -88,7 +88,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/firefly/cli.py" = ["B008"]  # typer.Option in defaults is idiomatic
+"src/firefly/cli/*.py" = ["B008"]  # typer.Option in defaults is idiomatic
 "scripts/*.py" = ["B008"]        # ditto for typer/modal entrypoints
 
 [tool.pytest.ini_options]
