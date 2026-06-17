@@ -27,6 +27,10 @@ The most useful finding, before any setup:
 
 The rest of this post is how I got here.
 
+*(Related: the same per-layer machinery now drives [attribution-guided
+mixed-precision quantization](quant-recipe.html) — which layers to keep in high
+precision when you quantize, measured and verified.)*
+
 ## What's Firefly
 
 It's a CLI plus a GitHub Action wrapper. The model is:
