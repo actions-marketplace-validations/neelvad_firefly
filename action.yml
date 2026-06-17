@@ -93,6 +93,20 @@ inputs:
       github.token; override with a PAT for cross-repo / elevated posting.
     default: ''
     required: false
+  runner:
+    description: >-
+      check mode only: candidate capture backend (hf / vllm / sglang). Defaults
+      to the runner recorded in the reference manifest (so it re-runs through
+      the same engine). vllm/sglang need a CUDA self-hosted runner + the
+      matching firefly extra.
+    default: ''
+    required: false
+  runner-opt:
+    description: >-
+      check mode only: engine knobs as key=value, one per line (e.g.
+      attention_backend=FLASH_ATTN). Layered over the manifest's recorded opts.
+    default: ''
+    required: false
 
 outputs:
   first-divergent-tap:
@@ -149,6 +163,12 @@ runs:
           if [[ "${{ inputs.allow-fingerprint-mismatch }}" == "true" ]]; then
             FLAGS+=(--allow-fingerprint-mismatch)
           fi
+          if [[ -n "${{ inputs.runner }}" ]]; then
+            FLAGS+=(--runner "${{ inputs.runner }}")
+          fi
+          while IFS= read -r opt; do
+            [[ -n "$opt" ]] && FLAGS+=(--runner-opt "$opt")
+          done <<< "${{ inputs.runner-opt }}"
           firefly check \
             --reference "${{ inputs.reference }}" \
             --candidate "${{ inputs.candidate }}" \
