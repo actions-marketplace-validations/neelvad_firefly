@@ -220,6 +220,7 @@ def test_capture_reference_smollm_end_to_end(tmp_path: Path) -> None:
     manifest, tensors = read_reference(out_dir)
     assert manifest.model_id == "HuggingFaceTB/SmolLM-135M"
     assert manifest.model_fingerprint
+    assert manifest.runner == "hf"  # capture records the runner as provenance
     assert len(tensors) > 0
     assert "final_norm" in tensors
 

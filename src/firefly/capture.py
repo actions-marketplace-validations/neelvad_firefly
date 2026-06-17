@@ -259,6 +259,8 @@ def capture_reference(
         domain=domain,
         dtype=result.dtype,
         head_counts=result.head_counts,
+        runner=getattr(active_runner, "name", "hf"),
+        runner_options=dict(options or {}),
     )
     write_reference(out_dir, manifest, captured)
     clear_stale_tolerances(out_dir)

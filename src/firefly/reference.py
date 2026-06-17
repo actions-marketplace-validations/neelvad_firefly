@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import platform
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import torch
@@ -44,6 +44,15 @@ class ReferenceManifest:
     """For per-head taps (``layer.{i}.attn_heads``): the number of attention
     heads to split that tap's tensor into. Empty unless captured with
     ``--per-head``. Consumed by :mod:`firefly.head_attribution`."""
+    runner: str = "hf"
+    """Capture backend used (hf / vllm / sglang). First-class provenance so
+    ``check`` / ``calibrate`` re-run the candidate through the *same* engine by
+    default — comparing across engines would surface engine artifacts as
+    divergence. Defaults to 'hf' for references captured before this field
+    existed."""
+    runner_options: dict[str, str] = field(default_factory=dict)
+    """Engine knobs used at capture (e.g. ``attention_backend``). Re-applied by
+    default when re-running the candidate, so the comparison is apples-to-apples."""
     schema_version: int = SCHEMA_VERSION
 
 
@@ -94,7 +103,11 @@ def read_manifest(ref_dir: Path) -> ReferenceManifest:
         raise ValueError(
             f"Unsupported reference schema_version={found_version}; expected {SCHEMA_VERSION}"
         )
-    return ReferenceManifest(**data)
+    # Tolerate unknown keys (a newer writer added an additive field) and let
+    # missing keys fall back to dataclass defaults (an older reference predates
+    # a field). Additive fields don't bump schema_version.
+    known = {f.name for f in fields(ReferenceManifest)}
+    return ReferenceManifest(**{k: v for k, v in data.items() if k in known})
 
 
 def read_reference(ref_dir: Path) -> tuple[ReferenceManifest, dict[str, torch.Tensor]]:

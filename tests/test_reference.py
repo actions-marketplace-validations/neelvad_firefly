@@ -10,8 +10,10 @@ import pytest
 import torch
 
 from firefly.reference import (
+    SCHEMA_VERSION,
     ReferenceManifest,
     capture_env,
+    read_manifest,
     read_reference,
     write_reference,
 )
@@ -36,6 +38,43 @@ def _make_tensors() -> dict[str, torch.Tensor]:
         "layer.1": torch.randn(1, 4, 8),
         "final_norm": torch.randn(1, 4, 8),
     }
+
+
+def test_runner_metadata_round_trips(tmp_path: Path) -> None:
+    manifest = _make_manifest()
+    manifest.runner = "vllm"
+    manifest.runner_options = {"attention_backend": "FLASH_ATTN"}
+    write_reference(tmp_path, manifest, _make_tensors())
+
+    loaded = read_manifest(tmp_path)
+    assert loaded.runner == "vllm"
+    assert loaded.runner_options == {"attention_backend": "FLASH_ATTN"}
+
+
+def test_old_reference_defaults_runner_to_hf(tmp_path: Path) -> None:
+    """A manifest written before the runner field existed reads back as 'hf'."""
+    data = {
+        "model_id": "m", "model_fingerprint": "x", "tap_points": ["final_norm"],
+        "shapes": {"final_norm": [1, 4]}, "dtypes": {"final_norm": "float32"},
+        "captured_at": datetime.now(UTC).isoformat(), "schema_version": SCHEMA_VERSION,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(data))
+    loaded = read_manifest(tmp_path)
+    assert loaded.runner == "hf"
+    assert loaded.runner_options == {}
+
+
+def test_read_manifest_tolerates_unknown_keys(tmp_path: Path) -> None:
+    """A newer writer's additive field doesn't crash an older reader."""
+    data = {
+        "model_id": "m", "model_fingerprint": "x", "tap_points": ["final_norm"],
+        "shapes": {"final_norm": [1, 4]}, "dtypes": {"final_norm": "float32"},
+        "captured_at": datetime.now(UTC).isoformat(), "schema_version": SCHEMA_VERSION,
+        "some_future_field": 42,
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(data))
+    loaded = read_manifest(tmp_path)  # must not raise
+    assert loaded.model_id == "m"
 
 
 def test_round_trip(tmp_path: Path) -> None:

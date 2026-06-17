@@ -305,13 +305,14 @@ def check(
             "Override only for a deliberate cross-dtype comparison."
         ),
     ),
-    runner: str = typer.Option(
-        "hf",
+    runner: str | None = typer.Option(
+        None,
         "--runner",
         help=(
-            "Capture backend for the candidate: 'hf' (default) or 'vllm' "
-            "(in-process vLLM; needs firefly[vllm] + a CUDA GPU). Use the same "
-            "runner the reference was captured with."
+            "Capture backend for the candidate: 'hf', 'vllm', or 'sglang'. "
+            "Defaults to the runner the reference was captured with (recorded in "
+            "the manifest) — comparing across engines surfaces engine artifacts "
+            "as divergence, so override only deliberately."
         ),
     ),
     runner_opt: list[str] = typer.Option(
@@ -356,12 +357,6 @@ def check(
 
     resolved_reference = _resolve_or_exit(reference)
 
-    runner_options = _parse_runner_opts(runner_opt)
-    try:
-        active_runner = get_runner(runner)
-    except (ValueError, NotImplementedError) as e:
-        raise typer.BadParameter(str(e), param_hint="--runner") from e
-
     if ci_format not in {"human", "markdown"}:
         raise typer.BadParameter(
             f"--ci-format must be 'human' or 'markdown', got {ci_format!r}",
@@ -391,10 +386,30 @@ def check(
         )
         raise typer.Exit(code=2)
 
+    manifest = read_manifest(resolved_reference)
+
+    # Default the runner (and its knobs) to what the reference was captured
+    # with — recorded in the manifest — so check re-runs through the same
+    # engine. Warn if the user deliberately overrides to a different engine.
+    effective_runner = runner if runner is not None else manifest.runner
+    if runner is not None and runner != manifest.runner:
+        typer.echo(
+            f"WARNING: checking with runner '{runner}' but the reference was "
+            f"captured with '{manifest.runner}'. Cross-engine differences will "
+            f"show up as divergence.",
+            err=True,
+        )
+    # Manifest knobs first, user --runner-opt overrides on top.
+    runner_options = {**manifest.runner_options, **_parse_runner_opts(runner_opt)}
+    try:
+        active_runner = get_runner(effective_runner)
+    except (ValueError, NotImplementedError) as e:
+        raise typer.BadParameter(str(e), param_hint="--runner") from e
+
     # If the reference carries per-head taps, run the per-head attribution
     # path so the report can name which attention head diverged. Both paths
     # run the candidate exactly once.
-    per_head_taps = bool(read_manifest(resolved_reference).head_counts)
+    per_head_taps = bool(manifest.head_counts)
     max_rel = max_rel_error if max_rel_error > 0 else None
     if per_head_taps:
         divergences, per_head = compare_to_reference_per_head(
