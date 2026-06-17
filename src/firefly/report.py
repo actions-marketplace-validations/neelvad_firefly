@@ -18,6 +18,7 @@ from firefly.attribution import AttributionResult
 
 if TYPE_CHECKING:
     from firefly.head_attribution import PerHeadAttribution
+    from firefly.op_drill import OpDiffResult
     from firefly.quant_risk import TapQuantRisk
     from firefly.quant_sensitivity import RecipeResult, SensitivityResult
 
@@ -311,6 +312,51 @@ def render_recipe(
         )
     else:
         console.print("[yellow]No recipe points evaluated.[/]")
+    return console.export_text()
+
+
+def render_op_diff(result: OpDiffResult, top_n: int = 25, console: Console | None = None) -> str:
+    """Render the op-by-op drill-down inside a module, in execution order.
+
+    The first structural (op-name) or numerical (rel > tol) divergence is the
+    headline — the ATen op where the two executions part inside the module.
+    """
+    console = console or Console(record=True, width=100)
+    first = result.first_divergent
+
+    table = Table(
+        title=f"Firefly op drill-down — {result.module} ({len(result.divergences)} ops)",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("#", justify="right")
+    table.add_column("ATen op", no_wrap=True)
+    table.add_column("rel |Δ|", justify="right")
+    table.add_column("", justify="center")
+    for d in result.divergences[:top_n]:
+        rel = "—" if d.rel is None else f"{d.rel:.2%}"
+        mark = "[red]⚠[/]" if d.structural else ("[red]✗[/]" if d.exceeds else "[green]✓[/]")
+        style = "bold red" if first is not None and d.index == first.index else None
+        table.add_row(str(d.index), d.op, rel, mark, style=style)
+    console.print(table)
+    if len(result.divergences) > top_n:
+        console.print(f"[dim]… {len(result.divergences) - top_n} more ops[/]")
+
+    if first is None:
+        console.print(
+            f"[bold green]No op exceeds {result.tol:.1%} relative divergence[/] "
+            f"inside {result.module}."
+        )
+    elif first.structural:
+        console.print(
+            f"[bold red]Structural divergence[/] at op #{first.index} (`{first.op}`): "
+            f"the op graphs differ here (ref {result.n_ref_ops} ops, cand {result.n_cand_ops})."
+        )
+    else:
+        console.print(
+            f"[bold red]First divergence[/] at op #{first.index}: `{first.op}` "
+            f"({first.rel:.2%} rel, tol {result.tol:.1%})."
+        )
     return console.export_text()
 
 
