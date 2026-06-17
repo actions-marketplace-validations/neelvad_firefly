@@ -79,6 +79,20 @@ inputs:
     description: 'quant-diff only: int4wo group size.'
     default: '32'
     required: false
+  comment-on-pr:
+    description: >-
+      'true' (default) to post the markdown summary as a comment on the PR
+      (pull_request events only; no-op otherwise). The calling workflow must
+      grant `permissions: pull-requests: write`. A failure to post is a warning,
+      never a build failure.
+    default: 'true'
+    required: false
+  github-token:
+    description: >-
+      Token for posting the PR comment. Defaults to the workflow's
+      github.token; override with a PAT for cross-repo / elevated posting.
+    default: ''
+    required: false
 
 outputs:
   first-divergent-tap:
@@ -158,6 +172,24 @@ runs:
           echo "report-path=$(pwd)/firefly-report.json"
         } >> "$GITHUB_OUTPUT"
         exit $EXIT
+
+    - name: Comment on PR
+      # Runs even when the check failed (always()) — failing the build is
+      # exactly when the comment matters most. Posting errors degrade to a
+      # warning so a missing 'pull-requests: write' permission never fails CI.
+      if: ${{ always() && inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token != '' && inputs.github-token || github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        if [[ ! -f firefly-summary.md ]]; then
+          echo "no firefly-summary.md to post"; exit 0
+        fi
+        # Sticky: update this author's last comment if present, else create.
+        gh pr comment "$PR_NUMBER" --body-file firefly-summary.md --edit-last 2>/dev/null \
+          || gh pr comment "$PR_NUMBER" --body-file firefly-summary.md \
+          || echo "::warning title=Firefly::could not post PR comment (grant the workflow 'permissions: pull-requests: write')"
 
 branding:
   icon: 'check-circle'

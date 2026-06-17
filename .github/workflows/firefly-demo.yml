@@ -29,6 +29,12 @@ on:
 jobs:
   firefly-check:
     runs-on: ubuntu-latest
+    # Needed for the Action's PR-comment step. (This demo is workflow_dispatch,
+    # so there's no PR to comment on — but a real pull_request-triggered
+    # workflow using the Action needs this.)
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
