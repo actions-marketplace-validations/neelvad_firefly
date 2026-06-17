@@ -62,6 +62,29 @@ and the quantized candidate is *expected* to differ from the reference — the
 fingerprint is taken pre-quantization, so it still matches the fp baseline and
 no `allow-fingerprint-mismatch` is required.
 
+### Attribution-guided mixed precision (`quant-sensitivity` / `quant-recipe`)
+
+Beyond gating, Firefly does the thing `torchao autoquant` can't *explain*: it
+measures, causally, how much each layer's (or Linear's) quantization hurts the
+model output, then builds and **verifies** a mixed-precision recipe — keep the
+most-sensitive units in high precision, quantize the rest, and report how much
+output fidelity that recovers.
+
+```sh
+# rank units by how much their quantization hurts the output
+firefly quant-sensitivity -m my-org/my-model -i prompts.json --scheme int4wo
+
+# build + verify a recipe (a recovery curve, ranked by divergence)
+firefly quant-recipe -m my-org/my-model -i prompts.json \
+    --scheme int4wo --strategy greedy --k-values 1,2,4,8
+```
+
+It's a feature-selection problem: `--strategy {isolated,marginal,greedy}` trades
+compute for quality (cheap per-unit filters → wrapper search) and
+`--granularity {layer,linear}` sets the unit. Full writeup, the strategy
+comparison, and the int4 result where `greedy` wins:
+[docs/quant-recipe.md](docs/quant-recipe.md).
+
 ## Why this exists
 
 Output-level ML monitoring (Arize, Galileo, Evidently) deliberately operates
@@ -289,8 +312,18 @@ changed upstream.
   8 architecture families)
 - **Per-head attention attribution** (`capture --per-head`) — drills
   the first divergent layer down to the specific attention head
-- **Quantization-risk attribution** (`firefly quant-risk`) — predicts
-  which layers break under int8/int4 from stored activations alone
+- **Quantization-risk heuristic** (`firefly quant-risk`) — flags
+  outlier-feature layers sensitive to int8/int4 from stored activations alone
+  (cheap, no model run; for *measured* attribution use the items below)
+- **Quantization diff** (`firefly quant-diff`, action `mode: quant-diff`) —
+  diff a real torchao-quantized model (w8a8 / int4wo) against the fp baseline,
+  ranked by per-layer relative divergence, with a CI threshold gate
+- **Attribution-guided mixed precision** (`quant-sensitivity` / `quant-recipe`)
+  — measure which layers/Linears to keep in high precision and *verify* the
+  recovered fidelity (isolated / marginal / greedy strategies; layer or linear
+  granularity)
+- **Op-level drill-down** (`firefly op-diff`) — a `TorchDispatchMode` scoped to
+  a flagged module finds the first ATen op where two runs diverge
 - **Shadow-mode capture mechanism** (`firefly.shadow`) — custom ops + a
   Triton kernel that survive `torch.compile` and CUDA-graph replay, with
   local and S3/GCS/Azure streaming sinks. This is a *mechanism*, not yet a
@@ -304,8 +337,9 @@ changed upstream.
 **Planned:**
 
 - More runners behind the seam (TensorRT-LLM, TGI) as demand warrants
-- torchao integration — validate the simulated quant-risk rankings
-  against real quantized kernels (per-tensor vs per-channel A/B)
+- Mixed precision at scale — `greedy` / per-`linear` recipes on larger
+  models + int4 (where the wrapper search pulls ahead), and a per-op A/B
+  intercept-override mode via `TorchDispatchMode`
 - Recsys capture end-to-end (embedding-table monitoring, O2O
   divergence) — the v2 domain expansion
 - Hosted/report surface beyond the terminal table (local static HTML
