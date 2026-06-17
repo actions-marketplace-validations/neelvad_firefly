@@ -27,9 +27,40 @@ at the wrong model."
 ```
 
 The action posts a markdown summary to `$GITHUB_STEP_SUMMARY` and exits
-non-zero on divergence. Outputs (`first-divergent-tap`, `passed`,
-`report-path`) drive downstream steps like Slack notifications or PR
-comments.
+non-zero on divergence. On `pull_request` runs it also posts the summary as
+a sticky PR comment (grant the workflow `permissions: pull-requests: write`;
+a missing permission degrades to a warning, never a failed build). Outputs
+(`first-divergent-tap`, `passed`, `report-path`) drive downstream steps.
+
+### Quantization gate (`mode: quant-diff`)
+
+Set `mode: quant-diff` to gate on what *quantization* does: it diffs a
+torchao-quantized candidate against the fp baseline, ranks the per-layer
+divergence, and fails if any layer exceeds `rel-threshold`.
+
+```yaml
+# .github/workflows/firefly-quant.yml
+permissions:
+  pull-requests: write          # for the PR comment
+jobs:
+  quant-gate:
+    runs-on: ubuntu-latest       # use a CUDA runner for scheme: int4wo
+    steps:
+      - uses: neelvad/firefly@v0.4.0
+        with:
+          mode: quant-diff
+          reference: hf://my-org/my-firefly-ref  # fp baseline (same model)
+          candidate: my-org/my-model
+          inputs: tests/firefly-prompts.json
+          scheme: w8a8                 # or int4wo (needs a CUDA runner)
+          rel-threshold: 0.05          # fail if any layer diverges >5%
+          firefly-extras: torchao      # quant-diff needs the torchao extra
+```
+
+Unlike `check`, `quant-diff` needs no calibration (it ranks by magnitude),
+and the quantized candidate is *expected* to differ from the reference — the
+fingerprint is taken pre-quantization, so it still matches the fp baseline and
+no `allow-fingerprint-mismatch` is required.
 
 ## Why this exists
 
@@ -211,12 +242,15 @@ the >1% threshold where real bugs live.
 | `compare.py` | Per-tap diff with effective-atol composition |
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
-| `quant_risk.py` | Simulated int8/int4 quantization risk from stored activations |
+| `quant_risk.py` | Simulated int8/int4 quantization risk from stored activations (heuristic) |
+| `quant_validate.py` | Real torchao quantization (w8a8 / int4wo) for quant-diff + sensitivity |
+| `quant_sensitivity.py` | Attribution-guided mixed precision: per-unit sensitivity + verified recipe (isolated / marginal / greedy; layer or linear granularity) |
+| `op_drill.py` | Op-level drill-down: `TorchDispatchMode` scoped to a module → first diverging ATen op |
 | `shadow/` | Shadow-mode capture package: custom ops + Triton kernel + Tappers + sinks that survive torch.compile and CUDA graphs |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
-| `cli.py` | `firefly capture / calibrate / check / quant-risk / publish` |
-| `action.yml` | GitHub Action wrapper for `firefly check` |
+| `cli.py` | `firefly capture / calibrate / check / quant-risk / quant-diff / quant-sensitivity / quant-recipe / op-diff / publish` |
+| `action.yml` | GitHub Action wrapper for `firefly check` and `quant-diff` (`mode:` input) |
 | `scripts/capture_vllm.py` | Modal harness around the vLLM runner (multi-version blog repros) |
 | `scripts/plot_validation.py` | Diff and magnitude figures for the writeup |
 
