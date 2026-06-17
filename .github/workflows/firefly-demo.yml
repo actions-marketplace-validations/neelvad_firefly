@@ -1,10 +1,10 @@
 name: firefly-demo
 
 # Worked example of running Firefly against the quantization demo's
-# reference artifact. Manual-trigger only — `firefly capture` and
-# `firefly calibrate` download model weights and take a few minutes,
-# so we don't want this firing on every PR. Users copy this workflow
-# (or its `firefly check` step) into their own repo.
+# reference artifact, in either mode. Manual-trigger only — `firefly capture`
+# and `firefly calibrate` download model weights and take a few minutes, so we
+# don't want this firing on every PR. Users copy this workflow (or its
+# `uses: ./` step) into their own repo.
 
 on:
   workflow_dispatch:
@@ -13,6 +13,18 @@ on:
         description: 'HF model ID to check against the reference'
         required: false
         default: 'HuggingFaceTB/SmolLM-135M'
+      mode:
+        description: "'check' (per-layer parity gate) or 'quant-diff' (quantization gate)"
+        required: false
+        default: 'check'
+      scheme:
+        description: 'quant-diff only: w8a8 or int4wo (int4wo needs a CUDA runner)'
+        required: false
+        default: 'w8a8'
+      rel-threshold:
+        description: 'quant-diff only: fail above this mean relative divergence (e.g. 0.05)'
+        required: false
+        default: '0.05'
 
 jobs:
   firefly-check:
@@ -25,15 +37,18 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Firefly
+      - name: Install Firefly (for the calibrate bootstrap below)
+        if: ${{ inputs.mode == 'check' }}
         run: |
           python -m pip install --upgrade pip
           python -m pip install .
 
-      - name: Calibrate the demo reference (one-time bootstrap)
+      - name: Calibrate the demo reference (one-time bootstrap; check mode only)
         # Real users commit tolerances.json to their repo and skip this step.
         # The demo ships only the reference + golden inputs, so we derive
-        # tolerances in-CI to keep the example self-contained.
+        # tolerances in-CI to keep the example self-contained. quant-diff ranks
+        # by magnitude and needs no calibration, so it skips this entirely.
+        if: ${{ inputs.mode == 'check' }}
         run: |
           if [ ! -f examples/quantization_demo/_artifacts/reference/tolerances.json ]; then
             firefly calibrate \
@@ -43,21 +58,26 @@ jobs:
               --noise-mode none
           fi
 
-      - name: Firefly check
+      - name: Firefly (check or quant-diff)
         id: firefly
         uses: ./
         with:
+          mode: ${{ inputs.mode }}
           reference: examples/quantization_demo/_artifacts/reference
           candidate: ${{ inputs.candidate-model }}
           inputs: examples/quantization_demo/_artifacts/golden.json
+          # quant-diff needs the torchao extra; check needs nothing extra.
+          firefly-extras: ${{ inputs.mode == 'quant-diff' && 'torchao' || '' }}
+          # --- check-mode knobs ---
           # The demo reference was calibrated on a different machine than
           # GitHub's x86 Ubuntu runners. CPU/BLAS differences produce ~1e-4
-          # absolute FP32 jitter that the same-machine calibration didn't
-          # see. A 0.1% relative ceiling absorbs that without losing
-          # sensitivity to the real bugs Firefly is meant to catch
-          # (quantization round-trips, kernel changes, etc. produce >0.1%).
-          # Real users either calibrate in CI itself, or set this knob.
+          # absolute FP32 jitter that the same-machine calibration didn't see;
+          # a 0.1% relative ceiling absorbs that without losing sensitivity to
+          # the real bugs Firefly catches. Real users calibrate in CI, or set this.
           max-rel-error: '0.001'
+          # --- quant-diff-mode knobs (ignored in check mode) ---
+          scheme: ${{ inputs.scheme }}
+          rel-threshold: ${{ inputs.rel-threshold }}
 
       - name: Use Firefly outputs (example downstream consumer)
         if: always()

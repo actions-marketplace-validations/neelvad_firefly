@@ -51,8 +51,33 @@ inputs:
       Optional extras to install with Firefly, for cloud-hosted references.
       Set to the comma-separated extras matching your reference URI scheme:
       's3' for s3://, 'gcs' for gs://, 'azure' for az:// (e.g. 's3' or
-      's3,gcs'). Leave empty for local or hf:// references.
+      's3,gcs'). Leave empty for local or hf:// references. Use 'torchao'
+      for mode 'quant-diff'.
     default: ''
+    required: false
+  mode:
+    description: >-
+      'check' (default): per-layer numerical-parity gate. 'quant-diff': rank a
+      torchao-quantized candidate's per-layer divergence vs the fp baseline and
+      fail if it exceeds rel-threshold — the attribution-guided quantization
+      gate. 'quant-diff' needs the 'torchao' extra (set firefly-extras).
+    default: 'check'
+    required: false
+  scheme:
+    description: >-
+      quant-diff only: torchao scheme — 'w8a8' (CPU/GPU) or 'int4wo' (needs a
+      CUDA runner).
+    default: 'w8a8'
+    required: false
+  rel-threshold:
+    description: >-
+      quant-diff only: fail if any tap's mean relative divergence exceeds this
+      fraction (e.g. 0.05 = 5%). 0 reports without failing.
+    default: '0'
+    required: false
+  group-size:
+    description: 'quant-diff only: int4wo group size.'
+    default: '32'
     required: false
 
 outputs:
@@ -88,28 +113,45 @@ runs:
           python -m pip install "${{ github.action_path }}"
         fi
 
-    - name: Run firefly check
+    - name: Run firefly
       id: check
       shell: bash
       run: |
         set +e
-        FLAGS=()
-        if [[ "${{ inputs.allow-fingerprint-mismatch }}" == "true" ]]; then
-          FLAGS+=(--allow-fingerprint-mismatch)
+        if [[ "${{ inputs.mode }}" == "quant-diff" ]]; then
+          firefly quant-diff \
+            --reference "${{ inputs.reference }}" \
+            --candidate "${{ inputs.candidate }}" \
+            --inputs "${{ inputs.inputs }}" \
+            --device "${{ inputs.device }}" \
+            --scheme "${{ inputs.scheme }}" \
+            --group-size "${{ inputs.group-size }}" \
+            --rel-threshold "${{ inputs.rel-threshold }}" \
+            --report-json firefly-report.json \
+            --ci-format markdown \
+            > firefly-summary.md
+        elif [[ "${{ inputs.mode }}" == "check" ]]; then
+          FLAGS=()
+          if [[ "${{ inputs.allow-fingerprint-mismatch }}" == "true" ]]; then
+            FLAGS+=(--allow-fingerprint-mismatch)
+          fi
+          firefly check \
+            --reference "${{ inputs.reference }}" \
+            --candidate "${{ inputs.candidate }}" \
+            --inputs "${{ inputs.inputs }}" \
+            --device "${{ inputs.device }}" \
+            --max-rel-error "${{ inputs.max-rel-error }}" \
+            --report-json firefly-report.json \
+            --ci-format markdown \
+            "${FLAGS[@]}" \
+            > firefly-summary.md
+        else
+          echo "::error::unknown mode '${{ inputs.mode }}' (expected 'check' or 'quant-diff')"
+          exit 2
         fi
-        firefly check \
-          --reference "${{ inputs.reference }}" \
-          --candidate "${{ inputs.candidate }}" \
-          --inputs "${{ inputs.inputs }}" \
-          --device "${{ inputs.device }}" \
-          --max-rel-error "${{ inputs.max-rel-error }}" \
-          --report-json firefly-report.json \
-          --ci-format markdown \
-          "${FLAGS[@]}" \
-          > firefly-summary.md
         EXIT=$?
         cat firefly-summary.md >> "$GITHUB_STEP_SUMMARY"
-        FIRST_DIV=$(python -c "import json,sys; d=json.load(open('firefly-report.json')); print(d.get('first_divergent_tap') or '')")
+        FIRST_DIV=$(python -c "import json,sys; d=json.load(open('firefly-report.json')); print(d.get('first_divergent_tap') or '')" 2>/dev/null || echo "")
         {
           echo "first-divergent-tap=$FIRST_DIV"
           if [[ $EXIT -eq 0 ]]; then echo "passed=true"; else echo "passed=false"; fi
