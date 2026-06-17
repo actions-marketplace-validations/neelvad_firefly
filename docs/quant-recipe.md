@@ -72,10 +72,32 @@ layer) — keeping it alone recovers 37%. After that:
 
 The interesting part is *why greedy barely beats isolated*: `layer.28` dominates
 so heavily that the interactions are weak, so the cheap filter (`isolated`)
-lands on essentially the greedy-optimal set. Greedy's wrapper advantage should
-widen on models where sensitivity is more distributed — bigger models, int4. So
-the practical rule is the feature-selection rule: **use the cheap filter when
-one item dominates; spend the wrapper compute when interactions matter.**
+lands on essentially the greedy-optimal set.
+
+## When interactions matter: int4 on a bigger model
+
+Re-run on **Qwen2.5-0.5B with int4 weight-only** (a more aggressive scheme, on
+a model with no single dominating layer; all-quantized divergence **72.7%**) and
+the picture changes — recovery (%) by strategy:
+
+| keep k | isolated | marginal | greedy |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.0 | **6.9** | **6.9** |
+| 2 | 10.4 | 10.1 | 10.4 |
+| 4 | **33.0** | 15.6 | **33.0** |
+| 8 | 46.9 | 22.8 | **48.4** |
+
+Now **neither filter is robust**: `marginal` wins at k=1 (no dominating layer, so
+"what recovers most" beats "intrinsic difficulty"), but `isolated` wins by k=4.
+**`greedy` is the only strategy that's best-or-tied at every k** — it's
+effectively `max(isolated, marginal)` plus an edge at k=8. That's the
+wrapper-beats-filter payoff the feature-selection analogy predicts, and it only
+shows up once interactions matter.
+
+So the practical rule is the feature-selection rule: **use a cheap filter when
+one unit dominates; spend the wrapper (greedy) compute when sensitivity is
+distributed.** (Validated on real int4 kernels on GPU via
+`scripts/validate_quant_recipe_gpu.py`.)
 
 ## Granularity: layer vs Linear
 
