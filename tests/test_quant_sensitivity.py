@@ -167,6 +167,55 @@ def test_compute_recipe_smollm_recovers_fidelity() -> None:
     assert result.recommended_k in {1, 2, 4, 8}
 
 
+def test_greedy_select_picks_highest_impact_first() -> None:
+    from firefly.quant_sensitivity import _greedy_select
+
+    layers = {0: ["l0"], 1: ["l1"], 2: ["l2"]}
+    all_fqns = {"l0", "l1", "l2"}
+    # Synthetic oracle: divergence = sum of penalties for the QUANTIZED layers.
+    # Keeping a high-penalty layer fp (out of `targets`) reduces divergence most.
+    penalty = {"l0": 0.1, "l1": 0.2, "l2": 0.5}
+
+    def measure(targets: set[str]) -> float:
+        return sum(penalty[f] for f in targets)
+
+    order = _greedy_select(layers, all_fqns, measure, max_k=3)
+    # Greedy keeps the biggest-penalty layer first, then next, then last.
+    assert [idx for idx, _ in order] == [2, 1, 0]
+    # Divergence after each step decreases monotonically (0.3, 0.1, 0.0).
+    divs = [d for _, d in order]
+    assert divs == sorted(divs, reverse=True)
+    assert divs[-1] == pytest.approx(0.0)
+
+
+def test_greedy_is_a_recipe_strategy_not_a_score_strategy() -> None:
+    from firefly.quant_sensitivity import GREEDY, RECIPE_STRATEGIES
+
+    assert GREEDY in RECIPE_STRATEGIES
+    assert GREEDY not in STRATEGIES  # greedy is a search, not a per-layer score
+
+
+@pytest.mark.slow
+def test_compute_recipe_smollm_greedy_runs() -> None:
+    pytest.importorskip("torchao", reason="quant recipe needs the torchao extra")
+    import tempfile
+
+    from firefly.quant_sensitivity import compute_recipe
+
+    inputs = Path(tempfile.mkdtemp()) / "golden.json"
+    inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
+
+    result = compute_recipe(
+        "HuggingFaceTB/SmolLM-135M", inputs, device="cpu", scheme="w8a8",
+        strategy="greedy", k_values=[1, 2, 4],
+    )
+    assert result.sensitivity.strategy == "greedy"
+    assert len(result.curve) == 3
+    by_k = sorted(result.curve, key=lambda p: p.k)
+    # Greedy recovery is monotonic non-decreasing in k (each step only helps).
+    assert all(a.recovery <= b.recovery + 1e-6 for a, b in zip(by_k, by_k[1:], strict=False))
+
+
 @pytest.mark.slow
 def test_compute_sensitivity_smollm_marginal_runs() -> None:
     """The marginal strategy runs end-to-end and yields valid recovery scores.

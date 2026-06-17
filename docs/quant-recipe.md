@@ -24,37 +24,58 @@ quantize the rest, and measure how much of the degradation you actually recover.
 
 Nothing here is predicted from a proxy — every number is a measured forward pass.
 
-## Two strategies, measured head to head
+## This is a feature-selection problem
 
-How you score "sensitivity" is a pluggable strategy:
+Choosing which layers to keep in high precision is, structurally, **subset
+selection**: a set of "features" (layers), and you pick which to keep fp to
+minimize quality loss under a budget. (The general K-bit version is categorical
+per layer — a knapsack/bit-allocation problem — but the keep-fp-vs-quantize case
+is exactly binary subset selection.) That maps the methods people use onto the
+classic feature-selection taxonomy:
 
-- **isolated** — quantize *only* layer `i`; rank by the divergence it causes
-  alone. This surfaces the *intrinsically* hard-to-quantize layers (the late,
-  high-activation/outlier layers).
-- **marginal** — quantize *all but* layer `i`; rank by how much keeping it fp
-  *recovers*. The seemingly more decision-relevant signal.
+- **Filter** (cheap per-item score, then threshold) → per-layer **sensitivity
+  ranking**. Our `isolated`/`marginal`; HAWQ's Hessian-trace sensitivity; AWQ's
+  activation salience.
+- **Wrapper** (evaluate subsets by running the model) → **search**. Our
+  `greedy` (sequential forward selection); HAQ's RL bit-allocation.
+- **Embedded** (learned during training) → learnable bit-widths (DNAS, QAT).
 
-I expected `marginal` to win. It doesn't:
+And the reason wrapper methods beat filter methods in feature selection —
+**interactions / non-additivity** — is exactly what shows up here.
+
+## Three strategies, measured head to head
+
+How you choose the keep-set is a pluggable strategy:
+
+- **isolated** (filter) — quantize *only* layer `i`; rank by the divergence it
+  causes alone. Surfaces the *intrinsically* hard-to-quantize layers.
+- **marginal** (filter) — quantize *all but* layer `i`; rank by how much keeping
+  it fp *recovers*. The seemingly more decision-relevant signal.
+- **greedy** (wrapper) — sequential forward selection: add the layer that most
+  reduces divergence *given what's already kept*, re-measure, repeat. More
+  measurements; accounts for interactions.
 
 ![Recipe recovery by strategy on SmolLM-135M, W8A8](plots/quant_recipe_strategies.png)
 
-On SmolLM-135M / W8A8, quantizing all 30 layers moves the output **66.7%**.
-Both strategies agree the single worst layer is `layer.28` (the model's
-massive-activation layer) — keeping it alone recovers 37%. But after that they
-diverge: keeping the top-4 **isolated** layers recovers **71%**, while the top-4
-**marginal** layers recover only **46%**.
+On SmolLM-135M / W8A8, quantizing all 30 layers moves the output **66.7%**. All
+three agree the single worst layer is `layer.28` (the model's massive-activation
+layer) — keeping it alone recovers 37%. After that:
 
-Why? `marginal` measures each layer's recovery *in a context where every other
-layer is still quantized* — dominated by catastrophic upstream error, that
-signal favors early layers whose recovery doesn't transfer once you keep several
-layers in fp. `isolated` ranks intrinsic difficulty, which picks the late
-outlier layers that actually matter in a multi-layer recipe.
+- **marginal** is the surprise loser — top-4 recovers only **46%**. It measures
+  each layer's recovery in a context where *everything else is still quantized*,
+  so it favors early layers whose recovery doesn't transfer to a multi-layer
+  recipe.
+- **isolated** recovers **71%** at top-4 — its intrinsic-difficulty ranking
+  picks the late outlier layers that actually matter together.
+- **greedy** is provably ≥ both and beats marginal clearly, but here it only
+  *ties* isolated through k=4 and edges it at k=8 (**82.8% vs 81.0%**).
 
-The honest takeaway: a single-pass ranking (either kind) is imperfect because a
-layer's contribution is **non-additive**. The better recipe likely needs a
-**greedy/iterative** strategy — add the layer that most improves the *current*
-recipe, re-measure, repeat — which is exactly the "spend more compute, get a
-better recipe" knob. The pluggable-strategy seam makes that a drop-in.
+The interesting part is *why greedy barely beats isolated*: `layer.28` dominates
+so heavily that the interactions are weak, so the cheap filter (`isolated`)
+lands on essentially the greedy-optimal set. Greedy's wrapper advantage should
+widen on models where sensitivity is more distributed — bigger models, int4. So
+the practical rule is the feature-selection rule: **use the cheap filter when
+one item dominates; spend the wrapper compute when interactions matter.**
 
 ## Reproduce it
 
@@ -65,9 +86,9 @@ uv run python scripts/demo_quant_recipe.py
 # rank layers by sensitivity:
 firefly quant-sensitivity -m HuggingFaceTB/SmolLM-135M -i golden.json --scheme w8a8
 
-# build + verify a recipe:
+# build + verify a recipe (try --strategy isolated | marginal | greedy):
 firefly quant-recipe -m HuggingFaceTB/SmolLM-135M -i golden.json \
-    --scheme w8a8 --k-values 1,2,4,8
+    --scheme w8a8 --strategy greedy --k-values 1,2,4,8
 ```
 
 `--scheme int4wo` runs the same thing for int4 weight-only (needs a CUDA GPU).

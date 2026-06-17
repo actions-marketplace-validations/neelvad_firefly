@@ -702,7 +702,12 @@ def quant_recipe(
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Golden-inputs JSON."),
     scheme: str = typer.Option("w8a8", "--scheme", help="torchao scheme: w8a8 or int4wo."),
     group_size: int = typer.Option(32, "--group-size", help="int4wo group size."),
-    strategy: str = typer.Option("isolated", "--strategy", help="Sensitivity strategy."),
+    strategy: str = typer.Option(
+        "isolated", "--strategy",
+        help="Recipe strategy: isolated/marginal (single-pass per-layer ranking) "
+        "or greedy (sequential forward selection — more compute, accounts for "
+        "layer interactions).",
+    ),
     k_values: str = typer.Option(
         "1,2,4,8", "--k-values",
         help="Comma-separated keep-high-precision counts to evaluate (the curve).",
@@ -723,13 +728,13 @@ def quant_recipe(
     fidelity. The curve shows how few high-precision layers recover most of the
     fidelity — the attribution-guided answer torchao autoquant can't explain.
     """
-    from firefly.quant_sensitivity import STRATEGIES, compute_recipe
+    from firefly.quant_sensitivity import RECIPE_STRATEGIES, compute_recipe
     from firefly.quant_validate import QuantCompatibilityError, quant_preflight
     from firefly.report import render_recipe
 
-    if strategy not in STRATEGIES:
+    if strategy not in RECIPE_STRATEGIES:
         raise typer.BadParameter(
-            f"--strategy must be one of {sorted(STRATEGIES)}, got {strategy!r}",
+            f"--strategy must be one of {list(RECIPE_STRATEGIES)}, got {strategy!r}",
             param_hint="--strategy",
         )
     try:

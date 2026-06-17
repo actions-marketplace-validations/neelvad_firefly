@@ -255,6 +255,65 @@ def _recommend_k(curve: list[RecipePoint], target: float) -> int:
     return max((p.k for p in curve), default=0)
 
 
+#: ``greedy`` is a recipe SEARCH, not a per-layer score — it doesn't fit the
+#: STRATEGIES (score-based) seam, so it's a recipe-only strategy.
+GREEDY = "greedy"
+RECIPE_STRATEGIES = (*sorted(STRATEGIES), GREEDY)
+
+
+def _greedy_select(
+    layers: dict[int, list[str]],
+    all_fqns: set[str],
+    measure: Callable[[set[str]], float],
+    max_k: int,
+) -> list[tuple[int, float]]:
+    """Sequential forward selection: repeatedly add to the high-precision set
+    the layer that most reduces output divergence *given what's already kept*,
+    re-measuring each step. Returns ``(layer, divergence_after_adding)`` in
+    selection order. Accounts for interactions, unlike a single-pass ranking."""
+    kept: list[int] = []
+    kept_fqns: set[str] = set()
+    order: list[tuple[int, float]] = []
+    while len(kept) < max_k:
+        best: tuple[float, int] | None = None  # (divergence, layer)
+        for idx, fqns in layers.items():
+            if idx in kept:
+                continue
+            div = measure(all_fqns - (kept_fqns | set(fqns)))  # keep kept+candidate fp
+            if best is None or div < best[0]:
+                best = (div, idx)
+        assert best is not None
+        div, idx = best
+        kept.append(idx)
+        kept_fqns |= set(layers[idx])
+        order.append((idx, div))
+    return order
+
+
+def _greedy_curve(ctx: _Ctx, k_values: list[int], full_div: float) -> tuple[list[RecipePoint], list[LayerSensitivity]]:
+    wanted = sorted({k for k in k_values if 0 < k < len(ctx.layers)})
+    order = _greedy_select(ctx.layers, ctx.all_fqns, ctx.measure, max(wanted, default=0))
+
+    by_k: dict[int, tuple[list[int], float]] = {}
+    gains: dict[int, float] = {}
+    prev = full_div
+    for step, (idx, div) in enumerate(order, 1):
+        by_k[step] = ([o[0] for o in order[:step]], div)
+        gains[idx] = max(0.0, prev - div)  # marginal divergence reduction at selection time
+        prev = div
+
+    curve = [
+        RecipePoint(k, by_k[k][0], by_k[k][1], _recovery(full_div, by_k[k][1])) for k in wanted
+    ]
+    # Per-layer "sensitivity" for greedy = its marginal gain when selected (0 if
+    # never selected). Keeps SensitivityResult/render_recipe working uniformly.
+    layers = [
+        LayerSensitivity(idx, gains.get(idx, 0.0), raw_divergence=0.0, n_linears=len(fqns))
+        for idx, fqns in ctx.layers.items()
+    ]
+    return curve, layers
+
+
 def compute_recipe(
     model_id: str,
     inputs_path: Path,
@@ -266,24 +325,31 @@ def compute_recipe(
     k_values: list[int] | None = None,
     recovery_target: float = 0.9,
 ) -> RecipeResult:
-    """Rank layers, then build + **verify** mixed-precision recipes: for each k,
-    keep the top-k sensitive layers in high precision, quantize the rest, and
-    measure the recovered output fidelity. The curve both delivers the recipe
-    and verifies the ranking actually predicts good recipes."""
-    if strategy not in STRATEGIES:
-        raise ValueError(f"unknown strategy {strategy!r}; choose from {sorted(STRATEGIES)}")
+    """Build + **verify** mixed-precision recipes: for each k, keep the chosen
+    layers in high precision, quantize the rest, and measure the recovered
+    output fidelity. ``isolated``/``marginal`` keep the top-k by a single-pass
+    per-layer score; ``greedy`` builds the keep-set by sequential forward
+    selection (more measurements, accounts for interactions). The curve both
+    delivers the recipe and verifies the strategy."""
+    if strategy not in RECIPE_STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}; choose from {list(RECIPE_STRATEGIES)}")
     ctx = _setup(model_id, inputs_path, device, dtype, scheme, group_size)
-    sens = _run_sensitivity(ctx, strategy)
-    full_div = sens.full_quant_divergence
     n_layers = len(ctx.layers)
-
     if k_values is None:
         k_values = [k for k in (1, 2, 4, 8, 16) if k < n_layers]
-    curve: list[RecipePoint] = []
-    for k in sorted({k for k in k_values if 0 < k < n_layers}):
-        keep = sens.keep_high_precision(k)
-        keep_fqns = {fqn for idx in keep for fqn in ctx.layers[idx]}
-        div = ctx.measure(ctx.all_fqns - keep_fqns)  # quantize all EXCEPT kept layers
-        curve.append(RecipePoint(k, keep, div, _recovery(full_div, div)))
+
+    if strategy == GREEDY:
+        full_div = ctx.measure(ctx.all_fqns)
+        curve, layers = _greedy_curve(ctx, k_values, full_div)
+        sens = SensitivityResult(ctx.model_id, ctx.scheme, GREEDY, full_div, layers)
+    else:
+        sens = _run_sensitivity(ctx, strategy)
+        full_div = sens.full_quant_divergence
+        curve = []
+        for k in sorted({k for k in k_values if 0 < k < n_layers}):
+            keep = sens.keep_high_precision(k)
+            keep_fqns = {fqn for idx in keep for fqn in ctx.layers[idx]}
+            div = ctx.measure(ctx.all_fqns - keep_fqns)
+            curve.append(RecipePoint(k, keep, div, _recovery(full_div, div)))
 
     return RecipeResult(sens, curve, _recommend_k(curve, recovery_target), recovery_target)

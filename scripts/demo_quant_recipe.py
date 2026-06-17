@@ -23,7 +23,7 @@ from pathlib import Path
 
 from firefly.quant_sensitivity import compute_recipe
 
-_STRATEGIES = ("isolated", "marginal")
+_STRATEGIES = ("isolated", "marginal", "greedy")
 
 
 def main() -> None:
@@ -57,11 +57,12 @@ def main() -> None:
     full_div = results["isolated"].sensitivity.full_quant_divergence
     print(f"\nall {len(results['isolated'].sensitivity.layers)} layers quantized "
           f"({args.scheme}) -> {full_div:.2%} output divergence\n")
-    print(f"{'k':>3}  {'isolated recovery':>18}  {'marginal recovery':>18}")
-    iso = {p.k: p for p in results["isolated"].curve}
-    mar = {p.k: p for p in results["marginal"].curve}
+    by_strat = {s: {p.k: p for p in results[s].curve} for s in _STRATEGIES}
+    header = "  ".join(f"{s:>12} recov" for s in _STRATEGIES)
+    print(f"{'k':>3}  {header}")
     for k in ks:
-        print(f"{k:>3}  {iso[k].recovery:>17.1%}  {mar[k].recovery:>17.1%}")
+        cells = "  ".join(f"{by_strat[s][k].recovery:>17.1%}" for s in _STRATEGIES)
+        print(f"{k:>3}  {cells}")
 
     out = Path(args.out_dir)
     (out / "results").mkdir(parents=True, exist_ok=True)
@@ -90,7 +91,9 @@ def main() -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    for strat, marker in (("isolated", "o"), ("marginal", "s")):
+    for strat, marker in (("isolated", "o"), ("marginal", "s"), ("greedy", "^")):
+        if strat not in results:
+            continue
         curve = sorted(results[strat].curve, key=lambda p: p.k)
         ax.plot(
             [p.k for p in curve], [p.recovery * 100 for p in curve],
