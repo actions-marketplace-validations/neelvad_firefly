@@ -689,6 +689,35 @@ def test_instrument_named_modules_static_returns_index_map(tmp_path: Path) -> No
     assert sorted(idx_to_name.items()) == [(0, "fc1"), (1, "fc2"), (2, "fc3")]
 
 
+@pytest.mark.parametrize("method", ["named_modules", "fx"])
+def test_instrument_static_passes_partials_decision_to_op(
+    tmp_path: Path, monkeypatch, method: str
+) -> None:
+    """Regression: static auto-instrumentation must call capture_static with the
+    partials/decision scratch buffers (the two-phase-reduction op signature),
+    on BOTH wiring paths — not just `tap_static`. The op call only fires under
+    an active StaticTapper, which the index-map test above never enters, so the
+    arg-count drift went uncaught. Op patched to a recorder (the real body needs
+    CUDA); we assert the buffers reach the call by identity."""
+    captured: dict = {}
+
+    def recorder(*args, **_kwargs):
+        captured["args"] = args
+        return args[0]
+
+    monkeypatch.setattr(torch.ops.firefly, "capture_static", recorder)
+
+    model = _TinyForInstrument()
+    instrumented, idx = shadow.instrument(model, r"fc1$", mode="static", method=method)
+    tapper = shadow.StaticTapper(tmp_path / method, idx, device="cpu")
+    with tapper:
+        instrumented(torch.randn(2, 4))
+
+    assert "args" in captured, f"capture_static was never called ({method})"
+    assert any(a is tapper.partials for a in captured["args"]), f"partials missing ({method})"
+    assert any(a is tapper.decision for a in captured["args"]), f"decision missing ({method})"
+
+
 def test_instrument_named_modules_tap_index_start_offsets_indices() -> None:
     """tap_index_start lets the caller disambiguate multiple sub-models."""
     m = _TinyForInstrument()

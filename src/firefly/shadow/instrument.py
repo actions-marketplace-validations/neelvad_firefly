@@ -30,6 +30,7 @@ def _firefly_static_tap(x: torch.Tensor, tap_idx: int) -> torch.Tensor:
     return torch.ops.firefly.capture_static(
         x, t.stats_buf, t.counter, tap_idx,
         t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+        t.partials, t.decision,
         t.full_tensor_policy.first_n_steps,
         t.full_tensor_policy.every_n_steps,
         1 if t.full_tensor_policy.on_alert else 0,
@@ -189,12 +190,14 @@ def _wrap_forward_static(mod: torch.nn.Module, tap_idx: int) -> None:
             return torch.ops.firefly.capture_static(
                 out, t.stats_buf, t.counter, tap_idx,
                 t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                t.partials, t.decision,
                 first_n, every_n, on_alert_enabled,
             )
         if isinstance(out, tuple) and out and isinstance(out[0], torch.Tensor):
             head = torch.ops.firefly.capture_static(
                 out[0], t.stats_buf, t.counter, tap_idx,
                 t.blob_buf, t.blob_meta, t.blob_counter, t.alert_flag,
+                t.partials, t.decision,
                 first_n, every_n, on_alert_enabled,
             )
             return (head, *out[1:])
