@@ -1,9 +1,5 @@
 name: 'Firefly Numerical Parity Check'
-description: >-
-  CI gate for ML model deployments. Diffs a candidate model's per-layer
-  activations against a calibrated reference, attributes the first
-  divergence to a specific tap point, and fails the build if anything
-  exceeds tolerance.
+description: "Diff a model's per-layer activations against a calibrated reference (or a quantized build) and fail on divergence."
 
 inputs:
   reference:
