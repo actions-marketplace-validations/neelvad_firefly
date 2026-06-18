@@ -202,6 +202,21 @@ def test_fingerprint_differs_for_different_weights() -> None:
     assert fp_a != fp_b
 
 
+def test_fingerprint_catches_change_in_later_rows() -> None:
+    """The strided sample must cover the whole tensor, not just the first 64
+    elements — a fine-tune that only touches later rows of a big weight (LoRA,
+    optimizer reset) must still flip the fingerprint."""
+    import torch.nn as nn
+
+    model = nn.Linear(256, 256, bias=False)
+    fp_before = fingerprint_model(model)
+    with torch.no_grad():
+        # Perturb the *last* row only; the first 64 flattened elements (row 0)
+        # are untouched, so a first-64 sample would miss this entirely.
+        model.weight[-1] += 1.0
+    assert fingerprint_model(model) != fp_before
+
+
 @pytest.mark.slow
 def test_capture_reference_smollm_end_to_end(tmp_path: Path) -> None:
     """Real-model integration test: download SmolLM-135M, capture, verify artifact."""

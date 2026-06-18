@@ -195,6 +195,55 @@ def _v1_read_attn_impl(worker) -> str:
     return _read_attn_impl_impl(worker.model_runner.model)
 
 
+def _fingerprint_impl(model) -> str:
+    """Strided-sample weight hash over the *live* worker's parameters.
+
+    Mirrors :func:`firefly.capture.fingerprint_model` so the vLLM path pins
+    real weights, not just the model name — a fine-tune republished under the
+    same ``model_id`` produces different weights, so the hash differs and
+    ``check`` catches it (previously it slipped through trivially).
+
+    The hash is only comparable vLLM-to-vLLM: worker params may be sharded /
+    renamed vs HF, which is exactly the runner contract (a reference and its
+    candidates must use the same runner). Under tensor parallelism each worker
+    hashes its own shard; the per-worker digests are combined in :meth:`run`.
+    """
+    import hashlib
+
+    from firefly.capture import _strided_sample
+
+    h = hashlib.sha256()
+    for name, p in sorted(model.named_parameters(), key=lambda kv: kv[0]):
+        h.update(name.encode())
+        h.update(str(tuple(p.shape)).encode())
+        h.update(_strided_sample(p.detach().flatten().cpu()))
+    return h.hexdigest()[:16]
+
+
+def _read_fingerprint(model) -> str:
+    return _fingerprint_impl(model)
+
+
+def _v1_read_fingerprint(worker) -> str:
+    return _fingerprint_impl(worker.model_runner.model)
+
+
+def _combine_fingerprints(rpc_result) -> str:
+    """Combine per-worker fingerprints into one stable digest.
+
+    TP=1 returns the single worker's hash unchanged; TP>1 hashes the sorted
+    per-shard digests so the result is order-independent and deterministic.
+    """
+    if isinstance(rpc_result, list):
+        parts = sorted(str(x) for x in rpc_result)
+        if len(parts) == 1:
+            return parts[0]
+        import hashlib
+
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    return str(rpc_result)
+
+
 def _drain_captures(model) -> dict:
     captures = getattr(model, "_firefly_captures", {})
     cpu_tensors = {name: t.cpu().contiguous() for name, t in captures.items()}
@@ -369,10 +418,11 @@ class VLLMRunner:
                 else _register_capture_hooks_with_decode if capture_decode
                 else _register_capture_hooks
             )
-            read_heads_fn, read_impl_fn, drain_fn = (
+            read_heads_fn, read_impl_fn, drain_fn, read_fp_fn = (
                 _read_n_heads,
                 _read_attn_impl,
                 _drain_captures,
+                _read_fingerprint,
             )
             dispatch = llm.apply_model
         else:
@@ -381,10 +431,11 @@ class VLLMRunner:
                 else _v1_register_capture_hooks_with_decode if capture_decode
                 else _v1_register_capture_hooks
             )
-            read_heads_fn, read_impl_fn, drain_fn = (
+            read_heads_fn, read_impl_fn, drain_fn, read_fp_fn = (
                 _v1_read_n_heads,
                 _v1_read_attn_impl,
                 _v1_drain_captures,
+                _v1_read_fingerprint,
             )
             dispatch = llm.collective_rpc
 
@@ -393,6 +444,8 @@ class VLLMRunner:
         attn_impl = _unwrap(dispatch(read_impl_fn))
         if opt["attention_backend"]:
             _verify_backend(opt["attention_backend"], str(attn_impl))
+
+        fingerprint = f"vllm:{_combine_fingerprints(dispatch(read_fp_fn))}"
 
         n_heads = _unwrap(dispatch(read_heads_fn)) if per_head else 0
 
@@ -424,9 +477,12 @@ class VLLMRunner:
 
         return CaptureResult(
             tensors=captures,
-            # vLLM's parallel-wrapped params don't hash like HF's; a stable
-            # placeholder is enough to detect "same model intent".
-            fingerprint=f"vllm-{vllm.__version__}:{model_id}",
+            # Real strided weight hash (see _fingerprint_impl): catches a
+            # republished fine-tune under the same model_id. vLLM-internal param
+            # layout, so it's comparable only to other vLLM captures — which is
+            # the runner contract. Weight-only (no version/model_id), so the
+            # cross-version bit-equal case still matches.
+            fingerprint=fingerprint,
             head_counts=head_counts,
             env=env,
             dtype=canonical_dtype,

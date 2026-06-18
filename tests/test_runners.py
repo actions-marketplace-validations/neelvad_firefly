@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 
 from firefly.runners import CaptureResult, available_runners, get_runner
 
@@ -60,6 +61,34 @@ def test_vllm_runner_rejects_non_llm_domain() -> None:
 
     with pytest.raises(ValueError, match="only supports the 'llm' domain"):
         VLLMRunner().capture("m", Path("in.json"), domain="recsys")
+
+
+def test_vllm_fingerprint_is_a_real_weight_hash() -> None:
+    """The vLLM fingerprint must hash actual weights (so a republished
+    fine-tune is caught), not just encode the model name. _fingerprint_impl
+    only needs an nn.Module, so it's testable on CPU without vLLM."""
+    import torch.nn as nn
+
+    from firefly.runners.vllm import _fingerprint_impl
+
+    model = nn.Linear(128, 128, bias=False)
+    fp_before = _fingerprint_impl(model)
+    assert _fingerprint_impl(model) == fp_before  # deterministic
+    with torch.no_grad():
+        model.weight[-1] += 1.0  # later-row change, like the HF strided test
+    assert _fingerprint_impl(model) != fp_before
+
+
+def test_vllm_combine_fingerprints_tp() -> None:
+    from firefly.runners.vllm import _combine_fingerprints
+
+    # TP=1: single worker's hash passes through unchanged.
+    assert _combine_fingerprints(["abc123"]) == "abc123"
+    assert _combine_fingerprints("abc123") == "abc123"
+    # TP>1: order-independent and stable.
+    combined = _combine_fingerprints(["aaa", "bbb"])
+    assert combined == _combine_fingerprints(["bbb", "aaa"])
+    assert combined != _combine_fingerprints(["aaa", "ccc"])
 
 
 def test_verify_backend_accepts_matching_impl() -> None:

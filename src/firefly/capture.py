@@ -124,6 +124,15 @@ def num_attention_heads(model: nn.Module) -> int | None:
     return None
 
 
+def _strided_sample(flat: torch.Tensor, k: int = 64) -> bytes:
+    """``k`` fp32 bytes sampled evenly across ``flat`` (a 1-D tensor),
+    endpoints included, so the sample covers the whole tensor — not just its
+    head. Tensors with <= k elements are taken whole."""
+    n = flat.numel()
+    idx = torch.arange(n) if n <= k else torch.linspace(0, n - 1, k).long()
+    return flat[idx].to(torch.float32).numpy().tobytes()
+
+
 def fingerprint_model(model: nn.Module) -> str:
     """Cheap, deterministic identity hash over parameter names + shapes + a
     sample of weight bytes. Catches "you loaded the wrong model" without
@@ -133,7 +142,12 @@ def fingerprint_model(model: nn.Module) -> str:
     for name, p in sorted(model.named_parameters(), key=lambda kv: kv[0]):
         h.update(name.encode())
         h.update(str(tuple(p.shape)).encode())
-        sample = p.detach().cpu().flatten()[:64].to(torch.float32).numpy().tobytes()
+        # Sample 64 elements evenly spanning the whole tensor (endpoints
+        # included) rather than the first 64: same byte budget, but a
+        # fine-tune that updates only later rows (LoRA, optimizer resets) can
+        # no longer slip past a hash whose whole job is "same weights → fair
+        # activation diff."
+        sample = _strided_sample(p.detach().cpu().flatten())
         h.update(sample)
     return h.hexdigest()[:16]
 
