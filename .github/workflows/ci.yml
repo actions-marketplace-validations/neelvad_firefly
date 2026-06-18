@@ -20,7 +20,11 @@ jobs:
         run: uv python install 3.11
 
       - name: Sync dependencies
-        run: uv sync --all-extras
+        # CPU-installable extras only. vllm/sglang are GPU-only (heavy/often
+        # unbuildable on CPU runners) and the fast suite doesn't need them —
+        # the runner seam is exercised via HF; vllm/sglang are validated on
+        # Modal GPUs, not here.
+        run: uv sync --extra dev --extra torchao --extra s3 --extra gcs --extra azure
 
       - name: Lint
         run: uv run ruff check .
