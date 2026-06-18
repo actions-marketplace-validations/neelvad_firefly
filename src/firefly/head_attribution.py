@@ -114,7 +114,15 @@ def per_head_divergence(
     ]
 
     sorted_maxes = sorted(h.max_abs_diff for h in heads)
-    median = sorted_maxes[len(sorted_maxes) // 2]
+    # True median: mean of the two middle elements for even counts. The old
+    # sorted_maxes[n // 2] took the upper-middle element, which biases the
+    # `concentration = worst / median` headline metric for even head counts.
+    mid = len(sorted_maxes) // 2
+    median = (
+        sorted_maxes[mid]
+        if len(sorted_maxes) % 2
+        else (sorted_maxes[mid - 1] + sorted_maxes[mid]) / 2
+    )
     worst = max(heads, key=lambda h: h.max_abs_diff)
 
     return PerHeadAttribution(
