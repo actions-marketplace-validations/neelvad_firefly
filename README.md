@@ -3,21 +3,29 @@
 [![CI](https://github.com/neelvad/firefly/actions/workflows/ci.yml/badge.svg)](https://github.com/neelvad/firefly/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A numerical-parity CI gate for ML model deployments. Firefly catches the
-class of bugs that silently change a model's outputs — kernel swaps
-(FlashAttention vs xFormers), dependency bumps, serving-stack drift,
-hardware moves — and attributes the divergence to the specific layer
-where it originated.
+**Firefly instruments a model's internals and attributes where two executions
+diverge** — down to the layer, attention head, or ATen op. It hooks every
+decoder layer's attention/MLP outputs (and, on demand, per-head taps or
+op-level traces via `TorchDispatchMode`), captures the activations, and walks
+them in forward order to name the *first* place two runs disagree.
 
-Firefly is fundamentally a **same-weights deployment-parity gate**: the
-reference pins the exact model weights by fingerprint, and `check`
-re-runs *those weights* in the candidate environment to ask "does this
-serving stack still produce the same activations?" Comparing a model
-whose *weights* changed — a new fine-tune, or a quantized build — is a
-different question; it's supported, but you have to opt in with
-`--allow-fingerprint-mismatch` (the action's `allow-fingerprint-mismatch:
-true`), because by default a weight change is treated as "you pointed me
-at the wrong model."
+That one engine — **capture → compare → attribute** — is the shared core; each
+use-case below is the same engine pointed at a different divergence:
+
+| Surface | The question it answers | Maturity |
+| --- | --- | --- |
+| **Parity CI gate** — `firefly check` + GitHub Action | Did a kernel swap / dep bump / serving-stack drift silently change my model's activations? | **Shipped** — on the Marketplace, validated across 9 models / 8 families |
+| **Quantization diagnosis** — `quant-diff` / `quant-sensitivity` / `quant-recipe` | *Which* layers does my quantized build break, and which should I keep in higher precision? | **Built & verified** — the agentic auto-quant on top is aspirational |
+| **Shadow mode** — `firefly.shadow` | What are a *live production* model's internals doing? (survives `torch.compile` + CUDA graphs) | **Experimental mechanism** — GPU-validated but not deployed anywhere; overhead unmeasured |
+
+## Parity CI gate
+
+The core use-case is a **same-weights deployment-parity gate**: the reference
+pins the exact model weights by fingerprint, and `check` re-runs *those weights*
+in the candidate environment to ask "does this serving stack still produce the
+same activations?" (A model whose *weights* changed — a fine-tune, or a
+quantized build — is a different question: opt in with
+`--allow-fingerprint-mismatch`, or use the quantization surface below.)
 
 ```yaml
 # .github/workflows/firefly.yml
@@ -35,7 +43,9 @@ a sticky PR comment (grant the workflow `permissions: pull-requests: write`;
 a missing permission degrades to a warning, never a failed build). Outputs
 (`first-divergent-tap`, `passed`, `report-path`) drive downstream steps.
 
-### Quantization gate (`mode: quant-diff`)
+## Quantization: diagnosis & mixed precision
+
+### Gate on a quantized build (`mode: quant-diff`)
 
 Set `mode: quant-diff` to gate on what *quantization* does: it diffs a
 torchao-quantized candidate against the fp baseline, ranks the per-layer
@@ -87,6 +97,11 @@ compute for quality (cheap per-unit filters → wrapper search) and
 `--granularity {layer,linear}` sets the unit. Full writeup, the strategy
 comparison, and the int4 result where `greedy` wins:
 [docs/quant-recipe.md](docs/quant-recipe.md).
+
+*Aspirational:* an outer-loop **agent** that reads this attribution, picks the
+next intervention (technique/scheme/granularity), and explains it — every
+proposal verified against real measurement. Not built; it's why the
+measurement substrate above is the foundation.
 
 ## Why this exists
 
@@ -268,10 +283,8 @@ the >1% threshold where real bugs live.
 | `compare.py` | Per-tap diff with effective-atol composition |
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
-| `quant_risk.py` | Simulated int8/int4 quantization risk from stored activations (heuristic) |
-| `quant_torchao.py` | Real torchao quantization (w8a8 / int4wo) for quant-diff + sensitivity |
-| `quant_sensitivity.py` | Attribution-guided mixed precision: per-unit sensitivity + verified recipe (isolated / marginal / greedy; layer or linear granularity) |
-| `op_drill.py` | Op-level drill-down: `TorchDispatchMode` scoped to a module → first diverging ATen op |
+| `quant/` | Quantization surface on top of the engine: `torchao.py` (real w8a8 / int4wo quant + preflight), `sensitivity.py` (per-unit sensitivity + verified mixed-precision recipe; isolated / marginal / greedy; layer or linear), `risk.py` (cheap activation-only int8/int4 heuristic) |
+| `op_drill.py` | Op-level drill-down (engine attribution rung): `TorchDispatchMode` scoped to a module → first diverging ATen op |
 | `shadow/` | Shadow-mode capture package: custom ops + Triton kernel + Tappers + sinks that survive torch.compile and CUDA graphs |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
