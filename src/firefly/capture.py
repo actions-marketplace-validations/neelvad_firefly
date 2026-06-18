@@ -124,12 +124,23 @@ def num_attention_heads(model: nn.Module) -> int | None:
     return None
 
 
+def _sample_indices(n: int, k: int) -> torch.Tensor:
+    """``k`` integer indices spanning ``[0, n-1]`` inclusive (or all ``n`` if
+    ``n <= k``). Pure integer arithmetic on purpose: ``torch.linspace`` does
+    the endpoint in float32, and for ``n - 1 > 2**24`` (≈16.7M) that rounds
+    *up* and indexes out of bounds — which is exactly what happens on a fused
+    vLLM weight (seen at 28.3M elements). Integer math keeps the endpoints
+    exact at any size."""
+    if n <= k:
+        return torch.arange(n)
+    return torch.arange(k) * (n - 1) // (k - 1)
+
+
 def _strided_sample(flat: torch.Tensor, k: int = 64) -> bytes:
     """``k`` fp32 bytes sampled evenly across ``flat`` (a 1-D tensor),
     endpoints included, so the sample covers the whole tensor — not just its
     head. Tensors with <= k elements are taken whole."""
-    n = flat.numel()
-    idx = torch.arange(n) if n <= k else torch.linspace(0, n - 1, k).long()
+    idx = _sample_indices(flat.numel(), k)
     return flat[idx].to(torch.float32).numpy().tobytes()
 
 

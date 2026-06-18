@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 
 from firefly.capture import (
+    _sample_indices,
     dtype_to_name,
     fingerprint_model,
     parse_dtype,
@@ -200,6 +201,19 @@ def test_fingerprint_differs_for_different_weights() -> None:
     torch.manual_seed(1)
     fp_b = fingerprint_model(_FakeLM(dim=8, n_layers=2))
     assert fp_a != fp_b
+
+
+@pytest.mark.parametrize("n", [1, 63, 64, 65, 1000, 28_311_552, 30_000_001])
+def test_sample_indices_endpoints_in_bounds_at_any_size(n: int) -> None:
+    """Indices must stay in [0, n-1] inclusive even past float32's 2**24
+    integer limit — a fused vLLM weight had 28.3M elements and torch.linspace
+    rounded the endpoint out of bounds. Pure integer math must not."""
+    idx = _sample_indices(n, 64)
+    assert int(idx.min()) == 0
+    assert int(idx.max()) == n - 1  # endpoint exact, in bounds
+    assert int(idx.max()) < n
+    assert (idx[1:] >= idx[:-1]).all()  # non-decreasing
+    assert idx.numel() == min(n, 64)
 
 
 def test_fingerprint_catches_change_in_later_rows() -> None:
