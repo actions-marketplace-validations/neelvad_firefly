@@ -1,5 +1,8 @@
 # Firefly
 
+[![CI](https://github.com/neelvad/firefly/actions/workflows/ci.yml/badge.svg)](https://github.com/neelvad/firefly/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A numerical-parity CI gate for ML model deployments. Firefly catches the
 class of bugs that silently change a model's outputs — kernel swaps
 (FlashAttention vs xFormers), dependency bumps, serving-stack drift,
