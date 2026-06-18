@@ -1,6 +1,6 @@
 """Confront quant-risk predictions with real torchao W8A8 kernels.
 
-:mod:`firefly.quant_risk` *simulates* int8 quantization and predicts which
+:mod:`firefly.quant.risk` *simulates* int8 quantization and predicts which
 tensors break, from stored activations alone. This module checks that
 prediction against reality, so the claim can be validated (and guarded against
 regression) rather than asserted.
@@ -35,7 +35,7 @@ from torch import nn
 
 from firefly.capture import load_model_and_tokenizer
 from firefly.determinism import set_deterministic
-from firefly.quant_risk import tap_quant_risk
+from firefly.quant.risk import tap_quant_risk
 
 _DEFAULT_PROMPT = "the quick brown fox jumps over the lazy dog"
 

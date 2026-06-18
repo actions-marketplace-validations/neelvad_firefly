@@ -34,14 +34,14 @@ def _golden(tmp_path: Path) -> Path:
 
 
 def test_quant_preflight_rejects_int4_on_cpu() -> None:
-    from firefly.quant_torchao import QuantCompatibilityError, quant_preflight
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
 
     with pytest.raises(QuantCompatibilityError, match="CUDA"):
         quant_preflight("int4wo", "cpu")
 
 
 def test_quant_preflight_allows_valid_combos() -> None:
-    from firefly.quant_torchao import quant_preflight
+    from firefly.quant.torchao import quant_preflight
 
     quant_preflight("w8a8", "cpu")  # CPU is fine for w8a8
     quant_preflight("int4wo", "cuda")  # int4 on GPU is fine
@@ -49,7 +49,7 @@ def test_quant_preflight_allows_valid_combos() -> None:
 
 
 def test_translate_quant_error_recognizes_mslk() -> None:
-    from firefly.quant_torchao import QuantCompatibilityError, _translate_quant_error
+    from firefly.quant.torchao import QuantCompatibilityError, _translate_quant_error
 
     translated = _translate_quant_error("int4wo", ImportError("Requires mslk >= 1.0.0"))
     assert isinstance(translated, QuantCompatibilityError)

@@ -53,7 +53,7 @@ def quant_risk(
     import json
     from dataclasses import asdict
 
-    from firefly.quant_risk import analyze_quant_risk
+    from firefly.quant.risk import analyze_quant_risk
     from firefly.reference import read_reference
     from firefly.report import render_quant_risk
 
@@ -127,7 +127,7 @@ def quant_diff(
     """
     from firefly.attribution import attribute_first_divergence
     from firefly.compare import compare_to_reference, compare_to_reference_per_head
-    from firefly.quant_torchao import (
+    from firefly.quant.torchao import (
         QUANT_SCHEMES,
         QuantCompatibilityError,
         quant_preflight,
@@ -231,8 +231,8 @@ def quant_sensitivity(
     """
     from dataclasses import asdict
 
-    from firefly.quant_sensitivity import GRANULARITIES, STRATEGIES, compute_sensitivity
-    from firefly.quant_torchao import QuantCompatibilityError, quant_preflight
+    from firefly.quant.sensitivity import GRANULARITIES, STRATEGIES, compute_sensitivity
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
     from firefly.report import render_sensitivity
 
     if strategy not in STRATEGIES:
@@ -317,8 +317,8 @@ def quant_recipe(
     fidelity. The curve shows how few high-precision units recover most of the
     fidelity — the attribution-guided answer torchao autoquant can't explain.
     """
-    from firefly.quant_sensitivity import GRANULARITIES, RECIPE_STRATEGIES, compute_recipe
-    from firefly.quant_torchao import QuantCompatibilityError, quant_preflight
+    from firefly.quant.sensitivity import GRANULARITIES, RECIPE_STRATEGIES, compute_recipe
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
     from firefly.report import render_recipe
 
     if strategy not in RECIPE_STRATEGIES:

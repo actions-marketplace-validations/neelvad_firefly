@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import torch.nn as nn
 
-from firefly.quant_sensitivity import (
+from firefly.quant.sensitivity import (
     GRANULARITIES,
     ISOLATED,
     MARGINAL,
@@ -165,7 +165,7 @@ def test_render_recipe_curve_and_recommendation() -> None:
 
 
 def test_greedy_select_picks_highest_impact_first() -> None:
-    from firefly.quant_sensitivity import _greedy_select
+    from firefly.quant.sensitivity import _greedy_select
 
     units = {"a": ["l0"], "b": ["l1"], "c": ["l2"]}
     all_fqns = {"l0", "l1", "l2"}
@@ -184,7 +184,7 @@ def test_greedy_select_picks_highest_impact_first() -> None:
 
 
 def test_greedy_is_a_recipe_strategy_not_a_score_strategy() -> None:
-    from firefly.quant_sensitivity import GREEDY, RECIPE_STRATEGIES
+    from firefly.quant.sensitivity import GREEDY, RECIPE_STRATEGIES
 
     assert GREEDY in RECIPE_STRATEGIES
     assert GREEDY not in STRATEGIES
@@ -195,7 +195,7 @@ def test_compute_recipe_smollm_recovers_fidelity() -> None:
     pytest.importorskip("torchao", reason="quant recipe needs the torchao extra")
     import tempfile
 
-    from firefly.quant_sensitivity import compute_recipe
+    from firefly.quant.sensitivity import compute_recipe
 
     inputs = Path(tempfile.mkdtemp()) / "golden.json"
     inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
@@ -216,7 +216,7 @@ def test_compute_sensitivity_smollm_linear_granularity() -> None:
     pytest.importorskip("torchao", reason="quant sensitivity needs the torchao extra")
     import tempfile
 
-    from firefly.quant_sensitivity import compute_sensitivity
+    from firefly.quant.sensitivity import compute_sensitivity
 
     inputs = Path(tempfile.mkdtemp()) / "golden.json"
     inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
@@ -236,7 +236,7 @@ def test_compute_sensitivity_smollm_isolated() -> None:
     pytest.importorskip("torchao", reason="quant sensitivity needs the torchao extra")
     import tempfile
 
-    from firefly.quant_sensitivity import compute_sensitivity
+    from firefly.quant.sensitivity import compute_sensitivity
 
     inputs = Path(tempfile.mkdtemp()) / "golden.json"
     inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))

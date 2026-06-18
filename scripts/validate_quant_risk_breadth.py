@@ -64,7 +64,7 @@ SCHEMES = ["w8a8", "int4wo"]
 def sweep() -> dict:
     import torch
 
-    from firefly.quant_torchao import spearman, validate_against_torchao
+    from firefly.quant.torchao import spearman, validate_against_torchao
 
     # Descriptive threshold for "a strong rank correlation" in this research
     # sweep — NOT a product gate (the predictor was falsified; see the reframe).

@@ -1,6 +1,6 @@
 """Smoke test for the torchao quant *measurement* utilities.
 
-`firefly.quant_torchao` quantizes a model with real torchao kernels and
+`firefly.quant.torchao` quantizes a model with real torchao kernels and
 measures the per-Linear local divergence. The breadth sweep uses it as a
 measurement tool. (The earlier "quant-risk predicts where int8 hurts" claim was
 falsified by the breadth sweep — these utilities no longer assert a verdict, so
@@ -16,13 +16,13 @@ import pytest
 
 pytest.importorskip("torchao", reason="quant-risk validation needs the torchao extra")
 
-from firefly.quant_torchao import validate_against_torchao
+from firefly.quant.torchao import validate_against_torchao
 
 
 def test_quant_config_selects_scheme() -> None:
     """Scheme selection is CPU-fast (builds a config object, no quantization).
     Guards the W8A8 / int4-weight-only fork the breadth sweep relies on."""
-    from firefly.quant_torchao import QUANT_SCHEMES, _quant_config
+    from firefly.quant.torchao import QUANT_SCHEMES, _quant_config
 
     assert set(QUANT_SCHEMES) == {"w8a8", "int4wo"}
     assert _quant_config("w8a8") is not None

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from firefly.quant_risk import (
+from firefly.quant.risk import (
     analyze_quant_risk,
     simulate_quant_error,
     tap_quant_risk,

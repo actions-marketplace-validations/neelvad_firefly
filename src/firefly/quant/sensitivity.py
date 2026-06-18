@@ -41,7 +41,7 @@ from firefly.capture import (
     run_capture,
 )
 from firefly.determinism import set_deterministic
-from firefly.quant_torchao import quantize_model, rel_l1
+from firefly.quant.torchao import quantize_model, rel_l1
 
 #: Matches a decoder-layer index in a module FQN, with or without a leading
 #: prefix (``model.layers.5.mlp...`` and a bare ``layers.5...``).

@@ -21,7 +21,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from firefly.quant_sensitivity import compute_recipe
+from firefly.quant.sensitivity import compute_recipe
 
 _STRATEGIES = ("isolated", "marginal", "greedy")
 

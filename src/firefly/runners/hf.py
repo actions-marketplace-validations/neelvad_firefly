@@ -60,7 +60,7 @@ class HFRunner:
         # only) defaults to 32 to tolerate non-128-divisible weight dims.
         scheme = (options or {}).get("quantize")
         if scheme:
-            from firefly.quant_torchao import quantize_model
+            from firefly.quant.torchao import quantize_model
 
             group_size = int((options or {}).get("group_size", 32))
             quantize_model(model, scheme=scheme, group_size=group_size)

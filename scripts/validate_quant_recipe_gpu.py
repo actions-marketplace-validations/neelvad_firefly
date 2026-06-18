@@ -48,7 +48,7 @@ def run() -> dict:
 
     import torch
 
-    from firefly.quant_sensitivity import compute_recipe, compute_sensitivity
+    from firefly.quant.sensitivity import compute_recipe, compute_sensitivity
 
     print(f"torch {torch.__version__}  {torch.cuda.get_device_name(0)}  model={MODEL} scheme={SCHEME}")
 

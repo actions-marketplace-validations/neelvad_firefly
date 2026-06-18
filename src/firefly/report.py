@@ -19,8 +19,8 @@ from firefly.attribution import AttributionResult
 if TYPE_CHECKING:
     from firefly.head_attribution import PerHeadAttribution
     from firefly.op_drill import OpDiffResult
-    from firefly.quant_risk import TapQuantRisk
-    from firefly.quant_sensitivity import RecipeResult, SensitivityResult
+    from firefly.quant.risk import TapQuantRisk
+    from firefly.quant.sensitivity import RecipeResult, SensitivityResult
 
 
 def render_human(
