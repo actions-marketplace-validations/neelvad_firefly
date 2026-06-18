@@ -353,7 +353,17 @@ def compute_recipe(
     fidelity. ``isolated``/``marginal`` keep the top-k by a single-pass per-unit
     score; ``greedy`` builds the keep-set by sequential forward selection (more
     measurements, accounts for interactions). The curve both delivers the recipe
-    and verifies the strategy."""
+    and verifies the strategy.
+
+    Cost: each measurement is a fresh ``deepcopy(fp_model)`` + ``quantize_`` +
+    full forward (deepcopy is required because torchao's ``quantize_`` mutates
+    in place). ``isolated``/``marginal`` cost ~N forwards (one per unit);
+    ``greedy`` costs ~N + N·max(k) ≈ O(N·k). ``--granularity linear`` multiplies
+    the unit count ~7× over ``layer`` (q/k/v/o + gate/up/down per block), so a
+    30-layer model is ~30 units at layer granularity, ~210 at linear. Budget
+    accordingly on a real model; this is wall-clock-heavy, not just "more
+    compute." (See review #5 in project_product_portfolio for the planned
+    shortlist/budget knobs.)"""
     if strategy not in RECIPE_STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; choose from {list(RECIPE_STRATEGIES)}")
     if granularity not in GRANULARITIES:

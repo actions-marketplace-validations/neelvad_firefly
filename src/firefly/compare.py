@@ -110,17 +110,19 @@ def diff_captures(
     candidate_tensors: dict[str, torch.Tensor],
     tap_order: list[str],
     tolerances: dict[str, TapTolerance] | None = None,
-    max_rel_error: float | None = None,
+    jitter_floor: float | None = None,
 ) -> list[TapDivergence]:
     """Diff two captures in the given tap order.
 
-    ``max_rel_error`` is an optional global ceiling on top of per-tap
-    calibrated tolerances. If set, a tap with very tight calibration (say
-    1e-6 atol on a tensor whose max abs is 10) effectively gets the looser
-    of ``tol.atol`` and ``max_rel_error × max|ref|`` — i.e., the user is
-    saying "I don't care about sub-X% drift anywhere, even if calibration
-    says it's outside the noise floor." Defaults off; calibrated tolerances
-    are the sole gate.
+    ``jitter_floor`` is an optional global floor on *tolerated* drift. Note
+    the direction: it can only **loosen** the gate, never tighten it. Each
+    tap's effective atol becomes ``max(tol.atol, jitter_floor × max|ref|)``,
+    so a tightly-calibrated tap (say 1e-6 atol on a tensor whose max abs is
+    10) is widened to ``0.001 × 10 = 1e-2`` at ``jitter_floor=0.001``. The
+    user is saying "ignore relative drift below X anywhere, even where
+    calibration is tighter" — the knob that absorbs cross-platform FP jitter.
+    It is **not** a ceiling: it does not fail a tap whose rel error exceeds X.
+    Defaults off; calibrated tolerances are the sole gate.
 
     Raises ``ValueError`` on missing tap or shape mismatch — those are
     structural problems with the candidate (or the reference), not numerical
@@ -151,8 +153,8 @@ def diff_captures(
         mean_d = float(diff.mean().item())
         tol = tolerances.get(tap_name, _default_tolerance())
         effective_atol = tol.atol
-        if max_rel_error is not None and max_rel_error > 0:
-            effective_atol = max(effective_atol, max_rel_error * ref_max)
+        if jitter_floor is not None and jitter_floor > 0:
+            effective_atol = max(effective_atol, jitter_floor * ref_max)
         divergences.append(
             TapDivergence(
                 tap_name=tap_name,
@@ -236,7 +238,7 @@ def compare_to_reference(
     seed: int = 0,
     tolerances: dict[str, TapTolerance] | None = None,
     allow_fingerprint_mismatch: bool = False,
-    max_rel_error: float | None = None,
+    jitter_floor: float | None = None,
     candidate_dtype: str | None = None,
     runner: object | None = None,
     options: dict[str, str] | None = None,
@@ -266,7 +268,7 @@ def compare_to_reference(
         candidate_tensors=candidate_tensors,
         tap_order=manifest.tap_points,
         tolerances=tolerances,
-        max_rel_error=max_rel_error,
+        jitter_floor=jitter_floor,
     )
 
 
@@ -278,7 +280,7 @@ def compare_to_reference_per_head(
     seed: int = 0,
     tolerances: dict[str, TapTolerance] | None = None,
     allow_fingerprint_mismatch: bool = False,
-    max_rel_error: float | None = None,
+    jitter_floor: float | None = None,
     candidate_dtype: str | None = None,
     runner: object | None = None,
     options: dict[str, str] | None = None,
@@ -309,7 +311,7 @@ def compare_to_reference_per_head(
         candidate_tensors=candidate_tensors,
         tap_order=manifest.tap_points,
         tolerances=tolerances,
-        max_rel_error=max_rel_error,
+        jitter_floor=jitter_floor,
     )
     # Order the per-head taps by the manifest's forward-ordered tap list, not
     # by head_counts dict order (which is lexical after JSON sort_keys). Keeps

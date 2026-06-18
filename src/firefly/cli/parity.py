@@ -289,13 +289,15 @@ def check(
             "against an fp baseline."
         ),
     ),
-    max_rel_error: float = typer.Option(
+    jitter_floor: float = typer.Option(
         0.0,
-        "--max-rel-error",
+        "--jitter-floor",
         help=(
-            "Optional global ceiling on relative error. atol becomes "
-            "max(calibrated, max_rel_error × max|ref|) per tap. 0 = no ceiling "
-            "(calibrated tolerances alone gate the check)."
+            "Floor on TOLERATED relative drift (absorbs cross-platform FP "
+            "jitter). atol becomes max(calibrated, jitter_floor × max|ref|) "
+            "per tap, so this can only LOOSEN the gate — it is NOT a ceiling "
+            "that fails when drift exceeds it. 0 = off (calibrated tolerances "
+            "alone gate the check)."
         ),
     ),
     ci_format: str = typer.Option(
@@ -374,7 +376,7 @@ def check(
     # path so the report can name which attention head diverged. Both paths
     # run the candidate exactly once.
     per_head_taps = bool(manifest.head_counts)
-    max_rel = max_rel_error if max_rel_error > 0 else None
+    floor = jitter_floor if jitter_floor > 0 else None
     if per_head_taps:
         divergences, per_head = compare_to_reference_per_head(
             reference_dir=resolved_reference,
@@ -383,7 +385,7 @@ def check(
             device=device,
             seed=seed,
             allow_fingerprint_mismatch=allow_fingerprint_mismatch,
-            max_rel_error=max_rel,
+            jitter_floor=floor,
             candidate_dtype=candidate_dtype,
             runner=active_runner,
             options=runner_options,
@@ -396,7 +398,7 @@ def check(
             device=device,
             seed=seed,
             allow_fingerprint_mismatch=allow_fingerprint_mismatch,
-            max_rel_error=max_rel,
+            jitter_floor=floor,
             candidate_dtype=candidate_dtype,
             runner=active_runner,
             options=runner_options,

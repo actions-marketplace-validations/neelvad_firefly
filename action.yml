@@ -24,11 +24,12 @@ inputs:
     description: "Device for the forward pass. 'cpu' (default) or 'cuda'."
     default: 'cpu'
     required: false
-  max-rel-error:
+  jitter-floor:
     description: >-
-      Optional global ceiling on relative error per tap. Effective atol
-      becomes max(calibrated, max-rel-error × max|ref|). 0 means no
-      ceiling — calibrated tolerances alone gate the check.
+      Floor on tolerated relative drift per tap (absorbs cross-platform FP
+      jitter). Effective atol becomes max(calibrated, jitter-floor × max|ref|),
+      so it can only LOOSEN the gate — it is NOT a ceiling that fails when
+      drift exceeds it. 0 means off — calibrated tolerances alone gate.
     default: '0'
     required: false
   allow-fingerprint-mismatch:
@@ -170,7 +171,7 @@ runs:
             --candidate "${{ inputs.candidate }}" \
             --inputs "${{ inputs.inputs }}" \
             --device "${{ inputs.device }}" \
-            --max-rel-error "${{ inputs.max-rel-error }}" \
+            --jitter-floor "${{ inputs.jitter-floor }}" \
             --report-json firefly-report.json \
             --ci-format markdown \
             "${FLAGS[@]}" \

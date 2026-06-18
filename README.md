@@ -34,7 +34,7 @@ quantized build — is a different question: opt in with
     reference: hf://my-org/my-firefly-ref  # captured from my-org/my-model
     candidate: my-org/my-model             # same weights, new serving stack
     inputs: tests/firefly-prompts.json
-    max-rel-error: 0.001                   # cross-platform safety margin
+    jitter-floor: 0.001                    # ignore sub-0.1% cross-platform jitter
 ```
 
 The action posts a markdown summary to `$GITHUB_STEP_SUMMARY` and exits
@@ -261,15 +261,36 @@ Three axes you can tune:
 | Knob | Where | Default | Use case |
 |---|---|---|---|
 | `safety_factor` | `firefly calibrate` | 6x | Multiplies per-tap noise floor |
-| `--max-rel-error` | `firefly check` | 0 (off) | Global ceiling for cross-platform variation |
+| `--jitter-floor` | `firefly check` | 0 (off) | Ignore relative drift below this fraction of `max\|ref\|` |
 | Per-tap atol | hand-edit `tolerances.json` | — | Override calibration for known-noisy taps |
 
-The `max-rel-error` knob in particular is what makes a calibrated
-reference *portable* across environments. Calibration measures
-runs-on-the-calibration-machine variance; cross-machine FP variation
-is a different (and often larger) noise source. A 0.1% ceiling
-absorbs typical cross-platform jitter while staying comfortably below
-the >1% threshold where real bugs live.
+`--jitter-floor` is what makes a calibrated reference *portable* across
+environments. Calibration measures variance *on the calibration machine*;
+cross-machine FP variation is a different (and often larger) noise source.
+A 0.1% floor absorbs typical cross-platform jitter while staying comfortably
+below the >1% threshold where real bugs live. **Direction matters:** the
+floor can only *loosen* the gate (effective atol becomes
+`max(calibrated, jitter_floor × max|ref|)`) — it ignores drift *below* the
+floor, it is not a ceiling that fails when drift exceeds it.
+
+### Calibrating for a CPU-gated CI
+
+Calibration only earns its keep where there's real nondeterminism to measure
+(GPU / TF32 / relaxed BF16). **Pure CPU+fp32 inference is bit-deterministic**,
+so `firefly calibrate` on a CPU runner derives a noise floor of ~0 and every
+tap just falls back to the `1e-5` default — calibrated-on-CPU tolerances are
+effectively the flat defaults, stamped `source="calibrated"`. They give a
+false sense of bespoke protection.
+
+The workflow that actually works for a CPU-gated CI is:
+
+1. **Calibrate once on a GPU machine** that matches (or is noisier than) prod,
+   and commit `tolerances.json` — those per-tap floors carry the real signal.
+2. **Gate on CPU** with a `--jitter-floor` ceiling for cross-platform jitter.
+
+If you can't calibrate on GPU, gate on `--jitter-floor` alone and skip the
+calibration step — a hand-set floor is doing the real work, and a flat default
+is more honest than `source="calibrated"` numbers that measured nothing.
 
 ## Architecture
 
@@ -317,7 +338,7 @@ changed upstream.
 **Shipped:**
 
 - Core CI flow: capture / calibrate / check, GitHub Action, markdown
-  PR summaries, calibrated per-tap tolerances + `--max-rel-error`
+  PR summaries, calibrated per-tap tolerances + `--jitter-floor`
 - Storage backends: local, `hf://`, `s3://`, `gs://`, `az://`
 - **Pluggable capture runners** — `--runner {hf,vllm,sglang}` behind one
   `Runner` seam. vLLM (V0 + V1, prefill + decode, attention-backend

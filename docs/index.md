@@ -813,9 +813,14 @@ substitute for evaluating the quantized model.
 **Tolerance calibration is environment-sensitive.** Same-machine
 calibration measures runs-on-this-machine variance; cross-machine FP
 variation is a different (and often larger) noise distribution. A useful fix in the
-product is a `--max-rel-error` ceiling that composes with the per-tap
-calibration. The lesson: "calibrated tolerances" alone aren't portable;
-they need an environment-stationarity escape hatch.
+product is a `--jitter-floor` that composes with the per-tap calibration —
+it ignores relative drift below a set fraction of `max|ref|`, absorbing
+cross-platform jitter (it can only loosen the gate, never tighten it). The
+lesson: "calibrated tolerances" alone aren't portable; they need an
+environment-stationarity escape hatch. And calibration only earns its keep
+under real nondeterminism — on bit-deterministic CPU+fp32 it collapses to the
+flat defaults, so a CPU-gated CI leans on the `--jitter-floor` ceiling and a
+GPU-derived `tolerances.json`, not on CPU calibration.
 
 **Per-layer attribution is important.** "Your eval dropped 2 points"
 is extremely difficult to debug.

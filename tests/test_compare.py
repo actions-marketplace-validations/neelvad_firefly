@@ -46,8 +46,8 @@ def test_diff_captures_respects_per_tap_tolerance() -> None:
     assert strict[0].exceeds_tolerance
 
 
-def test_diff_captures_max_rel_error_loosens_tight_calibration() -> None:
-    """A tap with a tight calibrated atol passes under a max_rel_error ceiling
+def test_diff_captures_jitter_floor_loosens_tight_calibration() -> None:
+    """A tap with a tight calibrated atol passes under a jitter_floor
     if its absolute diff is small relative to the reference magnitude."""
     a = {"x": _t([10.0, 10.0, 10.0])}
     b = {"x": _t([10.05, 10.05, 10.05])}  # diff = 0.05, ref_max = 10
@@ -55,26 +55,26 @@ def test_diff_captures_max_rel_error_loosens_tight_calibration() -> None:
     # Calibrated atol is much tighter than the diff
     tight = {"x": TapTolerance(atol=1e-5)}
 
-    no_ceiling = diff_captures(a, b, ["x"], tolerances=tight)
-    assert no_ceiling[0].exceeds_tolerance  # 0.05 > 1e-5
-    assert no_ceiling[0].effective_atol == 1e-5
+    no_floor = diff_captures(a, b, ["x"], tolerances=tight)
+    assert no_floor[0].exceeds_tolerance  # 0.05 > 1e-5
+    assert no_floor[0].effective_atol == 1e-5
 
     # 1% of ref_max = 0.1, which is > 0.05 → tap should now pass
-    with_ceiling = diff_captures(a, b, ["x"], tolerances=tight, max_rel_error=0.01)
-    assert not with_ceiling[0].exceeds_tolerance
-    assert with_ceiling[0].effective_atol == 0.1
+    with_floor = diff_captures(a, b, ["x"], tolerances=tight, jitter_floor=0.01)
+    assert not with_floor[0].exceeds_tolerance
+    assert with_floor[0].effective_atol == 0.1
 
 
-def test_diff_captures_max_rel_error_doesnt_loosen_when_calibration_is_already_looser() -> None:
-    """If calibrated atol is already greater than max_rel_error × max|ref|,
-    the ceiling is a no-op (we always take the looser of the two)."""
+def test_diff_captures_jitter_floor_doesnt_loosen_when_calibration_is_already_looser() -> None:
+    """If calibrated atol is already greater than jitter_floor × max|ref|,
+    the floor is a no-op (we always take the looser of the two)."""
     a = {"x": _t([1.0])}
     b = {"x": _t([1.5])}
 
     # Calibrated atol (10.0) is way looser than 0.01 × 1.0 = 0.01
     loose = {"x": TapTolerance(atol=10.0)}
 
-    divs = diff_captures(a, b, ["x"], tolerances=loose, max_rel_error=0.01)
+    divs = diff_captures(a, b, ["x"], tolerances=loose, jitter_floor=0.01)
     assert not divs[0].exceeds_tolerance
     assert divs[0].effective_atol == 10.0  # calibrated wins
 
