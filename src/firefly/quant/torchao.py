@@ -1,9 +1,16 @@
-"""Confront quant-risk predictions with real torchao W8A8 kernels.
+"""Real torchao quantization — the backend for Firefly's quant surface.
 
-:mod:`firefly.quant.risk` *simulates* int8 quantization and predicts which
-tensors break, from stored activations alone. This module checks that
-prediction against reality, so the claim can be validated (and guarded against
-regression) rather than asserted.
+The shared torchao helpers the product paths use: ``quantize_model`` (w8a8 /
+int4wo), scheme selection (``_quant_config`` / ``QUANT_SCHEMES``), the
+fast-fail ``quant_preflight`` and ``QuantCompatibilityError``. These back
+``firefly quant-diff``, ``quant-sensitivity`` / ``quant-recipe``, and the HF
+runner's ``quantize=`` option.
+
+It also keeps ``validate_against_torchao`` — a *measurement* utility (used by
+the breadth sweep) from the original experiment that confronted the
+quant-risk predictor with real W8A8 kernels. That predictor was falsified (it
+didn't generalize past SmolLM), so this is no longer a product gate — but the
+local-error measurement is still useful, and the experiment's design is below.
 
 The test is **local and apples-to-apples**, which is the whole point. torchao's
 ``Int8DynamicActivationInt8WeightConfig`` (W8A8) quantizes the *inputs* to

@@ -92,11 +92,12 @@ hook on at all. Both of those now exist in the repo
 eager/`torch.compile` path, and a Triton-kernel custom op
 (`capture_static`) that writes stats into a pre-allocated GPU buffer
 whose pointers get captured into the graph and re-run on every replay.
-They're validated by spikes and a Modal integration test, but I haven't
-yet wired them into a one-command `firefly check --runner vllm` flow —
-the shadow *mechanism* is built; the product *plumbing* against a live
-stack is the part that isn't. The findings below all use the eager-mode
-hook path.
+They're validated by spikes and a Modal integration test, but the shadow
+*mechanism* has never been run against a live production model — that
+online plumbing is the part that isn't built. (Offline capture *from* a
+serving engine is wired and used heavily below: `firefly check --runner
+{vllm,sglang}`. The unbuilt part is shadowing a model that's serving real
+traffic.) The findings below all use the eager-mode hook path.
 
 ## The matrix
 

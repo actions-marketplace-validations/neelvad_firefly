@@ -35,9 +35,10 @@ def capture(
         "hf",
         "--runner",
         help=(
-            "Capture backend: 'hf' (transformers, eager hooks, default) or "
-            "'vllm' (in-process vLLM; needs `pip install firefly[vllm]` + a "
-            "CUDA GPU). A reference and its candidates must use the same runner."
+            "Capture backend: 'hf' (transformers, eager hooks, default), "
+            "'vllm', or 'sglang' (in-process serving engines; each needs its "
+            "extra — `pip install firefly[vllm|sglang]` — and a CUDA GPU). "
+            "A reference and its candidates must use the same runner."
         ),
     ),
     runner_opt: list[str] = typer.Option(
@@ -144,7 +145,7 @@ def calibrate(
         ),
     ),
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Path to the same golden-inputs JSON used at capture time."),
-    runs: int = typer.Option(16, "--runs", "-n", help="Number of self-runs for the noise baseline."),
+    runs: int = typer.Option(16, "--runs", "-n", help="Number of self-runs for the noise baseline. Non-HF runners (vllm/sglang) reload the engine once per run, so high values get expensive against serving engines."),
     safety_factor: float = typer.Option(6.0, "--safety-factor", help="atol = safety_factor × observed noise floor."),
     noise_mode: str = typer.Option("none", "--noise-mode", help="'none' (deterministic), 'synthetic' (Gaussian injection), or 'hardware' (real hardware noise)."),
     noise_sigma: float = typer.Option(0.0, "--noise-sigma", help="Standard deviation of injected noise (synthetic mode)."),
