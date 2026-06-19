@@ -105,9 +105,10 @@ def test_frontier_and_knee_roundtrip() -> None:
 # --- measurement budget --------------------------------------------------------
 
 def test_estimate_isolated_and_bar() -> None:
-    assert estimate_measurements(30, "isolated", [1, 2, 4, 8]) == 30 + 4
-    # bar: rank (30) + binary search (ceil(log2 30)=5) + 2 anchors
-    assert estimate_measurements(30, "isolated", [], bar=True) == 30 + 7
+    # ranking = all-quant baseline (1) + one per unit (30) = 31, then the candidates
+    assert estimate_measurements(30, "isolated", [1, 2, 4, 8]) == 31 + 4
+    # bar: ranking (31) + 2 anchors + binary search (ceil(log2 30)=5)
+    assert estimate_measurements(30, "isolated", [], bar=True) == 31 + 7
 
 
 def test_estimate_greedy_is_quadratic_ish() -> None:

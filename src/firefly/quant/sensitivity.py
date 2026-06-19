@@ -53,10 +53,8 @@ from firefly.quant.cost import (
 from firefly.quant.evaluate import AccuracyBar, Evaluator
 from firefly.quant.intervention import Pipeline, PrecisionPolicy
 from firefly.quant.torchao import rel_l1
+from firefly.tap_points import find_decoder_layers_path
 
-#: Matches a decoder-layer index in a module FQN, with or without a leading
-#: prefix (``model.layers.5.mlp...`` and a bare ``layers.5...``).
-_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
 _OUTPUT_TAP = "final_norm"
 
 GRANULARITIES = ("layer", "linear")
@@ -137,15 +135,29 @@ def discover_units(model: nn.Module, granularity: str = "layer") -> dict[str, li
     granularities operate on the same set of decoder-layer Linears (so the
     all-quantized baseline matches); Linears with no layer index (e.g.
     ``lm_head``) are excluded. ``layer`` groups a decoder layer's Linears under
-    ``"layer.N"``; ``linear`` makes each Linear its own unit (FQN as the name)."""
+    ``"layer.N"``; ``linear`` makes each Linear its own unit (FQN as the name).
+
+    The decoder-layer path is resolved with the shared
+    :func:`firefly.tap_points.find_decoder_layers_path` (handles ``model.layers``
+    / ``transformer.h`` / ``layers``), which **raises** on an unrecognized
+    layout rather than silently finding zero units; a recognized layout with no
+    ``nn.Linear`` (e.g. GPT-2's ``Conv1D``) also fails loudly here."""
     if granularity not in GRANULARITIES:
         raise ValueError(f"unknown granularity {granularity!r}; choose from {GRANULARITIES}")
+    layers_path = find_decoder_layers_path(model)  # raises on unknown layout
+    idx_re = re.compile(re.escape(layers_path) + r"\.(\d+)\.")
     by_layer: dict[int, list[str]] = {}
     for name, mod in model.named_modules():
         if isinstance(mod, nn.Linear):
-            m = _LAYER_RE.search(name)
+            m = idx_re.search(name)
             if m:
                 by_layer.setdefault(int(m.group(1)), []).append(name)
+    if not by_layer:
+        raise ValueError(
+            f"No quantizable nn.Linear found under decoder layers {layers_path!r} "
+            f"({type(model).__name__}). The layout may use a non-Linear projection "
+            "(e.g. GPT-2 Conv1D), which the recipe path does not support."
+        )
     if granularity == "layer":
         return {f"layer.{i}": by_layer[i] for i in sorted(by_layer)}
     return {fqn: [fqn] for i in sorted(by_layer) for fqn in by_layer[i]}

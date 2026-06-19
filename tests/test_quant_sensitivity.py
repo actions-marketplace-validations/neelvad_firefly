@@ -65,6 +65,29 @@ def test_discover_units_rejects_unknown_granularity() -> None:
         discover_units(_Tiny(1), "bogus")
 
 
+def test_discover_units_fails_loud_on_unknown_layout() -> None:
+    # No model.layers / transformer.h / layers path → find_decoder_layers_path
+    # raises rather than silently returning zero units.
+    class _NoLayers(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(8, 8)
+
+    with pytest.raises(Exception, match="decoder layers"):
+        discover_units(_NoLayers())
+
+
+def test_discover_units_fails_loud_when_layers_have_no_linear() -> None:
+    # Recognized layout but non-Linear projections (the GPT-2 Conv1D case).
+    class _NoLinear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([nn.ReLU()])
+
+    with pytest.raises(ValueError, match="No quantizable nn.Linear"):
+        discover_units(_NoLinear())
+
+
 def test_isolated_strategy_targets_and_score() -> None:
     unit = {"layers.1.attn", "layers.1.mlp"}
     all_fqns = unit | {"layers.0.attn", "layers.2.mlp"}

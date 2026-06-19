@@ -190,11 +190,13 @@ def estimate_measurements(n_units: int, strategy: str, k_values: list[int], *, b
         K = max(valid_ks, default=0)
         # 1 (all-quant baseline) + sequential selection: (n) + (n-1) + ... + (n-K+1)
         return 1 + K * n_units - K * (K - 1) // 2
-    # isolated / marginal: one ranking pass over all units, then the candidates.
+    # isolated / marginal: _run_sensitivity measures the all-quant baseline once
+    # (+1) then one per unit (n) — that ranking pass is n + 1, not n.
+    ranking = n_units + 1
     if bar:
-        search = (math.ceil(math.log2(n_units)) + 2) if n_units > 1 else 1
-        return n_units + search
-    return n_units + len(set(valid_ks))
+        search = (math.ceil(math.log2(n_units)) + 2) if n_units > 1 else 1  # 2 anchors + binary search
+        return ranking + search
+    return ranking + len(set(valid_ks))
 
 
 def format_bytes(n: float) -> str:
