@@ -338,6 +338,11 @@ def quant_recipe(
         "activation outliers into the weights so per-token activation quant stops "
         "crushing the other channels. Calibrated on --inputs.",
     ),
+    export: Path | None = typer.Option(
+        None, "--export",
+        help="Write the chosen recipe (exact FQNs, interventions, provenance) to "
+        "this recipe.json — reproducible via `firefly quant-apply`.",
+    ),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
     dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
     report_json: Path | None = typer.Option(
@@ -379,7 +384,7 @@ def quant_recipe(
         _run_accuracy_bar(
             model, inputs, accuracy_bar, eval_set, metric, eval_max_length,
             scheme, group_size, strategy, granularity, device, dtype, budget,
-            smoothquant, report_json,
+            smoothquant, report_json, export,
         )
         return
 
@@ -427,12 +432,47 @@ def quant_recipe(
             json.dump(payload, f, indent=2)
         typer.echo(f"Wrote recipe report to {report_json}")
 
+    if export is not None:
+        rec = result.recommended_point
+        result_dict = (
+            {"divergence": rec.output_divergence, "recovery": rec.recovery,
+             "memory_bytes": rec.memory_bytes}
+            if rec else None
+        )
+        _export_chosen_recipe(
+            kept_units=rec.kept_units if rec else [], unit_fqns=result.unit_fqns,
+            model=model, scheme=scheme, group_size=group_size, granularity=granularity,
+            dtype=dtype, device=device, inputs=inputs, smoothquant=smoothquant,
+            result_dict=result_dict, path=export,
+        )
+
+
+def _export_chosen_recipe(
+    *, kept_units: list[str], unit_fqns: dict[str, list[str]], model: str, scheme: str,
+    group_size: int, granularity: str, dtype: str, device: str, inputs: Path,
+    smoothquant: bool, result_dict: dict | None, path: Path,
+) -> None:
+    """Build + write the chosen recipe (kept units → exact FQNs) to recipe.json."""
+    from firefly.quant.recipe_io import build_recipe
+    from firefly.quant.smoothquant import SmoothQuant
+
+    all_fqns = {f for fqns in unit_fqns.values() for f in fqns}
+    kept_fqns = {f for u in kept_units for f in unit_fqns.get(u, [])}
+    recipe = build_recipe(
+        model_id=model, scheme=scheme, group_size=group_size, granularity=granularity,
+        quantize_fqns=all_fqns - kept_fqns, kept_fp_fqns=kept_fqns,
+        pre_transforms=[SmoothQuant()] if smoothquant else [],
+        dtype=dtype, device=device, inputs_path=inputs, result=result_dict,
+    )
+    recipe.to_json(path)
+    typer.echo(f"Wrote recipe to {path} (apply with: firefly quant-apply --recipe {path} ...)")
+
 
 def _run_accuracy_bar(
     model: str, inputs: Path, accuracy_bar: str, eval_set: Path | None, metric: str,
     eval_max_length: int, scheme: str, group_size: int, strategy: str, granularity: str,
     device: str, dtype: str, max_measurements: int | None, smoothquant: bool,
-    report_json: Path | None,
+    report_json: Path | None, export: Path | None,
 ) -> None:
     """The eval-gated recipe path (``--accuracy-bar``): real metric decides the
     smallest passing recipe. Ranking is single-pass, so greedy doesn't apply."""
@@ -503,4 +543,84 @@ def _run_accuracy_bar(
             json.dump(payload, f, indent=2)
         typer.echo(f"Wrote recipe report to {report_json}")
 
+    if export is not None:
+        _export_chosen_recipe(
+            kept_units=result.chosen_kept_units, unit_fqns=result.unit_fqns,
+            model=model, scheme=scheme, group_size=group_size, granularity=granularity,
+            dtype=dtype, device=device, inputs=inputs, smoothquant=smoothquant,
+            result_dict={
+                "metric": result.metric_name, "value": result.chosen_metric,
+                "threshold": result.threshold, "memory_bytes": result.chosen_memory_bytes,
+            },
+            path=export,
+        )
 
+
+@app.command("quant-apply")
+def quant_apply(
+    recipe_path: Path = typer.Option(..., "--recipe", help="recipe.json from `quant-recipe --export`."),
+    model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(
+        ..., "--inputs", "-i",
+        help="Calibration inputs for re-applying pre-transforms (SmoothQuant). Use the "
+        "same set the recipe was built from — a mismatch is warned (its hash is recorded).",
+    ),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
+    out: Path | None = typer.Option(
+        None, "--out",
+        help="Save the quantized state_dict here (best-effort; load it with torchao imported).",
+    ),
+) -> None:
+    """Reconstruct a recipe and apply it to a model: rebuilds the pipeline
+    (pre-transforms + quantizer) from recipe.json, runs it, and **reproduces** the
+    recipe's recorded output divergence as a verification. Optionally saves the
+    quantized weights."""
+    import copy
+
+    from firefly.capture import (
+        load_golden_inputs,
+        load_model_and_tokenizer,
+        parse_dtype,
+        run_capture,
+    )
+    from firefly.determinism import set_deterministic
+    from firefly.quant.recipe_io import Recipe, apply_recipe, file_sha256
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight, rel_l1
+
+    rec = Recipe.from_json(recipe_path)
+    if file_sha256(inputs) != rec.provenance.get("inputs_sha256"):
+        typer.echo(
+            "warning: --inputs differs from the recipe's calibration set; any "
+            "pre-transform (SmoothQuant) scales will differ from the original.",
+            err=True,
+        )
+    try:
+        quant_preflight(rec.scheme, device)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    set_deterministic()
+    dtype = rec.provenance.get("dtype", "float32")
+    fp_model, tok = load_model_and_tokenizer(model, device=device, dtype=parse_dtype(dtype))
+    batch = load_golden_inputs(inputs, tok, device)
+    ref = run_capture(fp_model, batch)["final_norm"]
+
+    quantized = apply_recipe(rec, copy.deepcopy(fp_model), batch)
+    div = rel_l1(ref, run_capture(quantized, batch)["final_norm"])
+
+    typer.echo(
+        f"applied recipe: {len(rec.quantize_fqns)} FQNs quantized ({rec.scheme}), "
+        f"{len(rec.kept_fp_fqns)} kept fp"
+        + (f", pre-transforms: {[p['name'] for p in rec.pre_transforms]}" if rec.pre_transforms else "")
+    )
+    line = f"reproduction: output divergence vs fp = {div:.4%}"
+    if rec.result and "divergence" in rec.result:
+        line += f"  (recipe recorded {rec.result['divergence']:.4%})"
+    typer.echo(line)
+
+    if out is not None:
+        import torch
+
+        torch.save(quantized.state_dict(), out)
+        typer.echo(f"saved quantized state_dict to {out} (load with torchao imported)")

@@ -98,6 +98,11 @@ class _TorchAOIntervention(ABC):
     stage: Stage = Stage.QUANTIZER
     treats: frozenset[str] = frozenset()
 
+    def config(self) -> dict:
+        """Reconstruction kwargs for serialization (see firefly.quant.recipe_io).
+        Default: no params. Override for interventions with state to round-trip."""
+        return {}
+
     @abstractmethod
     def apply(self, model: nn.Module, policy: PrecisionPolicy, calib: object | None = None) -> nn.Module:
         ...

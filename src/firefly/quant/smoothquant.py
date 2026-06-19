@@ -95,10 +95,13 @@ class SmoothQuant:
     stage = Stage.PRE_TRANSFORM
     treats = frozenset({ACTIVATION_OUTLIERS})
 
-    def __init__(self, scope: set[str] | None = None, alpha: float = 0.5, name: str = "smoothquant") -> None:
-        self.scope = scope
+    def __init__(self, scope=None, alpha: float = 0.5, name: str = "smoothquant") -> None:
+        self.scope = set(scope) if scope is not None else None  # accept any iterable (list↔set round-trip)
         self.alpha = alpha
         self.name = name
+
+    def config(self) -> dict:
+        return {"alpha": self.alpha, "scope": sorted(self.scope) if self.scope is not None else None}
 
     def apply(self, model: nn.Module, policy: PrecisionPolicy, calib: object | None = None) -> nn.Module:
         if calib is None:

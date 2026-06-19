@@ -324,6 +324,9 @@ class RecipeResult:
     recovery_target: float
     all_fp_bytes: float = 0.0
     all_quant_bytes: float = 0.0
+    unit_fqns: dict[str, list[str]] = field(default_factory=dict)
+    """unit name → its Linear FQNs — lets recipe export resolve exact quantized
+    / kept FQNs without reloading the model."""
 
     @property
     def recommended_point(self) -> RecipePoint | None:
@@ -485,6 +488,7 @@ def compute_recipe(
     return RecipeResult(
         sens, curve, _recommend_k(curve, recovery_target), recovery_target,
         all_fp_bytes=env.all_fp_bytes, all_quant_bytes=env.all_quant_bytes,
+        unit_fqns=dict(ctx.units),
     )
 
 
@@ -530,6 +534,8 @@ class BarRecipeResult:
     chosen_memory_bytes: float = 0.0
     all_fp_bytes: float = 0.0
     all_quant_bytes: float = 0.0
+    unit_fqns: dict[str, list[str]] = field(default_factory=dict)
+    """unit name → its Linear FQNs (for recipe export)."""
 
     def frontier_knee_ks(self) -> tuple[set[int], int | None]:
         """``(ks on the Pareto frontier, knee k)`` over (memory, metric), with
@@ -662,4 +668,5 @@ def optimize_to_bar(
         chosen_memory_bytes=cost_at(chosen_k),
         all_fp_bytes=env.all_fp_bytes,
         all_quant_bytes=env.all_quant_bytes,
+        unit_fqns=dict(ctx.units),
     )
