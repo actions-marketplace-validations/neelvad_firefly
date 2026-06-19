@@ -277,15 +277,24 @@ def render_recipe(
     all-quantized degradation that recovers. The recommendation is the smallest
     k that clears the recovery target.
     """
+    from firefly.quant.cost import format_bytes
+
     console = console or Console(record=True, width=100)
     sens = result.sensitivity
     noun = "Linears" if sens.granularity == "linear" else "layers"
+    frontier, knee = result.frontier_knee_ks()
 
     console.print(
         f"[bold]all {len(sens.units)} {noun} quantized[/] ({sens.scheme}) → "
         f"{sens.full_quant_divergence:.2%} output divergence "
         f"[dim](strategy: {sens.strategy}, granularity: {sens.granularity})[/]"
     )
+    if result.all_fp_bytes:
+        console.print(
+            f"[dim]weight footprint: all-fp {format_bytes(result.all_fp_bytes)} → "
+            f"all-{sens.scheme} {format_bytes(result.all_quant_bytes)} "
+            f"({result.all_fp_bytes / result.all_quant_bytes:.1f}× smaller)[/]"
+        )
 
     table = Table(
         title="Mixed-precision recipe curve (verified)",
@@ -296,19 +305,38 @@ def render_recipe(
     table.add_column("units kept", no_wrap=False)
     table.add_column("output Δ", justify="right")
     table.add_column("recovery", justify="right")
+    table.add_column("memory", justify="right")
+    table.add_column("Pareto", justify="center")
     for p in sorted(result.curve, key=lambda p: p.k):
         kept = ", ".join(p.kept_units)
-        style = "bold green" if p.k == result.recommended_k else None
-        table.add_row(str(p.k), kept, f"{p.output_divergence:.2%}", f"{p.recovery:.1%}", style=style)
+        mark = "knee" if p.k == knee else ("frontier" if p.k in frontier else "")
+        if p.k == result.recommended_k:
+            style = "bold green"
+        elif p.k in frontier:
+            style = None
+        else:
+            style = "dim"  # dominated — strictly beaten on both size and quality
+        table.add_row(
+            str(p.k), kept, f"{p.output_divergence:.2%}", f"{p.recovery:.1%}",
+            format_bytes(p.memory_bytes), mark, style=style,
+        )
     console.print(table)
+
+    if knee is not None:
+        kp = next(p for p in result.curve if p.k == knee)
+        console.print(
+            f"[cyan]Pareto knee:[/] keep {knee} {noun} → {format_bytes(kp.memory_bytes)}, "
+            f"{kp.output_divergence:.2%} divergence — best quality-per-byte before "
+            f"diminishing returns."
+        )
 
     rec = result.recommended_point
     if rec is not None:
         console.print(
-            f"[bold green]recommended:[/] keep {rec.k} {noun} in high precision "
-            f"({', '.join(rec.kept_units)}) → "
-            f"{rec.output_divergence:.2%} divergence, {rec.recovery:.0%} of the "
-            f"degradation recovered (target {result.recovery_target:.0%})."
+            f"[bold green]recommended (recovery target):[/] keep {rec.k} {noun} in high "
+            f"precision ({', '.join(rec.kept_units)}) → {rec.output_divergence:.2%} "
+            f"divergence, {rec.recovery:.0%} of the degradation recovered "
+            f"(target {result.recovery_target:.0%}), {format_bytes(rec.memory_bytes)}."
         )
     else:
         console.print("[yellow]No recipe points evaluated.[/]")
@@ -324,6 +352,8 @@ def render_bar_recipe(result, console: Console | None = None) -> str:
     the binary-search probes (real evals), not a dense curve, so it doubles as a
     receipt of how few evals it took.
     """
+    from firefly.quant.cost import format_bytes
+
     console = console or Console(record=True, width=100)
     noun = "Linears" if result.granularity == "linear" else "layers"
     metric = result.metric_name
@@ -331,6 +361,7 @@ def render_bar_recipe(result, console: Console | None = None) -> str:
     bar_str = (
         f"{result.bar.value:.1%} rel" if result.bar.mode == "rel" else f"{result.bar.value:g} abs"
     )
+    frontier, knee = result.frontier_knee_ks()
 
     console.print(
         f"[bold]{metric}[/] ({direction})  fp baseline {result.baseline_metric:.4g} → "
@@ -338,6 +369,12 @@ def render_bar_recipe(result, console: Console | None = None) -> str:
         f"[dim](bar {bar_str} → threshold {result.threshold:.4g}, "
         f"rank: {result.strategy}, {result.granularity})[/]"
     )
+    if result.all_fp_bytes:
+        console.print(
+            f"[dim]weight footprint: all-fp {format_bytes(result.all_fp_bytes)} → "
+            f"all-{result.scheme} {format_bytes(result.all_quant_bytes)} "
+            f"({result.all_fp_bytes / result.all_quant_bytes:.1f}× smaller)[/]"
+        )
 
     table = Table(
         title="Accuracy-bar recipe — evaluated candidates",
@@ -346,18 +383,29 @@ def render_bar_recipe(result, console: Console | None = None) -> str:
     )
     table.add_column("keep hi-prec", justify="right")
     table.add_column(metric, justify="right")
+    table.add_column("memory", justify="right")
     table.add_column("within bar?", justify="center")
+    table.add_column("Pareto", justify="center")
     for p in result.evaluated:
-        mark = "[green]yes[/]" if p.passes else "[red]no[/]"
+        bar_mark = "[green]yes[/]" if p.passes else "[red]no[/]"
+        pareto = "knee" if p.k == knee else ("frontier" if p.k in frontier else "")
         style = "bold green" if p.k == result.chosen_k else None
-        table.add_row(f"{p.k}/{result.n_units}", f"{p.metric:.4g}", mark, style=style)
+        table.add_row(
+            f"{p.k}/{result.n_units}", f"{p.metric:.4g}", format_bytes(p.memory_bytes),
+            bar_mark, pareto, style=style,
+        )
     console.print(table)
 
     kept = ", ".join(result.chosen_kept_units) or "(none — fully quantized clears the bar)"
+    compression = (
+        result.all_fp_bytes / result.chosen_memory_bytes
+        if result.chosen_memory_bytes else 1.0
+    )
     console.print(
         f"[bold green]recipe:[/] keep [bold]{result.chosen_k}/{result.n_units}[/] {noun} "
         f"in high precision → {metric} {result.chosen_metric:.4g} "
-        f"(threshold {result.threshold:.4g}).  kept: {kept}"
+        f"(threshold {result.threshold:.4g}), {format_bytes(result.chosen_memory_bytes)} "
+        f"({compression:.1f}× smaller than fp).  kept: {kept}"
     )
     console.print(f"[dim]{result.evals_used} real evals spent (binary search + baseline + floor).[/]")
     return console.export_text()

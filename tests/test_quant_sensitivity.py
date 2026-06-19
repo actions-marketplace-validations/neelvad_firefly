@@ -160,8 +160,9 @@ def test_render_recipe_curve_and_recommendation() -> None:
     out = render_recipe(result)
     assert "66.00%" in out
     assert "Mixed-precision recipe curve" in out
-    assert "recommended: keep 4 layers" in out
+    assert "recommended (recovery target): keep 4 layers" in out
     assert "92%" in out
+    assert "Pareto" in out  # cost/frontier column is present
 
 
 def test_greedy_select_picks_highest_impact_first() -> None:
@@ -285,3 +286,9 @@ def test_optimize_to_bar_smollm_perplexity() -> None:
     chosen = next(p for p in result.evaluated if p.k == result.chosen_k)
     assert chosen.passes
     assert result.chosen_metric <= result.threshold  # within the (ceiling) bar
+    # Cost axis is populated: keeping nothing fp == the all-quant floor, and the
+    # envelope is real (fp strictly bigger than all-quant).
+    assert result.all_fp_bytes > result.all_quant_bytes > 0
+    assert result.chosen_memory_bytes == pytest.approx(result.all_quant_bytes)
+    frontier, knee = result.frontier_knee_ks()
+    assert frontier and knee in frontier

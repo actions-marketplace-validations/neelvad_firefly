@@ -326,6 +326,12 @@ def quant_recipe(
     eval_max_length: int = typer.Option(
         512, "--eval-max-length", help="Max tokens per eval text (perplexity)."
     ),
+    max_measurements: int = typer.Option(
+        0, "--max-measurements",
+        help="Budget guard: abort before running if the a-priori measurement count "
+        "(known from #units × strategy × k) exceeds this. 0 = no cap. Catches an "
+        "accidental O(N·k) greedy/linear run on a big model.",
+    ),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
     dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
     report_json: Path | None = typer.Option(
@@ -361,19 +367,29 @@ def quant_recipe(
         typer.echo(f"Incompatible quantization config: {e}", err=True)
         raise typer.Exit(2) from e
 
+    budget = max_measurements if max_measurements > 0 else None
+
     if accuracy_bar is not None:
         _run_accuracy_bar(
             model, inputs, accuracy_bar, eval_set, metric, eval_max_length,
-            scheme, group_size, strategy, granularity, device, dtype, report_json,
+            scheme, group_size, strategy, granularity, device, dtype, budget, report_json,
         )
         return
+
+    from firefly.quant.cost import BudgetExceededError
 
     try:
         result = compute_recipe(
             model, inputs, device=device, dtype=dtype, scheme=scheme,
             group_size=group_size, strategy=strategy, granularity=granularity,
-            k_values=ks, recovery_target=recovery_target,
+            k_values=ks, recovery_target=recovery_target, max_measurements=budget,
         )
+    except BudgetExceededError as e:
+        typer.echo(
+            f"{e}. Use a coarser --granularity, fewer --k-values, or raise "
+            f"--max-measurements.", err=True,
+        )
+        raise typer.Exit(2) from e
     except (ImportError, QuantCompatibilityError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(2) from e
@@ -384,6 +400,7 @@ def quant_recipe(
         import json
         from dataclasses import asdict
 
+        frontier, knee = result.frontier_knee_ks()
         payload = {
             "model_id": result.sensitivity.model_id,
             "scheme": result.sensitivity.scheme,
@@ -392,6 +409,10 @@ def quant_recipe(
             "full_quant_divergence": result.sensitivity.full_quant_divergence,
             "recovery_target": result.recovery_target,
             "recommended_k": result.recommended_k,
+            "all_fp_bytes": result.all_fp_bytes,
+            "all_quant_bytes": result.all_quant_bytes,
+            "pareto_frontier_ks": sorted(frontier),
+            "knee_k": knee,
             "curve": [asdict(p) for p in sorted(result.curve, key=lambda p: p.k)],
         }
         with report_json.open("w") as f:
@@ -402,10 +423,11 @@ def quant_recipe(
 def _run_accuracy_bar(
     model: str, inputs: Path, accuracy_bar: str, eval_set: Path | None, metric: str,
     eval_max_length: int, scheme: str, group_size: int, strategy: str, granularity: str,
-    device: str, dtype: str, report_json: Path | None,
+    device: str, dtype: str, max_measurements: int | None, report_json: Path | None,
 ) -> None:
     """The eval-gated recipe path (``--accuracy-bar``): real metric decides the
     smallest passing recipe. Ranking is single-pass, so greedy doesn't apply."""
+    from firefly.quant.cost import BudgetExceededError
     from firefly.quant.evaluate import AccuracyBar, resolve_evaluator
     from firefly.quant.sensitivity import STRATEGIES, optimize_to_bar
     from firefly.quant.torchao import QuantCompatibilityError
@@ -427,7 +449,13 @@ def _run_accuracy_bar(
         result = optimize_to_bar(
             model, inputs, evaluator, bar, device=device, dtype=dtype, scheme=scheme,
             group_size=group_size, strategy=strategy, granularity=granularity,
+            max_measurements=max_measurements,
         )
+    except BudgetExceededError as e:
+        typer.echo(
+            f"{e}. Use a coarser --granularity or raise --max-measurements.", err=True
+        )
+        raise typer.Exit(2) from e
     except (ImportError, QuantCompatibilityError) as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(2) from e
@@ -438,6 +466,7 @@ def _run_accuracy_bar(
         import json
         from dataclasses import asdict
 
+        frontier, knee = result.frontier_knee_ks()
         payload = {
             "model_id": result.model_id,
             "scheme": result.scheme,
@@ -453,6 +482,11 @@ def _run_accuracy_bar(
             "chosen_k": result.chosen_k,
             "chosen_metric": result.chosen_metric,
             "chosen_kept_units": result.chosen_kept_units,
+            "chosen_memory_bytes": result.chosen_memory_bytes,
+            "all_fp_bytes": result.all_fp_bytes,
+            "all_quant_bytes": result.all_quant_bytes,
+            "pareto_frontier_ks": sorted(frontier),
+            "knee_k": knee,
             "evals_used": result.evals_used,
             "evaluated": [asdict(p) for p in result.evaluated],
         }

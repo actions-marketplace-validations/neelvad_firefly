@@ -163,6 +163,63 @@ minimality; for a CI gate that's the right trade. (This is the verification
 substrate the planned agent-in-the-loop "agentic quantization" sits on top of:
 every proposed intervention is gated by a real, cheap-to-verify eval.)
 
+## Cost, and the Pareto frontier
+
+A recipe has two numbers that matter, and they trade off: **quality** (perplexity
+/ divergence) and **cost** (weight memory). Keeping more layers in fp buys
+quality but costs bytes; quantizing more is cheaper but worse. So Firefly attaches
+an exact memory cost to every recipe — the quantizable Linears at their actual
+precision (base dtype for kept units, scheme bits for the rest; int4wo's group
+scales included) — and reports the trade-off, not a single number.
+
+The organizing idea is **domination**: recipe A dominates B if A is no worse on
+*both* size and quality and strictly better on one — nobody rational picks B. The
+**Pareto frontier** is the set nobody dominates, and it's where the accuracy-bar
+table earns the `Pareto` column:
+
+```
+perplexity (↓ lower better)  fp baseline 41.42 → all-w8a8 47.01   (bar 5.0% rel → threshold 43.49)
+weight footprint: all-fp 424.7 MB → all-w8a8 106.2 MB (4.0× smaller)
+┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ keep hi-prec ┃ perplexity ┃   memory ┃ within bar? ┃  Pareto  ┃
+┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│         0/30 │      47.01 │ 106.2 MB │     no      │ frontier │
+│         2/30 │      43.45 │ 127.4 MB │     yes     │ frontier │   ← chosen (cheapest in-bar)
+│         3/30 │      40.58 │ 138.0 MB │     yes     │   knee   │
+│        15/30 │      38.62 │ 265.4 MB │     yes     │ frontier │
+│        30/30 │      41.42 │ 424.7 MB │     yes     │          │   ← DOMINATED
+└──────────────┴────────────┴──────────┴─────────────┴──────────┘
+```
+
+The headline is the last row: **full fp (30/30) is not on the frontier.** Keeping
+15 layers gives *lower* perplexity (38.62 vs 41.42) at *less* memory (265 vs 425
+MB) — partial quantization acted as mild regularization here, so shipping the full
+fp model would be strictly wasteful. A recovery *curve* indexed by k can't show
+that; the frontier, indexed by actual cost, drops it automatically.
+
+Three ways to read a point off the frontier:
+
+- **the accuracy bar** picks the cheapest recipe that clears your quality
+  threshold (here: keep 2 layers, 3.3× smaller than fp);
+- **the knee** (`knee` row) is the best quality-per-byte before diminishing
+  returns — the natural default when you don't have a hard bar;
+- **anything not marked** is dominated — never the right choice.
+
+## Budgeting the search
+
+The expensive part is the measurements (a deepcopy + quantize + forward each), and
+the count is **known a priori** from `#units × strategy × k` — so `--max-measurements`
+caps it *before* anything runs:
+
+```sh
+$ firefly quant-recipe ... --strategy greedy --granularity linear --max-measurements 50
+estimated 1653 measurements (over 210 units) exceeds --max-measurements 50.
+Use a coarser --granularity, fewer --k-values, or raise --max-measurements.
+```
+
+That guard is what stops an accidental O(N·k) greedy-on-Linears run (1653 forwards
+here) from starting unannounced on a real model.
+
 ## Reproduce it
 
 ```sh

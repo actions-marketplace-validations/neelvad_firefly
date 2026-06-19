@@ -41,6 +41,15 @@ from firefly.capture import (
     run_capture,
 )
 from firefly.determinism import set_deterministic
+from firefly.quant.cost import (
+    BudgetExceededError,
+    dtype_bits,
+    estimate_measurements,
+    frontier_and_knee,
+    linear_numels,
+    memory_envelope,
+    recipe_memory_bytes,
+)
 from firefly.quant.evaluate import AccuracyBar, Evaluator
 from firefly.quant.torchao import quantize_model, rel_l1
 
@@ -139,6 +148,18 @@ def discover_units(model: nn.Module, granularity: str = "layer") -> dict[str, li
     if granularity == "layer":
         return {f"layer.{i}": by_layer[i] for i in sorted(by_layer)}
     return {fqn: [fqn] for i in sorted(by_layer) for fqn in by_layer[i]}
+
+
+def _guard_budget(
+    n_units: int, strategy: str, k_values: list[int], max_measurements: int | None, *, bar: bool
+) -> None:
+    """Abort before spending any measurements if the a-priori count is over the
+    budget. The count is known from n_units + strategy + k_values alone."""
+    if max_measurements is None or max_measurements <= 0:
+        return
+    est = estimate_measurements(n_units, strategy, k_values, bar=bar)
+    if est > max_measurements:
+        raise BudgetExceededError(est, max_measurements, n_units)
 
 
 def _fresh_copy(fp_model: nn.Module) -> nn.Module:
@@ -254,6 +275,8 @@ class RecipePoint:
     output_divergence: float
     recovery: float
     """Fraction of the all-quantized degradation recovered: (full - this) / full."""
+    memory_bytes: float = 0.0
+    """Weight footprint of the quantizable Linears under this recipe."""
 
 
 @dataclass
@@ -262,10 +285,23 @@ class RecipeResult:
     curve: list[RecipePoint]
     recommended_k: int
     recovery_target: float
+    all_fp_bytes: float = 0.0
+    all_quant_bytes: float = 0.0
 
     @property
     def recommended_point(self) -> RecipePoint | None:
         return next((p for p in self.curve if p.k == self.recommended_k), None)
+
+    def frontier_knee_ks(self) -> tuple[set[int], int | None]:
+        """``(ks on the Pareto frontier, knee k)`` over (memory, divergence) —
+        both lower-better, so the frontier minimizes size and divergence."""
+        pts = sorted(self.curve, key=lambda p: p.k)
+        idx, knee = frontier_and_knee(
+            [p.memory_bytes for p in pts],
+            [p.output_divergence for p in pts],
+            quality_higher_is_better=False,
+        )
+        return {pts[i].k for i in idx}, (pts[knee].k if knee is not None else None)
 
 
 def _recovery(full_div: float, recipe_div: float) -> float:
@@ -352,6 +388,7 @@ def compute_recipe(
     granularity: str = "layer",
     k_values: list[int] | None = None,
     recovery_target: float = 0.9,
+    max_measurements: int | None = None,
 ) -> RecipeResult:
     """Build + **verify** mixed-precision recipes: for each k, keep the chosen
     units in high precision, quantize the rest, and measure the recovered output
@@ -377,6 +414,7 @@ def compute_recipe(
     n_units = len(ctx.units)
     if k_values is None:
         k_values = [k for k in (1, 2, 4, 8, 16) if k < n_units]
+    _guard_budget(n_units, strategy, k_values, max_measurements, bar=False)
 
     if strategy == GREEDY:
         full_div = ctx.measure(ctx.all_fqns)
@@ -394,7 +432,19 @@ def compute_recipe(
             div = ctx.measure(ctx.all_fqns - keep_fqns)
             curve.append(RecipePoint(k, keep, div, _recovery(full_div, div)))
 
-    return RecipeResult(sens, curve, _recommend_k(curve, recovery_target), recovery_target)
+    numels = linear_numels(ctx.fp_model, ctx.all_fqns)
+    base_bits = dtype_bits(dtype)
+    for p in curve:
+        kept_fqns = {fqn for name in p.kept_units for fqn in ctx.units[name]}
+        p.memory_bytes = recipe_memory_bytes(
+            numels, ctx.all_fqns - kept_fqns,
+            base_bits=base_bits, scheme=scheme, group_size=group_size,
+        )
+    env = memory_envelope(numels, base_bits=base_bits, scheme=scheme, group_size=group_size)
+    return RecipeResult(
+        sens, curve, _recommend_k(curve, recovery_target), recovery_target,
+        all_fp_bytes=env.all_fp_bytes, all_quant_bytes=env.all_quant_bytes,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +463,7 @@ class BarPoint:
     kept_units: list[str]
     metric: float
     passes: bool
+    memory_bytes: float = 0.0
 
 
 @dataclass
@@ -435,6 +486,20 @@ class BarRecipeResult:
     chosen_metric: float
     evaluated: list[BarPoint]
     evals_used: int
+    chosen_memory_bytes: float = 0.0
+    all_fp_bytes: float = 0.0
+    all_quant_bytes: float = 0.0
+
+    def frontier_knee_ks(self) -> tuple[set[int], int | None]:
+        """``(ks on the Pareto frontier, knee k)`` over (memory, metric), with
+        the metric's own direction; cost is always lower-better."""
+        pts = sorted(self.evaluated, key=lambda p: p.k)
+        idx, knee = frontier_and_knee(
+            [p.memory_bytes for p in pts],
+            [p.metric for p in pts],
+            quality_higher_is_better=self.higher_is_better,
+        )
+        return {pts[i].k for i in idx}, (pts[knee].k if knee is not None else None)
 
 
 def _bar_search(n: int, passes_at: Callable[[int], bool]) -> int:
@@ -473,6 +538,7 @@ def optimize_to_bar(
     group_size: int = 32,
     strategy: str = "isolated",
     granularity: str = "layer",
+    max_measurements: int | None = None,
 ) -> BarRecipeResult:
     """Find the smallest mixed-precision recipe that clears an accuracy bar.
 
@@ -495,6 +561,7 @@ def optimize_to_bar(
 
     ctx = _setup(model_id, inputs_path, device, dtype, scheme, group_size, granularity)
     n = len(ctx.units)
+    _guard_budget(n, strategy, [], max_measurements, bar=True)
     ranked = _run_sensitivity(ctx, strategy).keep_high_precision(n)  # most-sensitive first
 
     evaluated: dict[int, float] = {}
@@ -518,10 +585,21 @@ def optimize_to_bar(
 
     chosen_k = _bar_search(n, lambda k: bar.passes(metric_at(k), baseline, hib))
 
+    numels = linear_numels(ctx.fp_model, ctx.all_fqns)
+    base_bits = dtype_bits(dtype)
+
+    def cost_at(k: int) -> float:
+        kept_fqns = {fqn for name in ranked[:k] for fqn in ctx.units[name]}
+        return recipe_memory_bytes(
+            numels, ctx.all_fqns - kept_fqns,
+            base_bits=base_bits, scheme=scheme, group_size=group_size,
+        )
+
     points = [
-        BarPoint(k, ranked[:k], evaluated[k], bar.passes(evaluated[k], baseline, hib))
+        BarPoint(k, ranked[:k], evaluated[k], bar.passes(evaluated[k], baseline, hib), cost_at(k))
         for k in sorted(evaluated)
     ]
+    env = memory_envelope(numels, base_bits=base_bits, scheme=scheme, group_size=group_size)
     return BarRecipeResult(
         model_id=ctx.model_id,
         scheme=ctx.scheme,
@@ -539,4 +617,7 @@ def optimize_to_bar(
         chosen_metric=metric_at(chosen_k),
         evaluated=points,
         evals_used=len(evaluated),
+        chosen_memory_bytes=cost_at(chosen_k),
+        all_fp_bytes=env.all_fp_bytes,
+        all_quant_bytes=env.all_quant_bytes,
     )
