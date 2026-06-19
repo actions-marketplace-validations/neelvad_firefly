@@ -315,6 +315,54 @@ def render_recipe(
     return console.export_text()
 
 
+def render_bar_recipe(result, console: Console | None = None) -> str:
+    """Render the accuracy-bar recipe: the smallest keep-set that clears a real
+    eval metric, with the candidates that were actually evaluated.
+
+    The headline is the chosen recipe — keep k units in high precision and the
+    quantized model stays inside the bar on the held-out eval. The table shows
+    the binary-search probes (real evals), not a dense curve, so it doubles as a
+    receipt of how few evals it took.
+    """
+    console = console or Console(record=True, width=100)
+    noun = "Linears" if result.granularity == "linear" else "layers"
+    metric = result.metric_name
+    direction = "↑ higher better" if result.higher_is_better else "↓ lower better"
+    bar_str = (
+        f"{result.bar.value:.1%} rel" if result.bar.mode == "rel" else f"{result.bar.value:g} abs"
+    )
+
+    console.print(
+        f"[bold]{metric}[/] ({direction})  fp baseline {result.baseline_metric:.4g} → "
+        f"all-{result.scheme} {result.full_quant_metric:.4g}   "
+        f"[dim](bar {bar_str} → threshold {result.threshold:.4g}, "
+        f"rank: {result.strategy}, {result.granularity})[/]"
+    )
+
+    table = Table(
+        title="Accuracy-bar recipe — evaluated candidates",
+        show_header=True,
+        header_style="bold",
+    )
+    table.add_column("keep hi-prec", justify="right")
+    table.add_column(metric, justify="right")
+    table.add_column("within bar?", justify="center")
+    for p in result.evaluated:
+        mark = "[green]yes[/]" if p.passes else "[red]no[/]"
+        style = "bold green" if p.k == result.chosen_k else None
+        table.add_row(f"{p.k}/{result.n_units}", f"{p.metric:.4g}", mark, style=style)
+    console.print(table)
+
+    kept = ", ".join(result.chosen_kept_units) or "(none — fully quantized clears the bar)"
+    console.print(
+        f"[bold green]recipe:[/] keep [bold]{result.chosen_k}/{result.n_units}[/] {noun} "
+        f"in high precision → {metric} {result.chosen_metric:.4g} "
+        f"(threshold {result.threshold:.4g}).  kept: {kept}"
+    )
+    console.print(f"[dim]{result.evals_used} real evals spent (binary search + baseline + floor).[/]")
+    return console.export_text()
+
+
 def render_op_diff(result: OpDiffResult, top_n: int = 25, console: Console | None = None) -> str:
     """Render the op-by-op drill-down inside a module, in execution order.
 

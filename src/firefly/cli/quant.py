@@ -306,6 +306,26 @@ def quant_recipe(
         help="Recommend the smallest k recovering at least this fraction of the "
         "all-quantized degradation (default 0.9 = 90%%).",
     ),
+    accuracy_bar: str | None = typer.Option(
+        None, "--accuracy-bar",
+        help="Switch to the eval-gated path: find the smallest recipe whose REAL "
+        "metric (see --eval/--metric) stays within this bar of the fp baseline. "
+        "'rel:0.01' = within 1%%; 'abs:0.5' = within 0.5 metric units. Ranks units "
+        "by the cheap proxy, spends ~log2(N) real evals to gate acceptance.",
+    ),
+    eval_set: Path | None = typer.Option(
+        None, "--eval",
+        help="Held-out eval set for --accuracy-bar (JSON {\"texts\":[...]} or JSONL). "
+        "Required for --metric perplexity; callable metrics supply their own data.",
+    ),
+    metric: str = typer.Option(
+        "perplexity", "--metric",
+        help="Eval metric for --accuracy-bar: 'perplexity' or a 'module:function' "
+        "callable taking (model, tokenizer) → float.",
+    ),
+    eval_max_length: int = typer.Option(
+        512, "--eval-max-length", help="Max tokens per eval text (perplexity)."
+    ),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
     dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
     report_json: Path | None = typer.Option(
@@ -341,6 +361,13 @@ def quant_recipe(
         typer.echo(f"Incompatible quantization config: {e}", err=True)
         raise typer.Exit(2) from e
 
+    if accuracy_bar is not None:
+        _run_accuracy_bar(
+            model, inputs, accuracy_bar, eval_set, metric, eval_max_length,
+            scheme, group_size, strategy, granularity, device, dtype, report_json,
+        )
+        return
+
     try:
         result = compute_recipe(
             model, inputs, device=device, dtype=dtype, scheme=scheme,
@@ -366,6 +393,68 @@ def quant_recipe(
             "recovery_target": result.recovery_target,
             "recommended_k": result.recommended_k,
             "curve": [asdict(p) for p in sorted(result.curve, key=lambda p: p.k)],
+        }
+        with report_json.open("w") as f:
+            json.dump(payload, f, indent=2)
+        typer.echo(f"Wrote recipe report to {report_json}")
+
+
+def _run_accuracy_bar(
+    model: str, inputs: Path, accuracy_bar: str, eval_set: Path | None, metric: str,
+    eval_max_length: int, scheme: str, group_size: int, strategy: str, granularity: str,
+    device: str, dtype: str, report_json: Path | None,
+) -> None:
+    """The eval-gated recipe path (``--accuracy-bar``): real metric decides the
+    smallest passing recipe. Ranking is single-pass, so greedy doesn't apply."""
+    from firefly.quant.evaluate import AccuracyBar, resolve_evaluator
+    from firefly.quant.sensitivity import STRATEGIES, optimize_to_bar
+    from firefly.quant.torchao import QuantCompatibilityError
+    from firefly.report import render_bar_recipe
+
+    if strategy not in STRATEGIES:
+        raise typer.BadParameter(
+            f"--accuracy-bar ranks with {sorted(STRATEGIES)} (greedy is a search, "
+            f"not a ranking); got {strategy!r}",
+            param_hint="--strategy",
+        )
+    try:
+        bar = AccuracyBar.parse(accuracy_bar)
+        evaluator = resolve_evaluator(metric, eval_set, max_length=eval_max_length)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+
+    try:
+        result = optimize_to_bar(
+            model, inputs, evaluator, bar, device=device, dtype=dtype, scheme=scheme,
+            group_size=group_size, strategy=strategy, granularity=granularity,
+        )
+    except (ImportError, QuantCompatibilityError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(render_bar_recipe(result))
+
+    if report_json is not None:
+        import json
+        from dataclasses import asdict
+
+        payload = {
+            "model_id": result.model_id,
+            "scheme": result.scheme,
+            "granularity": result.granularity,
+            "strategy": result.strategy,
+            "metric": result.metric_name,
+            "higher_is_better": result.higher_is_better,
+            "bar": {"mode": result.bar.mode, "value": result.bar.value},
+            "baseline_metric": result.baseline_metric,
+            "full_quant_metric": result.full_quant_metric,
+            "threshold": result.threshold,
+            "n_units": result.n_units,
+            "chosen_k": result.chosen_k,
+            "chosen_metric": result.chosen_metric,
+            "chosen_kept_units": result.chosen_kept_units,
+            "evals_used": result.evals_used,
+            "evaluated": [asdict(p) for p in result.evaluated],
         }
         with report_json.open("w") as f:
             json.dump(payload, f, indent=2)

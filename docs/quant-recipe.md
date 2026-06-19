@@ -111,6 +111,58 @@ keep just a couple of Linears in fp rather than whole layers — cheaper for the
 same recovery. (This is the same drill-down ladder as the parity tool's
 layer→head attribution; the floor for *quant* recipes is the Linear.)
 
+## Gate on a real eval: the accuracy bar
+
+Everything above optimizes a *surrogate* — output divergence vs the fp baseline
+on the calibration prompts. That ranks layers well, but it isn't what you ship
+against. The product question is: **"give me the smallest recipe whose real
+metric stays within X of fp on my eval set."** That's `--accuracy-bar`:
+
+```sh
+firefly quant-recipe -m HuggingFaceTB/SmolLM-135M -i calib.json \
+    --scheme w8a8 --accuracy-bar rel:0.05 \
+    --eval eval.jsonl --metric perplexity
+```
+
+```
+perplexity (↓ lower better)  fp baseline 41.42 → all-w8a8 47.01   (bar 5.0% rel → threshold 43.49)
+┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ keep hi-prec ┃ perplexity ┃ within bar? ┃
+┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+│         0/30 │      47.01 │     no      │
+│         1/30 │      43.86 │     no      │
+│         2/30 │      43.45 │     yes     │   ← chosen
+│         7/30 │      38.98 │     yes     │
+│        15/30 │      38.62 │     yes     │
+│        30/30 │      41.42 │     yes     │
+└──────────────┴────────────┴─────────────┘
+recipe: keep 2/30 layers in high precision → perplexity 43.45 (threshold 43.49).  kept: layer.28, layer.29
+7 real evals spent (binary search + baseline + floor).
+```
+
+The win is the **two-tier metric**. The cheap proxy ranks all 30 layers (one
+forward each — the *filter*); the expensive real eval is spent only to *gate*
+candidate recipes, and a binary search over the ranking finds the smallest
+passing keep-set in ~log₂(N) evals (the *wrapper*). Here it kept just the two
+late massive-activation layers (`layer.28`, `layer.29`) in fp and quantized the
+other 28 — at the cost of **7 evals, not 30**.
+
+The metric is pluggable: `--metric perplexity` (built-in) or a
+`module:function` callable taking `(model, tokenizer) → float` (carry a
+`higher_is_better = False` attribute for a loss-style metric). The bar is
+`rel:<frac>` (within X% of baseline) or `abs:<delta>` (absolute metric units),
+and the direction is handled for you — a floor below baseline for accuracy, a
+ceiling above it for perplexity.
+
+One honesty note visible in the table above: the recovery curve is **not
+strictly monotonic** — keeping 15 layers fp (perplexity 38.62) actually beats
+*full* fp (41.42) on this tiny eval, because partial quantization can act as
+mild regularization. The binary search assumes monotonicity to stay cheap, so it
+returns the smallest *confirmed-passing* recipe rather than a proof of global
+minimality; for a CI gate that's the right trade. (This is the verification
+substrate the planned agent-in-the-loop "agentic quantization" sits on top of:
+every proposed intervention is gated by a real, cheap-to-verify eval.)
+
 ## Reproduce it
 
 ```sh
@@ -123,6 +175,10 @@ firefly quant-sensitivity -m HuggingFaceTB/SmolLM-135M -i golden.json --scheme w
 # build + verify a recipe (try --strategy isolated | marginal | greedy):
 firefly quant-recipe -m HuggingFaceTB/SmolLM-135M -i golden.json \
     --scheme w8a8 --strategy greedy --k-values 1,2,4,8
+
+# or gate on a real eval metric instead of the divergence proxy:
+firefly quant-recipe -m HuggingFaceTB/SmolLM-135M -i golden.json \
+    --scheme w8a8 --accuracy-bar rel:0.05 --eval eval.jsonl --metric perplexity
 ```
 
 `--scheme int4wo` runs the same thing for int4 weight-only (needs a CUDA GPU).

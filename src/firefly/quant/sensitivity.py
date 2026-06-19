@@ -41,6 +41,7 @@ from firefly.capture import (
     run_capture,
 )
 from firefly.determinism import set_deterministic
+from firefly.quant.evaluate import AccuracyBar, Evaluator
 from firefly.quant.torchao import quantize_model, rel_l1
 
 #: Matches a decoder-layer index in a module FQN, with or without a leading
@@ -171,6 +172,7 @@ class _Ctx:
 
     model_id: str
     fp_model: nn.Module
+    tokenizer: object
     batch: dict
     ref_output: torch.Tensor
     units: dict[str, list[str]]
@@ -195,7 +197,10 @@ def _setup(
     ref_output = run_capture(fp_model, batch)[_OUTPUT_TAP]
     units = discover_units(fp_model, granularity)
     all_fqns = {fqn for fqns in units.values() for fqn in fqns}
-    return _Ctx(model_id, fp_model, batch, ref_output, units, all_fqns, scheme, group_size, granularity)
+    return _Ctx(
+        model_id, fp_model, tok, batch, ref_output, units, all_fqns,
+        scheme, group_size, granularity,
+    )
 
 
 def _run_sensitivity(ctx: _Ctx, strategy: str) -> SensitivityResult:
@@ -390,3 +395,148 @@ def compute_recipe(
             curve.append(RecipePoint(k, keep, div, _recovery(full_div, div)))
 
     return RecipeResult(sens, curve, _recommend_k(curve, recovery_target), recovery_target)
+
+
+# ---------------------------------------------------------------------------
+# Optimize to an accuracy bar: rank by the cheap proxy (the filter), then gate
+# candidate recipes on a real eval metric (the wrapper) and return the smallest
+# keep-set that clears the bar. See firefly.quant.evaluate.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BarPoint:
+    """One evaluated recipe: top-``k`` units kept fp, the rest quantized, and
+    the real metric it achieved (with whether that clears the bar)."""
+
+    k: int
+    kept_units: list[str]
+    metric: float
+    passes: bool
+
+
+@dataclass
+class BarRecipeResult:
+    model_id: str
+    scheme: str
+    granularity: str
+    strategy: str
+    metric_name: str
+    higher_is_better: bool
+    bar: AccuracyBar
+    baseline_metric: float
+    """The fp model's metric — the bar is measured relative to this."""
+    full_quant_metric: float
+    """The all-quantized metric — the floor the recipe climbs back from."""
+    threshold: float
+    n_units: int
+    chosen_k: int
+    chosen_kept_units: list[str]
+    chosen_metric: float
+    evaluated: list[BarPoint]
+    evals_used: int
+
+
+def _bar_search(n: int, passes_at: Callable[[int], bool]) -> int:
+    """Smallest ``k`` in ``[0, n]`` with ``passes_at(k)`` True.
+
+    Assumes ``passes_at`` is monotonic non-decreasing in ``k`` (keeping more
+    units in high precision never hurts the metric) and that ``passes_at(n)``
+    holds (the fp baseline always meets its own bar). Binary search → ~log2(n)
+    calls; ``passes_at`` should be memoized so a repeated ``k`` is free.
+
+    The monotonicity assumption is what makes this cheap; quantization
+    interactions can dent it slightly, so the result is the smallest *confirmed*
+    passing k under that assumption, not a proof of global minimality.
+    """
+    if passes_at(0):
+        return 0
+    lo, hi = 0, n  # invariant: not passes_at(lo); passes_at(hi)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if passes_at(mid):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def optimize_to_bar(
+    model_id: str,
+    inputs_path: Path,
+    evaluator: Evaluator,
+    bar: AccuracyBar,
+    *,
+    device: str = "cpu",
+    dtype: str = "float32",
+    scheme: str = "w8a8",
+    group_size: int = 32,
+    strategy: str = "isolated",
+    granularity: str = "layer",
+) -> BarRecipeResult:
+    """Find the smallest mixed-precision recipe that clears an accuracy bar.
+
+    Two tiers: rank units by the cheap output-divergence proxy on the
+    calibration prompts (one ``_run_sensitivity`` pass — the filter), then
+    binary-search ``k`` and spend a *real* ``evaluator`` call on the held-out
+    eval set only at each probed recipe (the wrapper). So the expensive evals
+    cost ~log2(N) + 2 (baseline + all-quantized floor), not O(N).
+
+    ``strategy`` is the ranking only (``isolated`` / ``marginal``); the bar
+    decides how many of that ranking to keep.
+    """
+    if strategy not in STRATEGIES:
+        raise ValueError(
+            f"optimize_to_bar ranks with {sorted(STRATEGIES)}, got {strategy!r} "
+            "(greedy is a recipe search, not a ranking)"
+        )
+    if granularity not in GRANULARITIES:
+        raise ValueError(f"unknown granularity {granularity!r}; choose from {GRANULARITIES}")
+
+    ctx = _setup(model_id, inputs_path, device, dtype, scheme, group_size, granularity)
+    n = len(ctx.units)
+    ranked = _run_sensitivity(ctx, strategy).keep_high_precision(n)  # most-sensitive first
+
+    evaluated: dict[int, float] = {}
+
+    def metric_at(k: int) -> float:
+        if k not in evaluated:
+            kept_fqns = {fqn for name in ranked[:k] for fqn in ctx.units[name]}
+            targets = ctx.all_fqns - kept_fqns
+            model = _fresh_copy(ctx.fp_model)
+            if targets:
+                quantize_model(
+                    model, scheme=scheme, group_size=group_size,
+                    module_filter=lambda _mod, fqn: fqn in targets,
+                )
+            evaluated[k] = evaluator(model, ctx.tokenizer)
+        return evaluated[k]
+
+    hib = evaluator.higher_is_better
+    baseline = metric_at(n)        # all fp — the reference the bar is relative to
+    full_quant = metric_at(0)      # all quantized — the floor
+
+    chosen_k = _bar_search(n, lambda k: bar.passes(metric_at(k), baseline, hib))
+
+    points = [
+        BarPoint(k, ranked[:k], evaluated[k], bar.passes(evaluated[k], baseline, hib))
+        for k in sorted(evaluated)
+    ]
+    return BarRecipeResult(
+        model_id=ctx.model_id,
+        scheme=ctx.scheme,
+        granularity=ctx.granularity,
+        strategy=strategy,
+        metric_name=evaluator.name,
+        higher_is_better=hib,
+        bar=bar,
+        baseline_metric=baseline,
+        full_quant_metric=full_quant,
+        threshold=bar.threshold(baseline, hib),
+        n_units=n,
+        chosen_k=chosen_k,
+        chosen_kept_units=ranked[:chosen_k],
+        chosen_metric=metric_at(chosen_k),
+        evaluated=points,
+        evals_used=len(evaluated),
+    )

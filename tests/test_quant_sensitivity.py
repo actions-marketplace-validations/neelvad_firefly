@@ -248,3 +248,40 @@ def test_compute_sensitivity_smollm_isolated() -> None:
     assert result.full_quant_divergence > 0.0
     assert max(x.sensitivity for x in result.units) > 0.0
     assert result.keep_high_precision(3) == [x.unit for x in result.ranked[:3]]
+
+
+@pytest.mark.slow
+def test_optimize_to_bar_smollm_perplexity() -> None:
+    """End-to-end eval loop: rank by the cheap proxy, gate on real perplexity.
+
+    A loose bar must be cleared by the fully-quantized model (k=0), so the
+    binary search returns immediately and only the two anchor evals (baseline +
+    floor) are spent — exercising the full real path cheaply. The k>0 search
+    boundary is covered by the fast _bar_search tests."""
+    pytest.importorskip("torchao", reason="optimize_to_bar needs the torchao extra")
+    import tempfile
+
+    from firefly.quant.evaluate import perplexity_evaluator
+    from firefly.quant.sensitivity import AccuracyBar, optimize_to_bar
+
+    work = Path(tempfile.mkdtemp())
+    inputs = work / "golden.json"  # calibration prompts (ranking)
+    inputs.write_text(json.dumps({"texts": ["the quick brown fox"], "max_length": 12}))
+    # Held-out eval set — distinct from calibration.
+    evaluator = perplexity_evaluator(["a lazy dog sleeps", "paris is in france"], max_length=16)
+
+    result = optimize_to_bar(
+        "HuggingFaceTB/SmolLM-135M", inputs, evaluator, AccuracyBar("rel", 5.0),
+        device="cpu", scheme="w8a8", strategy="isolated", granularity="layer",
+    )
+
+    assert result.metric_name == "perplexity" and result.higher_is_better is False
+    assert result.n_units == 30
+    # Quantizing every layer can only hurt (raise) perplexity vs the fp baseline.
+    assert result.full_quant_metric >= result.baseline_metric - 1e-6
+    # The 500%-rel bar is trivially cleared fully quantized → keep nothing.
+    assert result.chosen_k == 0
+    assert result.evals_used == 2  # baseline (k=n) + floor (k=0); search short-circuits
+    chosen = next(p for p in result.evaluated if p.k == result.chosen_k)
+    assert chosen.passes
+    assert result.chosen_metric <= result.threshold  # within the (ceiling) bar
