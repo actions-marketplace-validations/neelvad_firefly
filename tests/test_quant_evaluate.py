@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from firefly.quant.bar import BarPoint, BarRecipeResult, _bar_search
 from firefly.quant.evaluate import (
     AccuracyBar,
     callable_evaluator,
     load_eval_texts,
     resolve_evaluator,
 )
-from firefly.quant.sensitivity import BarPoint, BarRecipeResult, _bar_search
 
 # --- AccuracyBar ---------------------------------------------------------------
 

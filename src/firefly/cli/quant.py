@@ -354,7 +354,8 @@ def quant_recipe(
     fidelity. The curve shows how few high-precision units recover most of the
     fidelity — the attribution-guided answer torchao autoquant can't explain.
     """
-    from firefly.quant.sensitivity import GRANULARITIES, RECIPE_STRATEGIES, compute_recipe
+    from firefly.quant.recipe import RECIPE_STRATEGIES, compute_recipe
+    from firefly.quant.sensitivity import GRANULARITIES
     from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
     from firefly.report import render_recipe
 
@@ -476,9 +477,10 @@ def _run_accuracy_bar(
 ) -> None:
     """The eval-gated recipe path (``--accuracy-bar``): real metric decides the
     smallest passing recipe. Ranking is single-pass, so greedy doesn't apply."""
+    from firefly.quant.bar import optimize_to_bar
     from firefly.quant.cost import BudgetExceededError
     from firefly.quant.evaluate import AccuracyBar, resolve_evaluator
-    from firefly.quant.sensitivity import STRATEGIES, optimize_to_bar
+    from firefly.quant.sensitivity import STRATEGIES
     from firefly.quant.torchao import QuantCompatibilityError
     from firefly.report import render_bar_recipe
 
