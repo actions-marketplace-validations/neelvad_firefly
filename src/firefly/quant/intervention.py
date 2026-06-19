@@ -35,13 +35,20 @@ from torch import nn
 from firefly.quant.torchao import quantize_model
 
 #: Failure-mode signatures an intervention can declare it ``treats`` — the
-#: vocabulary the (future) agent registry matches a diagnosis against. Strings,
+#: vocabulary :mod:`firefly.quant.diagnose` matches a diagnosis against. Strings,
 #: not an enum, so a new adapter can introduce a new signature without editing
 #: this module.
-ACTIVATION_OUTLIERS = "activation_outliers"   # high channel_concentration → SmoothQuant
-DIFFUSE_WEIGHT_LOSS = "diffuse_weight_loss"   # error grows through depth → GPTQ
-SALIENT_WEIGHT_CHANNELS = "salient_weight_channels"  # → AWQ
-SINGLE_UNIT_DOMINANCE = "single_unit_dominance"      # → mixed precision (a policy edit)
+#:
+#: Only signatures with a REAL detector on the activation-capture substrate live
+#: here — we don't ship labels for detectors that don't exist:
+#:   * ACTIVATION_OUTLIERS — quant-risk channel_concentration (→ SmoothQuant).
+#:   * SINGLE_UNIT_DOMINANCE — a sensitivity sweep, one unit ≫ median (→ keep fp).
+#: Deliberately absent: AWQ's salient-weight-channels (needs a new |W|·|X|
+#: weight-side sensor) and GPTQ's diffuse-weight-loss (justified in weight-space
+#: Hessian, not measurable from a forward pass). Add the signature only with the
+#: detector — see firefly.quant.diagnose.
+ACTIVATION_OUTLIERS = "activation_outliers"
+SINGLE_UNIT_DOMINANCE = "single_unit_dominance"
 
 
 class Stage(IntEnum):

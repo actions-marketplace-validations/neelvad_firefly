@@ -15,7 +15,7 @@ use-case below is the same engine pointed at a different divergence:
 | Surface | The question it answers | Maturity |
 | --- | --- | --- |
 | **Parity CI gate** — `firefly check` + GitHub Action | Did a kernel swap / dep bump / serving-stack drift silently change my model's activations? | **Shipped** — on the Marketplace, validated across 9 models / 8 families |
-| **Quantization diagnosis** — `quant-diff` / `quant-sensitivity` / `quant-recipe` | *Which* layers does my quantized build break, and which should I keep in higher precision? | **Built & verified** — the agentic auto-quant on top is aspirational |
+| **Quantization diagnosis** — `quant-diff` / `quant-sensitivity` / `quant-recipe` / `quant-diagnose` | *Which* layers does my quantized build break, what treats it, and which do I keep in higher precision? | **Built & verified** — diagnosis routes a detected failure mode to the intervention that treats it (activation-outliers → SmoothQuant; single-unit-dominance → mixed precision), verified against a real eval. A *general* technique-search agent is aspirational |
 | **Shadow mode** — `firefly.shadow` | What are a *live production* model's internals doing? (survives `torch.compile` + CUDA graphs) | **Experimental mechanism** — GPU-validated but not deployed anywhere; overhead unmeasured |
 
 ## Parity CI gate

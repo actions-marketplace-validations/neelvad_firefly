@@ -256,6 +256,50 @@ rescale); GPTQ/AWQ will be wrapped from their libraries against the same
 interface. The attribution decides *which* failure mode you have; the seam lets
 the matching treatment slot in.
 
+## Diagnosis: connecting the measurement to the treatment
+
+The seam (above) is the *actuator*; the missing half was the *sensor* — something
+that reads the measurements and says *which* failure mode this model has.
+`firefly quant-diagnose` is that sensor. It runs on the stored activations (no
+model run) and emits a **measured, causal** diagnosis routed to the intervention
+that treats it:
+
+```
+$ firefly quant-diagnose -r reference/
+Firefly quant diagnosis — 3 finding(s)
+  activation_outliers @ layer.29.mlp → smoothquant
+    layer.29.mlp: int8 per-tensor error 34% is dominated by outlier channels (70x
+    concentration) — per-channel rescues it to 0.4% (84x). SmoothQuant migrates those
+    outliers into the weights so per-token activation quant stops crushing the rest;
+    apply --smoothquant and verify against an --accuracy-bar.
+verify: firefly quant-recipe -m <model> -i <inputs> --smoothquant --accuracy-bar rel:0.01 ...
+```
+
+That explanation is the thing autoquant can't give: not "your eval dropped," but
+*"this layer's int8 error is a few outlier channels, here's the technique that
+moves them, go verify it."* The loop is **diagnose → route → `optimize_to_bar`
+verifies → explain from the measured before/after** — deterministic and fully
+measured (no LLM).
+
+**Honest coverage — this is the important part.** `quant-diagnose` only emits
+signatures it can actually detect from the activation-capture substrate:
+
+- **activation-outliers** (→ SmoothQuant) — from quant-risk's `channel_concentration`.
+- **single-unit-dominance** (→ mixed precision) — from a sensitivity sweep where one
+  unit's quant sensitivity dwarfs the rest.
+
+It deliberately does **not** ship labels for failure modes it can't measure. AWQ's
+salient-weight-channel signal would need a new weight-side sensor (`|W|·|X|` per
+channel — buildable, not built); GPTQ's case is justified in weight-space (the
+Hessian), which a forward pass can't observe. A *general* "agent picks the next
+technique" loop runs into a second wall too — the technique axis isn't monotone
+(SmoothQuant changes AWQ's salience, can help or hurt GPTQ), so the cheap
+keep-set binary search doesn't transfer; each technique combination is a full
+re-quant + re-eval. So Firefly's quant agent is, honestly, a **diagnosis-routed
+recipe selector** for the failure modes it can detect — the search only tunes the
+(monotone) keep-set inside the chosen template. That's the half that's both
+viable and differentiated; the autonomous technique-search agent is not claimed.
+
 ## Reproduce it
 
 ```sh

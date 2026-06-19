@@ -344,6 +344,41 @@ def render_recipe(
     return console.export_text()
 
 
+def render_diagnosis(diagnosis, model_id: str = "<model>", console: Console | None = None) -> str:
+    """Render a quant diagnosis: each detected failure-mode signature, where it
+    is, the intervention it routes to, and the measured causal explanation —
+    plus the verify command to run next. Honest by construction: it only shows
+    signatures a real detector emitted."""
+    console = console or Console(record=True, width=100)
+    findings = diagnosis.findings
+    if not findings:
+        console.print(
+            "[green]No quant failure-mode signatures detected[/] "
+            "(no high-concentration activation-outlier taps)."
+        )
+        return console.export_text()
+
+    console.print(f"[bold]Firefly quant diagnosis[/] — {len(findings)} finding(s)")
+    routes: set[str] = set()
+    for f in findings:
+        routes.add(f.recommend)
+        console.print(f"  [bold yellow]{f.signature}[/] @ [cyan]{f.location}[/] → {f.recommend}")
+        console.print(f"    {f.explanation}")
+
+    if "smoothquant" in routes:
+        console.print(
+            "\n[bold green]verify:[/] firefly quant-recipe -m "
+            f"{model_id} -i <inputs> --smoothquant "
+            "--accuracy-bar rel:0.01 --eval <eval> --metric perplexity"
+        )
+    if "mixed-precision" in routes:
+        console.print(
+            "[bold green]verify:[/] firefly quant-recipe -m "
+            f"{model_id} -i <inputs> --accuracy-bar rel:0.01 --eval <eval> --metric perplexity"
+        )
+    return console.export_text()
+
+
 def render_bar_recipe(result, console: Console | None = None) -> str:
     """Render the accuracy-bar recipe: the smallest keep-set that clears a real
     eval metric, with the candidates that were actually evaluated.

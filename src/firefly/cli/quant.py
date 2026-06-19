@@ -75,6 +75,52 @@ def quant_risk(
         typer.echo(f"Wrote quant-risk report to {report_json}")
 
 
+@app.command("quant-diagnose")
+def quant_diagnose(
+    reference: str = typer.Option(
+        ..., "--reference", "-r",
+        help="Reference artifact (local path or hf://org/repo). Diagnosis runs on "
+        "the stored activations — no model run.",
+    ),
+    bits: int = typer.Option(8, "--bits", help="Quant bit-width to diagnose (8 / 4)."),
+    concentration: float = typer.Option(
+        8.0, "--concentration",
+        help="Min channel-concentration to flag a tap as ACTIVATION_OUTLIERS.",
+    ),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write the structured findings here."
+    ),
+) -> None:
+    """Diagnose quant failure-mode signatures from stored activations, and route
+    each to the intervention that treats it.
+
+    The sensor half of the loop: connects measurements (quant-risk's
+    channel_concentration) to the intervention vocabulary, emitting
+    ACTIVATION_OUTLIERS findings with a measured, causal explanation and the
+    verify command to run next. Coverage is deliberately honest — it only emits
+    signatures it can actually detect (see `firefly.quant.diagnose`).
+    """
+    from dataclasses import asdict
+
+    from firefly.quant.diagnose import diagnose
+    from firefly.reference import read_reference
+    from firefly.report import render_diagnosis
+
+    resolved_reference = _resolve_or_exit(reference)
+    manifest, tensors = read_reference(resolved_reference)
+    diagnosis = diagnose(
+        tensors, manifest.tap_points, bits=bits, concentration_threshold=concentration
+    )
+    typer.echo(render_diagnosis(diagnosis, model_id=manifest.model_id))
+
+    if report_json is not None:
+        import json
+
+        with report_json.open("w") as f:
+            json.dump({"findings": [asdict(x) for x in diagnosis.findings]}, f, indent=2)
+        typer.echo(f"Wrote diagnosis to {report_json}")
+
+
 @app.command("quant-diff")
 def quant_diff(
     reference: str = typer.Option(
