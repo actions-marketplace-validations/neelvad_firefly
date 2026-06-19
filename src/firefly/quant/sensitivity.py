@@ -51,7 +51,8 @@ from firefly.quant.cost import (
     recipe_memory_bytes,
 )
 from firefly.quant.evaluate import AccuracyBar, Evaluator
-from firefly.quant.torchao import quantize_model, rel_l1
+from firefly.quant.intervention import Pipeline, PrecisionPolicy
+from firefly.quant.torchao import rel_l1
 
 #: Matches a decoder-layer index in a module FQN, with or without a leading
 #: prefix (``model.layers.5.mlp...`` and a bare ``layers.5...``).
@@ -168,6 +169,17 @@ def _fresh_copy(fp_model: nn.Module) -> nn.Module:
     return copy.deepcopy(fp_model)
 
 
+def _apply_policy(
+    fp_model: nn.Module, scheme: str, group_size: int, quantize_fqns: set[str]
+) -> nn.Module:
+    """Fresh fp copy → the default intervention pipeline (RTN, no pre-transforms)
+    under a :class:`PrecisionPolicy`. The single choke point both the divergence
+    sweep and the eval loop quantize through; the agent will later hand a richer
+    :class:`Pipeline` (e.g. SmoothQuant pre-transform) in here instead."""
+    policy = PrecisionPolicy(scheme=scheme, group_size=group_size, quantize=set(quantize_fqns))
+    return Pipeline().run(_fresh_copy(fp_model), policy)
+
+
 def _measure(
     fp_model: nn.Module,
     batch: dict,
@@ -177,12 +189,7 @@ def _measure(
     group_size: int,
 ) -> float:
     """Output (``final_norm``) relative divergence with ``targets`` quantized."""
-    model = _fresh_copy(fp_model)
-    if targets:
-        quantize_model(
-            model, scheme=scheme, group_size=group_size,
-            module_filter=lambda _mod, fqn: fqn in targets,
-        )
+    model = _apply_policy(fp_model, scheme, group_size, targets)
     caps = run_capture(model, batch)
     return rel_l1(ref_output, caps[_OUTPUT_TAP])
 
@@ -569,13 +576,7 @@ def optimize_to_bar(
     def metric_at(k: int) -> float:
         if k not in evaluated:
             kept_fqns = {fqn for name in ranked[:k] for fqn in ctx.units[name]}
-            targets = ctx.all_fqns - kept_fqns
-            model = _fresh_copy(ctx.fp_model)
-            if targets:
-                quantize_model(
-                    model, scheme=scheme, group_size=group_size,
-                    module_filter=lambda _mod, fqn: fqn in targets,
-                )
+            model = _apply_policy(ctx.fp_model, scheme, group_size, ctx.all_fqns - kept_fqns)
             evaluated[k] = evaluator(model, ctx.tokenizer)
         return evaluated[k]
 
