@@ -220,6 +220,42 @@ Use a coarser --granularity, fewer --k-values, or raise --max-measurements.
 That guard is what stops an accidental O(N·k) greedy-on-Linears run (1653 forwards
 here) from starting unannounced on a real model.
 
+## Beyond keep-fp: interventions (SmoothQuant)
+
+Mixed precision is the *coarse* lever — keep a whole layer in fp. But many quant
+failures have a *targeted* fix that doesn't cost any fp layers. The most common
+is **activation outliers**: a few input-channel activations are huge, so per-token
+int8 activation quant sets its scale from them and crushes every other channel.
+The right treatment isn't "keep the layer fp" — it's **SmoothQuant**, which uses
+the identity `Y = X·Wᵀ = (X/s)·(s·W)ᵀ` to migrate the outlier magnitude from the
+activations into the weights (which quantize fine). Same output, both tensors now
+easy to quantize.
+
+Firefly applies it as a **pre-transform** in front of the quantizer (`--smoothquant`),
+calibrated on `--inputs`:
+
+```sh
+firefly quant-recipe -m HuggingFaceTB/SmolLM-135M -i calib.json \
+    --scheme w8a8 --smoothquant ...
+```
+
+On SmolLM-135M / w8a8 the effect is dramatic — and reproduces on CPU:
+
+| | output divergence vs fp |
+| --- | ---: |
+| plain w8a8 (all layers) | **66.7%** |
+| w8a8 + SmoothQuant | **8.5%** |
+
+An **87% recovery with zero fp layers kept** — a different axis from mixed
+precision, and they compose (smooth first, then keep the few layers SmoothQuant
+can't rescue). This is the first technique to plug into Firefly's *intervention
+seam*: a stable `apply(model, policy, calib) → model'` interface where each
+technique is a thin adapter, ordered by stage (pre-transforms, then the
+quantizer). SmoothQuant's core is simple enough to own (~50 lines of per-channel
+rescale); GPTQ/AWQ will be wrapped from their libraries against the same
+interface. The attribution decides *which* failure mode you have; the seam lets
+the matching treatment slot in.
+
 ## Reproduce it
 
 ```sh

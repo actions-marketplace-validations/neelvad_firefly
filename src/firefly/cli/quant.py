@@ -332,6 +332,12 @@ def quant_recipe(
         "(known from #units × strategy × k) exceeds this. 0 = no cap. Catches an "
         "accidental O(N·k) greedy/linear run on a big model.",
     ),
+    smoothquant: bool = typer.Option(
+        False, "--smoothquant/--no-smoothquant",
+        help="Apply SmoothQuant (a PRE_TRANSFORM) before quantizing: migrates "
+        "activation outliers into the weights so per-token activation quant stops "
+        "crushing the other channels. Calibrated on --inputs.",
+    ),
     device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward passes."),
     dtype: str = typer.Option("float32", "--dtype", help="Base dtype to quantize from."),
     report_json: Path | None = typer.Option(
@@ -372,7 +378,8 @@ def quant_recipe(
     if accuracy_bar is not None:
         _run_accuracy_bar(
             model, inputs, accuracy_bar, eval_set, metric, eval_max_length,
-            scheme, group_size, strategy, granularity, device, dtype, budget, report_json,
+            scheme, group_size, strategy, granularity, device, dtype, budget,
+            smoothquant, report_json,
         )
         return
 
@@ -383,6 +390,7 @@ def quant_recipe(
             model, inputs, device=device, dtype=dtype, scheme=scheme,
             group_size=group_size, strategy=strategy, granularity=granularity,
             k_values=ks, recovery_target=recovery_target, max_measurements=budget,
+            smoothquant=smoothquant,
         )
     except BudgetExceededError as e:
         typer.echo(
@@ -423,7 +431,8 @@ def quant_recipe(
 def _run_accuracy_bar(
     model: str, inputs: Path, accuracy_bar: str, eval_set: Path | None, metric: str,
     eval_max_length: int, scheme: str, group_size: int, strategy: str, granularity: str,
-    device: str, dtype: str, max_measurements: int | None, report_json: Path | None,
+    device: str, dtype: str, max_measurements: int | None, smoothquant: bool,
+    report_json: Path | None,
 ) -> None:
     """The eval-gated recipe path (``--accuracy-bar``): real metric decides the
     smallest passing recipe. Ranking is single-pass, so greedy doesn't apply."""
@@ -449,7 +458,7 @@ def _run_accuracy_bar(
         result = optimize_to_bar(
             model, inputs, evaluator, bar, device=device, dtype=dtype, scheme=scheme,
             group_size=group_size, strategy=strategy, granularity=granularity,
-            max_measurements=max_measurements,
+            max_measurements=max_measurements, smoothquant=smoothquant,
         )
     except BudgetExceededError as e:
         typer.echo(

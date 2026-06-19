@@ -170,14 +170,26 @@ def _fresh_copy(fp_model: nn.Module) -> nn.Module:
 
 
 def _apply_policy(
-    fp_model: nn.Module, scheme: str, group_size: int, quantize_fqns: set[str]
+    fp_model: nn.Module, scheme: str, group_size: int, quantize_fqns: set[str],
+    pre_transforms: list | None = None, calib: object | None = None,
 ) -> nn.Module:
-    """Fresh fp copy → the default intervention pipeline (RTN, no pre-transforms)
+    """Fresh fp copy → the intervention pipeline (``pre_transforms`` then RTN)
     under a :class:`PrecisionPolicy`. The single choke point both the divergence
-    sweep and the eval loop quantize through; the agent will later hand a richer
-    :class:`Pipeline` (e.g. SmoothQuant pre-transform) in here instead."""
+    sweep and the eval loop quantize through; the agent hands richer pipelines
+    here. ``calib`` feeds any pre-transform that needs activation stats."""
     policy = PrecisionPolicy(scheme=scheme, group_size=group_size, quantize=set(quantize_fqns))
-    return Pipeline().run(_fresh_copy(fp_model), policy)
+    pipeline = Pipeline(pre_transforms=list(pre_transforms or []))
+    return pipeline.run(_fresh_copy(fp_model), policy, calib)
+
+
+def _smoothquant_pre_transforms(smoothquant: bool) -> list:
+    """[SmoothQuant()] when enabled (scope=None → smooths whatever the policy
+    quantizes), else []. Lazy import keeps the optional adapter off the hot path."""
+    if not smoothquant:
+        return []
+    from firefly.quant.smoothquant import SmoothQuant
+
+    return [SmoothQuant()]
 
 
 def _measure(
@@ -187,9 +199,11 @@ def _measure(
     targets: set[str],
     scheme: str,
     group_size: int,
+    pre_transforms: list | None = None,
+    calib: object | None = None,
 ) -> float:
     """Output (``final_norm``) relative divergence with ``targets`` quantized."""
-    model = _apply_policy(fp_model, scheme, group_size, targets)
+    model = _apply_policy(fp_model, scheme, group_size, targets, pre_transforms, calib)
     caps = run_capture(model, batch)
     return rel_l1(ref_output, caps[_OUTPUT_TAP])
 
@@ -208,16 +222,20 @@ class _Ctx:
     scheme: str
     group_size: int
     granularity: str
+    pre_transforms: list = field(default_factory=list)
+    """Stage.PRE_TRANSFORM interventions (e.g. SmoothQuant) applied before the
+    quantizer on every measurement; calibrated on ``batch``."""
 
     def measure(self, targets: set[str]) -> float:
         return _measure(
-            self.fp_model, self.batch, self.ref_output, targets, self.scheme, self.group_size
+            self.fp_model, self.batch, self.ref_output, targets, self.scheme,
+            self.group_size, self.pre_transforms, self.batch,
         )
 
 
 def _setup(
     model_id: str, inputs_path: Path, device: str, dtype: str,
-    scheme: str, group_size: int, granularity: str,
+    scheme: str, group_size: int, granularity: str, pre_transforms: list | None = None,
 ) -> _Ctx:
     set_deterministic()
     fp_model, tok = load_model_and_tokenizer(model_id, device=device, dtype=parse_dtype(dtype))
@@ -227,7 +245,7 @@ def _setup(
     all_fqns = {fqn for fqns in units.values() for fqn in fqns}
     return _Ctx(
         model_id, fp_model, tok, batch, ref_output, units, all_fqns,
-        scheme, group_size, granularity,
+        scheme, group_size, granularity, pre_transforms or [],
     )
 
 
@@ -396,6 +414,7 @@ def compute_recipe(
     k_values: list[int] | None = None,
     recovery_target: float = 0.9,
     max_measurements: int | None = None,
+    smoothquant: bool = False,
 ) -> RecipeResult:
     """Build + **verify** mixed-precision recipes: for each k, keep the chosen
     units in high precision, quantize the rest, and measure the recovered output
@@ -417,7 +436,10 @@ def compute_recipe(
         raise ValueError(f"unknown strategy {strategy!r}; choose from {list(RECIPE_STRATEGIES)}")
     if granularity not in GRANULARITIES:
         raise ValueError(f"unknown granularity {granularity!r}; choose from {GRANULARITIES}")
-    ctx = _setup(model_id, inputs_path, device, dtype, scheme, group_size, granularity)
+    ctx = _setup(
+        model_id, inputs_path, device, dtype, scheme, group_size, granularity,
+        pre_transforms=_smoothquant_pre_transforms(smoothquant),
+    )
     n_units = len(ctx.units)
     if k_values is None:
         k_values = [k for k in (1, 2, 4, 8, 16) if k < n_units]
@@ -546,6 +568,7 @@ def optimize_to_bar(
     strategy: str = "isolated",
     granularity: str = "layer",
     max_measurements: int | None = None,
+    smoothquant: bool = False,
 ) -> BarRecipeResult:
     """Find the smallest mixed-precision recipe that clears an accuracy bar.
 
@@ -566,7 +589,10 @@ def optimize_to_bar(
     if granularity not in GRANULARITIES:
         raise ValueError(f"unknown granularity {granularity!r}; choose from {GRANULARITIES}")
 
-    ctx = _setup(model_id, inputs_path, device, dtype, scheme, group_size, granularity)
+    ctx = _setup(
+        model_id, inputs_path, device, dtype, scheme, group_size, granularity,
+        pre_transforms=_smoothquant_pre_transforms(smoothquant),
+    )
     n = len(ctx.units)
     _guard_budget(n, strategy, [], max_measurements, bar=True)
     ranked = _run_sensitivity(ctx, strategy).keep_high_precision(n)  # most-sensitive first
@@ -576,7 +602,10 @@ def optimize_to_bar(
     def metric_at(k: int) -> float:
         if k not in evaluated:
             kept_fqns = {fqn for name in ranked[:k] for fqn in ctx.units[name]}
-            model = _apply_policy(ctx.fp_model, scheme, group_size, ctx.all_fqns - kept_fqns)
+            model = _apply_policy(
+                ctx.fp_model, scheme, group_size, ctx.all_fqns - kept_fqns,
+                ctx.pre_transforms, ctx.batch,
+            )
             evaluated[k] = evaluator(model, ctx.tokenizer)
         return evaluated[k]
 
