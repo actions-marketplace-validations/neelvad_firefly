@@ -20,11 +20,12 @@ from pathlib import Path
 
 from torch import nn
 
+from firefly.quant.awq import AWQQuantizer
 from firefly.quant.intervention import Intervention, Pipeline, PrecisionPolicy, RTNQuantizer
 from firefly.quant.smoothquant import SmoothQuant
 
 #: name -> class for deserialization. New adapters register here.
-_REGISTRY: dict[str, type] = {"rtn": RTNQuantizer, "smoothquant": SmoothQuant}
+_REGISTRY: dict[str, type] = {"rtn": RTNQuantizer, "smoothquant": SmoothQuant, "awq": AWQQuantizer}
 
 RECIPE_VERSION = 1
 
