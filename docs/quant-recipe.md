@@ -289,9 +289,13 @@ signatures it can actually detect from the activation-capture substrate:
   unit's quant sensitivity dwarfs the rest.
 
 It deliberately does **not** ship labels for failure modes it can't measure. AWQ's
-salient-weight-channel signal would need a new weight-side sensor (`|W|·|X|` per
-channel — buildable, not built); GPTQ's case is justified in weight-space (the
-Hessian), which a forward pass can't observe. A *general* "agent picks the next
+salient-weight-channel signal now *has* a sensor — `firefly quant-salience`
+measures `mean|X|·max|W|` per input channel and ranks Linears by how concentrated
+it is (on SmolLM it surfaces the same `layer.11`/`layer.28` outlier-feature
+`down_proj`s the activation tools flag). That measurement grounds an agent's AWQ
+reasoning, but the AWQ *intervention* to act on it isn't built yet — we added the
+sensor, not a label without one. GPTQ's case is the one that stays out: it's
+justified in weight-space (the Hessian), which a forward pass can't observe. A *general* "agent picks the next
 technique" loop runs into a second wall too — the technique axis isn't monotone
 (SmoothQuant changes AWQ's salience, can help or hurt GPTQ), so the cheap
 keep-set binary search doesn't transfer; each technique combination is a full

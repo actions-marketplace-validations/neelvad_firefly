@@ -344,6 +344,32 @@ def render_recipe(
     return console.export_text()
 
 
+def render_salience(saliences, top_n: int = 15, console: Console | None = None) -> str:
+    """Render the weight-salience (AWQ signal) sensor: Linears ranked by how
+    concentrated their per-input-channel salience is. High = a few channels carry
+    the weight, the case AWQ protects; ~1 = uniform."""
+    console = console or Console(record=True, width=100)
+    console.print(
+        "[bold]weight salience[/] (AWQ signal: mean|X|·max|W| per input channel) "
+        "[dim]— concentration = max / median[/]"
+    )
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Linear", no_wrap=False)
+    table.add_column("salience concentration", justify="right")
+    table.add_column("channels", justify="right")
+    for s in saliences[:top_n]:
+        style = "bold yellow" if s.salience_concentration >= 100.0 else None
+        table.add_row(s.fqn, f"{s.salience_concentration:.1f}x", str(s.n_channels), style=style)
+    console.print(table)
+    top = saliences[0].salience_concentration if saliences else 0.0
+    console.print(
+        f"[dim]A ranking signal, not pass/fail: a few Linears (outlier-feature layers) "
+        f"dominate (top {top:.0f}x). AWQ would protect those channels — the AWQ "
+        f"intervention isn't built yet; this is the measurement that grounds it.[/]"
+    )
+    return console.export_text()
+
+
 def render_diagnosis(diagnosis, model_id: str = "<model>", console: Console | None = None) -> str:
     """Render a quant diagnosis: each detected failure-mode signature, where it
     is, the intervention it routes to, and the measured causal explanation —

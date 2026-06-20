@@ -75,6 +75,44 @@ def quant_risk(
         typer.echo(f"Wrote quant-risk report to {report_json}")
 
 
+@app.command("quant-salience")
+def quant_salience(
+    model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Calibration inputs JSON."),
+    device: str = typer.Option("cpu", "--device", "-d", help="Device for the forward pass."),
+    dtype: str = typer.Option("float32", "--dtype", help="Model dtype."),
+    top_n: int = typer.Option(15, "--top-n", help="How many worst Linears to show."),
+    report_json: Path | None = typer.Option(
+        None, "--report-json", help="Write the structured salience report here."
+    ),
+) -> None:
+    """Measure per-Linear weight salience — the AWQ signal — from one calibration pass.
+
+    For each Linear, salience_j = mean|X[:,j]| · max|W[:,j]| per input channel;
+    ``salience_concentration`` (max/median) flags the Linears where a few channels
+    carry the weight (AWQ-protectable). A *measurement* the agent reads — the AWQ
+    intervention that acts on it is a later build.
+    """
+    from firefly.capture import load_golden_inputs, load_model_and_tokenizer, parse_dtype
+    from firefly.quant.salience import weight_salience
+    from firefly.quant.sensitivity import discover_units
+    from firefly.report import render_salience
+
+    fp_model, tok = load_model_and_tokenizer(model, device=device, dtype=parse_dtype(dtype))
+    batch = load_golden_inputs(inputs, tok, device)
+    fqns = {fqn for fqns in discover_units(fp_model, "linear").values() for fqn in fqns}
+    saliences = weight_salience(fp_model, fqns, batch)
+    typer.echo(render_salience(saliences, top_n=top_n))
+
+    if report_json is not None:
+        import json
+        from dataclasses import asdict
+
+        with report_json.open("w") as f:
+            json.dump({"saliences": [asdict(s) for s in saliences]}, f, indent=2)
+        typer.echo(f"Wrote salience report to {report_json}")
+
+
 @app.command("quant-step")
 def quant_step_cmd(
     policy: Path = typer.Option(
