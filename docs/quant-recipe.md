@@ -300,6 +300,46 @@ recipe selector** for the failure modes it can detect — the search only tunes 
 (monotone) keep-set inside the chosen template. That's the half that's both
 viable and differentiated; the autonomous technique-search agent is not claimed.
 
+## Firefly as an oracle: the agent step primitive
+
+The honest shape of "agentic quantization" isn't *Firefly ships an agent* — it's
+**Firefly is the measurement oracle + a closed action contract, and an external
+coding agent is the searcher.** The agent reads the raw measurements
+(`quant-diff` / `quant-sensitivity` / `quant-diagnose` JSON), proposes a policy,
+and calls one step primitive that applies + verifies + attributes it:
+
+```
+firefly quant-step --policy policy.json --reference ref/ --inputs calib.json \
+    --eval eval.jsonl --bar rel:0.01 --baseline-metric 7.9 --report-json step.json
+```
+
+`policy.json` is just a `Recipe` (the same artifact `--export` produces) —
+deserialized through the intervention registry, so the agent **can only compose
+validated interventions, never run arbitrary code.** That's the sandbox, for
+free. The step returns one JSON with everything needed to choose the next move:
+
+```json
+{ "passed": true,
+  "metric": {"name":"perplexity","value":41.2,"baseline":41.4,"threshold":43.5},
+  "cost":   {"bytes":127401984, "compression":3.33},
+  "attribution": {"first_divergent_tap":"layer.0.self_attn",
+                  "worst_taps":[{"tap":"layer.3.self_attn","rel_mean":0.12}, ...]} }
+```
+
+The differentiator is the **attribution** field: not just pass/fail, but *where*
+the quantized run still drifts from fp — a map for the next proposal, the thing
+autoquant's scalar score can't give. The fp baseline is paid once: the per-tap
+attribution diffs against the stored `reference/` (no fp re-run), and the fp eval
+metric is threaded back via `--baseline-metric` so the loop computes it a single
+time.
+
+Scope, honestly: this is the **oracle + contract**, not an agent. The loop driver
+(which LLM, which prompt) is a thin, disposable harness the user supplies; Firefly
+owns the measurement and the structured action space. And it earns its keep in
+the *under-explored-architecture* regime (custom / recsys-shaped models with no
+known recipe), not on Llama-family models where the recipe is known and
+torchao's faster search already wins.
+
 ## Reproduce it
 
 ```sh

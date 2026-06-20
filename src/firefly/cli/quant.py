@@ -75,6 +75,78 @@ def quant_risk(
         typer.echo(f"Wrote quant-risk report to {report_json}")
 
 
+@app.command("quant-step")
+def quant_step_cmd(
+    policy: Path = typer.Option(
+        ..., "--policy",
+        help="A recipe.json (the agent's structured action — scheme/group_size, "
+        "exact quantize/kept FQNs, pre-transforms). Deserialized through the "
+        "intervention registry, so it can only compose validated interventions.",
+    ),
+    reference: str = typer.Option(
+        ..., "--reference", "-r",
+        help="Captured fp reference (the attribution baseline — diffed against, "
+        "not re-run).",
+    ),
+    inputs: Path = typer.Option(
+        ..., "--inputs", "-i",
+        help="Calibration inputs the reference was captured on (runs the quantized "
+        "model + feeds any SmoothQuant pre-transform).",
+    ),
+    eval_set: Path | None = typer.Option(
+        None, "--eval", help="Held-out eval set for --metric perplexity."
+    ),
+    metric: str = typer.Option("perplexity", "--metric", help="perplexity or module:function."),
+    bar: str = typer.Option("rel:0.01", "--bar", help="Accuracy bar: rel:<frac> or abs:<delta>."),
+    baseline_metric: float | None = typer.Option(
+        None, "--baseline-metric",
+        help="Cached fp metric — pass it back after the first step so the loop "
+        "computes the fp baseline only once.",
+    ),
+    eval_max_length: int = typer.Option(512, "--eval-max-length"),
+    device: str = typer.Option("cpu", "--device", "-d"),
+    dtype: str = typer.Option("float32", "--dtype"),
+    top_n: int = typer.Option(10, "--top-n", help="How many worst taps to attribute."),
+    report_json: Path | None = typer.Option(None, "--report-json", help="Write the step JSON here."),
+) -> None:
+    """The agent's step primitive: apply a proposed policy, verify it against a
+    real eval bar, attribute per-tap divergence vs the fp reference, report cost
+    — all as one JSON. Firefly is the oracle; an external agent is the searcher.
+    """
+    import json
+
+    from firefly.quant.evaluate import AccuracyBar, resolve_evaluator
+    from firefly.quant.recipe_io import Recipe
+    from firefly.quant.step import quant_step
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
+
+    recipe = Recipe.from_json(policy)
+    resolved_reference = _resolve_or_exit(reference)
+    try:
+        quant_preflight(recipe.scheme, device)
+        evaluator = resolve_evaluator(metric, eval_set, max_length=eval_max_length)
+        accuracy_bar = AccuracyBar.parse(bar)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+
+    try:
+        result = quant_step(
+            recipe, resolved_reference, inputs, evaluator=evaluator, bar=accuracy_bar,
+            device=device, dtype=dtype, baseline_metric=baseline_metric, top_n=top_n,
+        )
+    except (ImportError, QuantCompatibilityError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(json.dumps(result, indent=2))
+    if report_json is not None:
+        with report_json.open("w") as f:
+            json.dump(result, f, indent=2)
+
+
 @app.command("quant-diagnose")
 def quant_diagnose(
     reference: str = typer.Option(
