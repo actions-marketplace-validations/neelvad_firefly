@@ -14,11 +14,13 @@ activation-capture substrate are emitted:
   measured per-tensor→per-channel error rescue (the Dettmers outlier signal).
 * ``SINGLE_UNIT_DOMINANCE`` — from a sensitivity sweep where one unit's quant
   sensitivity dwarfs the rest.
+* ``SALIENT_WEIGHT_CHANNELS`` — from the weight-salience sensor (|W|·|X| per
+  channel concentration); routes to AWQ. Added once both its detector
+  (firefly.quant.salience) and treatment (firefly.quant.awq) existed.
 
-AWQ's salient-weight-channel signal needs a new weight-side sensor (|W|·|X| per
-channel — buildable, not built); GPTQ's diffuse-weight-loss case is justified in
-weight-space (Hessian), which a forward-pass capture can't measure. We do **not**
-emit labels for detectors that don't exist — see ``intervention.py``.
+GPTQ's diffuse-weight-loss case is still out: justified in weight-space (Hessian),
+which a forward-pass capture can't measure. We do **not** emit labels for
+detectors/treatments that don't exist — see ``intervention.py``.
 """
 
 from __future__ import annotations
@@ -28,13 +30,18 @@ from dataclasses import dataclass, field
 
 import torch
 
-from firefly.quant.intervention import ACTIVATION_OUTLIERS, SINGLE_UNIT_DOMINANCE
+from firefly.quant.intervention import (
+    ACTIVATION_OUTLIERS,
+    SALIENT_WEIGHT_CHANNELS,
+    SINGLE_UNIT_DOMINANCE,
+)
 from firefly.quant.risk import analyze_quant_risk
 
 #: Which intervention treats each detectable signature (the routing table).
 SIGNATURE_TREATMENTS: dict[str, str] = {
     ACTIVATION_OUTLIERS: "smoothquant",
     SINGLE_UNIT_DOMINANCE: "mixed-precision",
+    SALIENT_WEIGHT_CHANNELS: "awq",
 }
 
 
@@ -126,19 +133,51 @@ def diagnose_single_unit_dominance(sensitivity, *, ratio_threshold: float = 5.0)
     ]
 
 
+def diagnose_salient_weight_channels(
+    saliences, *, concentration_threshold: float = 50.0, top_n: int = 5
+) -> list[Finding]:
+    """SALIENT_WEIGHT_CHANNELS from the weight-salience sensor: Linears whose
+    per-input-channel salience (|W|·|X|) is concentrated in a few channels — int4
+    round-to-nearest blurs those salient weights, and AWQ protects them. ``saliences``
+    is a list of :class:`firefly.quant.salience.LinearSalience` (ranked).
+
+    The threshold is a heuristic cut on a ranking signal (concentration spans
+    orders of magnitude); the raw values are the real signal an agent reads.
+    """
+    flagged = [s for s in saliences if s.salience_concentration >= concentration_threshold][:top_n]
+    return [
+        Finding(
+            signature=SALIENT_WEIGHT_CHANNELS,
+            location=s.fqn,
+            recommend=SIGNATURE_TREATMENTS[SALIENT_WEIGHT_CHANNELS],
+            evidence={"salience_concentration": s.salience_concentration, "n_channels": s.n_channels},
+            explanation=(
+                f"{s.fqn}: weight salience is concentrated in a few input channels "
+                f"({s.salience_concentration:.0f}x max/median) — int4 round-to-nearest "
+                f"blurs those salient weights. AWQ protects them via per-channel scaling; "
+                f"route to the AWQ quantizer (int4)."
+            ),
+        )
+        for s in flagged
+    ]
+
+
 def diagnose(
     tensors: dict[str, torch.Tensor],
     tap_order: list[str],
     *,
     sensitivity=None,
+    salience=None,
     bits: int = 8,
     concentration_threshold: float = 8.0,
     per_tensor_err_threshold: float = 0.1,
     ratio_threshold: float = 5.0,
+    salience_threshold: float = 50.0,
 ) -> Diagnosis:
     """Emit all detectable signatures. ACTIVATION_OUTLIERS comes from the stored
     activations (cheap, no model run); SINGLE_UNIT_DOMINANCE is added when a
-    sensitivity sweep result is supplied."""
+    sensitivity sweep result is supplied; SALIENT_WEIGHT_CHANNELS (→ AWQ) when a
+    weight-salience result is supplied."""
     findings = diagnose_activation_outliers(
         tensors, tap_order, bits=bits,
         concentration_threshold=concentration_threshold,
@@ -146,4 +185,6 @@ def diagnose(
     )
     if sensitivity is not None:
         findings += diagnose_single_unit_dominance(sensitivity, ratio_threshold=ratio_threshold)
+    if salience is not None:
+        findings += diagnose_salient_weight_channels(salience, concentration_threshold=salience_threshold)
     return Diagnosis(findings)

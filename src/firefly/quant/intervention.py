@@ -39,16 +39,18 @@ from firefly.quant.torchao import quantize_model
 #: not an enum, so a new adapter can introduce a new signature without editing
 #: this module.
 #:
-#: Only signatures with a REAL detector on the activation-capture substrate live
-#: here — we don't ship labels for detectors that don't exist:
+#: Only signatures with a REAL detector AND treatment live here — we don't ship
+#: labels for detectors/treatments that don't exist:
 #:   * ACTIVATION_OUTLIERS — quant-risk channel_concentration (→ SmoothQuant).
 #:   * SINGLE_UNIT_DOMINANCE — a sensitivity sweep, one unit ≫ median (→ keep fp).
-#: Deliberately absent: AWQ's salient-weight-channels (needs a new |W|·|X|
-#: weight-side sensor) and GPTQ's diffuse-weight-loss (justified in weight-space
-#: Hessian, not measurable from a forward pass). Add the signature only with the
-#: detector — see firefly.quant.diagnose.
+#:   * SALIENT_WEIGHT_CHANNELS — weight-salience |W|·|X| concentration (→ AWQ).
+#:     Added once BOTH its detector (firefly.quant.salience) and its treatment
+#:     (firefly.quant.awq) existed, not before.
+#: Still deliberately absent: GPTQ's diffuse-weight-loss — justified in
+#: weight-space (Hessian), not measurable from a forward pass, so no detector.
 ACTIVATION_OUTLIERS = "activation_outliers"
 SINGLE_UNIT_DOMINANCE = "single_unit_dominance"
+SALIENT_WEIGHT_CHANNELS = "salient_weight_channels"
 
 
 class Stage(IntEnum):
