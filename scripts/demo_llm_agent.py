@@ -7,9 +7,16 @@ measurements (diagnosis, salience, per-step residual attribution), emits a
 compact recipe (sandboxed: only validated interventions), Firefly verifies it,
 and the LLM refines toward the cheapest in-bar recipe.
 
-Expected shape on Qwen2.5-7B int4: AWQ-all clears most of the gap but not a tight
-bar; the LLM keeps the few highest-residual layers fp (from the attribution) to
-clear it at near-int4 memory — far below all-fp.
+Validated (Qwen2.5-1.5B int4, ~50 eval texts, bar within 10% of fp): AWQ-all
+alone FAILS the bar (14.20 vs ≤12.62); the LLM composes AWQ + an
+attribution-guided keep-fp set (layers 1,2,15-20,27) and navigates the memory
+frontier to a verified 12.56 at 1301 MB = 2.0x smaller than fp — a composition
+the deterministic router's one-shot signature→treatment can't produce.
+
+Scope, honestly: the win needs a meaningful int4 gap + a de-noised eval. On the
+7B (AWQ-all only +4.4%) the bar sat below the achievable/noise floor and the
+agent couldn't clear it — the value is regime-dependent. Bump MODEL/GPU to the
+7B to see that honest counter-case.
 
 Run:  uv run modal run scripts/demo_llm_agent.py
 """
@@ -34,11 +41,11 @@ image = (
     .add_local_python_source("firefly")
 )
 
-MODEL = "Qwen/Qwen2.5-7B-Instruct"
-GPU = "A100-80GB"
+MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+GPU = "A10G"
 SCHEME = "int4wo"
-BAR_REL = 0.03
-BUDGET = 5
+BAR_REL = 0.10
+BUDGET = 6
 
 _CALIB = [
     "The mitochondria is the powerhouse of the cell, producing ATP through respiration.",
@@ -62,6 +69,44 @@ _EVAL = [
     "Compound interest grows savings exponentially over long horizons.",
     "Entropy measures the disorder of a thermodynamic system.",
     "Batch normalization stabilizes training by rescaling layer activations.",
+]
+
+_EVAL += [
+    "The speed of light in a vacuum is about 300,000 kilometers per second.",
+    "Shakespeare wrote both tragedies and comedies in Elizabethan England.",
+    "A stack is a last-in, first-out data structure used in many algorithms.",
+    "The human heart pumps blood through arteries, veins, and capillaries.",
+    "Continental drift is driven by convection currents in the mantle.",
+    "Bayes' theorem relates conditional probabilities of two events.",
+    "The Pacific Ocean is the largest and deepest of Earth's oceans.",
+    "Antibiotics kill bacteria but have no effect on viral infections.",
+    "A compiler translates source code into machine instructions.",
+    "The Renaissance revived classical art and learning across Europe.",
+    "Newton's three laws describe the motion of objects under forces.",
+    "Glucose is broken down in glycolysis to release usable energy.",
+    "TCP guarantees ordered, reliable delivery of network packets.",
+    "Volcanoes form where magma reaches the surface through the crust.",
+    "Supervised learning trains models on labeled input-output pairs.",
+    "The moon's gravity is the primary cause of ocean tides on Earth.",
+    "A prime number has exactly two distinct positive divisors.",
+    "Photoreceptors in the retina convert light into neural signals.",
+    "The Industrial Revolution began in Britain in the late 18th century.",
+    "Encryption transforms readable data into ciphertext using a key.",
+    "Plate boundaries are where most earthquakes and volcanoes occur.",
+    "An enzyme lowers the activation energy of a biochemical reaction.",
+    "Dynamic programming solves problems by reusing subproblem solutions.",
+    "Saturn is famous for its prominent system of icy rings.",
+    "The Magna Carta limited the power of the English monarchy in 1215.",
+    "Diffusion moves particles from high to low concentration regions.",
+    "A graph consists of vertices connected by edges.",
+    "Vaccines train the immune system to recognize specific pathogens.",
+    "The Krebs cycle produces energy carriers in cellular respiration.",
+    "Latency is the delay before a transfer of data begins.",
+    "Erosion gradually wears down rock and soil over time.",
+    "Reinforcement learning optimizes actions through trial and reward.",
+    "The Sahara is the largest hot desert on the planet.",
+    "Osmosis is the movement of water across a semipermeable membrane.",
+    "A binary tree node has at most two children.",
 ]
 
 
