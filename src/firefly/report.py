@@ -344,6 +344,49 @@ def render_recipe(
     return console.export_text()
 
 
+def render_search(result: dict, console: Console | None = None) -> str:
+    """Render an LLM min-memory-at-bar search: the proposal trajectory and the
+    lowest-memory recipe that cleared the bar."""
+    console = console or Console(record=True, width=100)
+    r = result
+    console.print(
+        f"[bold]LLM agent: min memory @ perplexity bar[/]  {r['model']} ({r['scheme']})\n"
+        f"[dim]fp {r['perplexity_fp']:.2f}  bar ≤ {r['threshold']:.2f}  "
+        f"plain-quant {r['perplexity_plain']:.2f}  "
+        f"(all-fp {r['all_fp_mb']:.0f} MB → all-quant {r['all_quant_mb']:.0f} MB)[/]"
+    )
+    table = Table(title="proposal trajectory", show_header=True, header_style="bold")
+    table.add_column("#", justify="right")
+    table.add_column("recipe", no_wrap=False)
+    table.add_column("perplexity", justify="right")
+    table.add_column("memory", justify="right")
+    table.add_column("bar?", justify="center")
+    best_step = r["best"]["step"] if r["best"] else None
+    for h in r["history"]:
+        a = h["action"]
+        recipe = f"{a.get('quantizer', '?')}"
+        if a.get("keep_fp_units"):
+            recipe += f" + fp[{','.join(a['keep_fp_units'])}]"
+        mark = "[green]yes[/]" if h["passed_bar"] else "[red]no[/]"
+        style = "bold green" if h["step"] == best_step else None
+        table.add_row(str(h["step"]), recipe, f"{h['perplexity']:.2f}", f"{h['memory_mb']:.0f} MB", mark, style=style)
+    console.print(table)
+
+    if r["best"]:
+        b = r["best"]
+        shrink = r["all_fp_mb"] / (b["memory_bytes"] / 1e6)
+        kept = b["action"].get("keep_fp_units", [])
+        console.print(
+            f"[bold green]best:[/] perplexity {b['perplexity']:.2f} (≤ bar) at "
+            f"[bold]{b['memory_bytes'] / 1e6:.0f} MB[/] ({shrink:.1f}× smaller than fp) — "
+            f"{b['action'].get('quantizer')} + keep {kept or '[]'} fp.  "
+            f"[dim]{b['action'].get('rationale', '')}[/]"
+        )
+    else:
+        console.print("[yellow]no proposal cleared the bar within budget.[/]")
+    return console.export_text()
+
+
 def render_auto(result: dict, console: Console | None = None) -> str:
     """Render a deterministic auto-quant run: diagnosis → routed recipe →
     verified recovery vs the plain-quant baseline → residual attribution."""
