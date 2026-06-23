@@ -345,6 +345,37 @@ the *under-explored-architecture* regime (custom / recsys-shaped models with no
 known recipe), not on Llama-family models where the recipe is known and
 torchao's faster search already wins.
 
+## Putting it together: deterministic auto-quant
+
+`firefly quant-auto` ties the whole loop into one pass — the **agent-agnostic
+harness with a deterministic proposer** (the router; an LLM plugs into the same
+`diagnosis → recipe` slot later). It diagnoses the model, routes each signature
+to the intervention that treats it, applies the routed recipe *and* a plain-quant
+baseline, and — crucially — **verifies**: it ships the routed recipe only if the
+measurement says it actually helped.
+
+```
+$ firefly quant-auto -m Qwen/Qwen2.5-7B-Instruct -i calib.json --eval eval.jsonl --scheme int4wo
+diagnosis: activation_outliers ×N, salient_weight_channels ×M
+routed recipe: AWQ quantizer (salient_weight_channels)
+verified: perplexity fp 11.69 → plain int4wo 17.31 → routed 12.20
+ACCEPTED — routed recipe recovers 91% of the degradation; ship it.
+residual divergence concentrated at: layer.24.mlp (72%), layer.23.mlp (70%), ...
+```
+
+That's the honest win: **given only Firefly's measurements (no human picked the
+technique), the agent autonomously diagnosed the failure mode, routed to AWQ,
+verified a 91% recovery, and explained why** — on the exact 7B int4 case where the
+mixed-precision recipe recovered only ~9%. Every step is measured and sandboxed
+(the action is a structured recipe, not code).
+
+The verify step is the differentiator, and it cuts both ways. On SmolLM-135M
+w8a8 the router proposes SmoothQuant, but verification **rejects** it (perplexity
+47.01 → 53.77 — SmoothQuant's benefit grows with scale and doesn't generalize at
+135M) and ships plain. The router proposes by signature; the measurement is
+ground truth. That's what an LLM proposer will sit on top of — every proposal
+cheaply verified, which is the thing blind autoquant and ungrounded agents lack.
+
 ## Reproduce it
 
 ```sh
