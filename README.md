@@ -106,10 +106,16 @@ it actually helped. On Qwen2.5-7B int4 it autonomously reaches AWQ and recovers
 ~91% of the degradation (where mixed-precision recovers ~9%).
 
 An **LLM proposer** (`firefly.quant.search`, Anthropic tool-use) plugs into the
-same diagnosis→recipe slot for composition/tradeoff cases (e.g. min memory at a
-perplexity bar) — a grounded, sandboxed **harness/demo** today, not a load-bearing
-claim. A fully general autonomous agent remains aspirational; the measurement
-substrate is the foundation either way.
+same diagnosis→recipe slot for composition/tradeoff cases. Its own result is
+*separate from the 91% above* (which is the deterministic router): on
+**Qwen2.5-1.5B int4**, AWQ-alone misses a within-10%-of-fp perplexity bar, and
+the LLM adds an attribution-guided keep-fp set to clear it at **2× compression** —
+a composition the router's fixed rules can't reach, grounded and sandboxed (it
+emits a `Recipe`, every proposal verified). Honest scope: this is **one model
+(N=1)**, not a cross-architecture demonstration, and on the 7B (tiny AWQ gap) it
+couldn't clear the bar within the eval's noise floor. The evidence breadth
+(more architectures, a larger eval + task metric, calibrated thresholds) is the
+open work; a fully general autonomous agent remains aspirational.
 
 ## Why this exists
 
