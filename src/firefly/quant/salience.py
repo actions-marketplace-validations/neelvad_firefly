@@ -10,9 +10,10 @@ weight scaling fixes; uniform salience means AWQ won't help. The summary signal
 is ``salience_concentration`` = max / median of the per-channel salience (the
 weight-side analogue of quant-risk's activation ``channel_concentration``).
 
-This is a **measurement** — an oracle output an external agent reads — not a
-treatment. The AWQ *intervention* (a wrapped adapter) is a later build; we add
-the signal **with** its detector, never a label without one.
+This is the **detector** for the SALIENT_WEIGHT_CHANNELS signature; its treatment
+is the AWQ quantizer (``firefly.quant.awq``). Both exist, so ``firefly.quant.
+diagnose`` routes the signature to AWQ — we added the signal with its detector
+and treatment, never a label without them.
 
 Mechanism (answer to "do we hook the params?"): no. ``|W|`` is static, read
 directly from ``module.weight``; only the activation side needs a forward

@@ -37,7 +37,7 @@ def min_memory_search(
     eval_texts: list[str],
     *,
     propose,
-    scheme: str = "int4wo",
+    scheme: str = "w8a8",
     bar: AccuracyBar | None = None,
     group_size: int = 128,
     device: str = "cpu",

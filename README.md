@@ -98,10 +98,18 @@ compute for quality (cheap per-unit filters → wrapper search) and
 comparison, and the int4 result where `greedy` wins:
 [docs/quant-recipe.md](docs/quant-recipe.md).
 
-*Aspirational:* an outer-loop **agent** that reads this attribution, picks the
-next intervention (technique/scheme/granularity), and explains it — every
-proposal verified against real measurement. Not built; it's why the
-measurement substrate above is the foundation.
+**Diagnosis-routed auto-quant (built & validated):** `firefly quant-auto`
+diagnoses the failure mode, routes it to the intervention that treats it
+(activation-outliers→SmoothQuant, salient-weights→AWQ, single-unit→mixed
+precision), and **verifies** — shipping the recipe only if the measurement says
+it actually helped. On Qwen2.5-7B int4 it autonomously reaches AWQ and recovers
+~91% of the degradation (where mixed-precision recovers ~9%).
+
+An **LLM proposer** (`firefly.quant.search`, Anthropic tool-use) plugs into the
+same diagnosis→recipe slot for composition/tradeoff cases (e.g. min memory at a
+perplexity bar) — a grounded, sandboxed **harness/demo** today, not a load-bearing
+claim. A fully general autonomous agent remains aspirational; the measurement
+substrate is the foundation either way.
 
 ## Why this exists
 
@@ -304,7 +312,7 @@ is more honest than `source="calibrated"` numbers that measured nothing.
 | `compare.py` | Per-tap diff with effective-atol composition |
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
-| `quant/` | Quantization surface on top of the engine: `torchao.py` (real w8a8 / int4wo quant + preflight), `sensitivity.py` (per-unit sensitivity + verified mixed-precision recipe; isolated / marginal / greedy; layer or linear), `risk.py` (cheap activation-only int8/int4 heuristic) |
+| `quant/` | Quantization surface on the engine. **Interventions** (the seam): `intervention.py` (PrecisionPolicy + Pipeline + RTN), `smoothquant.py`, `awq.py`. **Sensors/analysis**: `torchao.py` (real w8a8/int4wo + preflight), `risk.py`, `sensitivity.py` (per-unit), `salience.py` (AWQ signal), `cost.py` (memory/Pareto/budget), `evaluate.py` (perplexity + accuracy bar). **Recipe/agent**: `recipe.py`+`bar.py` (curves), `recipe_io.py` (serialize/apply a recipe), `diagnose.py`+`route.py` (diagnosis→recipe), `auto.py` (deterministic auto-quant), `step.py` (agent step primitive), `llm.py`+`search.py` (LLM proposer harness) |
 | `op_drill.py` | Op-level drill-down (engine attribution rung): `TorchDispatchMode` scoped to a module → first diverging ATen op |
 | `shadow/` | Shadow-mode capture package: custom ops + Triton kernel + Tappers + sinks that survive torch.compile and CUDA graphs |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |

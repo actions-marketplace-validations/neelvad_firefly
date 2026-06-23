@@ -80,11 +80,19 @@ def quant_auto(
     model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Calibration inputs JSON."),
     eval_set: Path = typer.Option(..., "--eval", help="Held-out eval set for perplexity."),
-    scheme: str = typer.Option("int4wo", "--scheme", help="Target scheme: w8a8 or int4wo."),
+    scheme: str = typer.Option(
+        "w8a8", "--scheme",
+        help="Target scheme: w8a8 (CPU-runnable default) or int4wo (needs --device cuda).",
+    ),
     group_size: int = typer.Option(128, "--group-size", help="Quant group size."),
     device: str = typer.Option("cpu", "--device", "-d"),
     dtype: str = typer.Option("float32", "--dtype"),
     eval_max_length: int = typer.Option(64, "--eval-max-length"),
+    with_sensitivity: bool = typer.Option(
+        False, "--with-sensitivity/--no-sensitivity",
+        help="Also run the per-unit sensitivity sweep (N measurements) so "
+        "single-unit-dominance can route to mixed precision. Off by default (cost).",
+    ),
     export: Path | None = typer.Option(None, "--export", help="Write the routed recipe.json here."),
 ) -> None:
     """Deterministic auto-quant: diagnose the model, route the diagnosis to a
@@ -106,7 +114,7 @@ def quant_auto(
     try:
         result = auto_quant(
             model, inputs, load_eval_texts(eval_set), scheme=scheme, group_size=group_size,
-            device=device, dtype=dtype, max_length=eval_max_length,
+            device=device, dtype=dtype, max_length=eval_max_length, with_sensitivity=with_sensitivity,
         )
     except (ImportError, QuantCompatibilityError) as e:
         typer.echo(str(e), err=True)
@@ -133,8 +141,8 @@ def quant_salience(
 
     For each Linear, salience_j = mean|X[:,j]| · max|W[:,j]| per input channel;
     ``salience_concentration`` (max/median) flags the Linears where a few channels
-    carry the weight (AWQ-protectable). A *measurement* the agent reads — the AWQ
-    intervention that acts on it is a later build.
+    carry the weight (AWQ-protectable). The detector for SALIENT_WEIGHT_CHANNELS;
+    its treatment is the AWQ quantizer, and `quant-diagnose`/`quant-auto` route to it.
     """
     from firefly.capture import load_golden_inputs, load_model_and_tokenizer, parse_dtype
     from firefly.quant.salience import weight_salience

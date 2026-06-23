@@ -35,11 +35,12 @@ def auto_quant(
     inputs_path,
     eval_texts: list[str],
     *,
-    scheme: str = "int4wo",
+    scheme: str = "w8a8",
     group_size: int = 128,
     device: str = "cpu",
     dtype: str = "float32",
     max_length: int = 64,
+    with_sensitivity: bool = False,
 ) -> dict:
     """Diagnose the model, route the diagnosis to a recipe, apply + verify it
     against a plain-quant baseline, and return the structured result."""
@@ -57,7 +58,15 @@ def auto_quant(
     # --- sensors → diagnosis (cheap: channel_concentration + weight salience) ---
     salience = weight_salience(fp_model, lin_fqns, batch)
     bits = 4 if scheme == "int4wo" else 8
-    diagnosis = diagnose(ref_tensors, tap_order, salience=salience, bits=bits)
+    sens = None
+    if with_sensitivity:
+        # Opt-in (an N-measurement sweep): emits SINGLE_UNIT_DOMINANCE → mixed
+        # precision. Reuses the loaded model (no second load).
+        from firefly.quant.sensitivity import _Ctx, _run_sensitivity
+
+        ctx = _Ctx(model_id, fp_model, tok, batch, ref_out, units, all_fqns, scheme, group_size, "layer")
+        sens = _run_sensitivity(ctx, "isolated")
+    diagnosis = diagnose(ref_tensors, tap_order, sensitivity=sens, salience=salience, bits=bits)
 
     # --- route → recipe (the deterministic agent) ---
     recipe = route_recipe(
