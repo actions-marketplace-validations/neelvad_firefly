@@ -86,9 +86,11 @@ def build_recipe(
     dtype: str,
     device: str,
     inputs_path: Path,
+    quantizer: Intervention | None = None,
     result: dict | None = None,
 ) -> Recipe:
-    """Assemble a :class:`Recipe` from a chosen recipe + its run context."""
+    """Assemble a :class:`Recipe` from a chosen recipe + its run context.
+    ``quantizer`` defaults to RTN; the router passes AWQ when it routes there."""
     try:
         from importlib.metadata import version
 
@@ -103,7 +105,7 @@ def build_recipe(
         quantize_fqns=sorted(quantize_fqns),
         kept_fp_fqns=sorted(kept_fp_fqns),
         pre_transforms=[serialize_intervention(it) for it in pre_transforms],
-        quantizer=serialize_intervention(RTNQuantizer()),
+        quantizer=serialize_intervention(quantizer or RTNQuantizer()),
         provenance={
             "dtype": dtype,
             "device": device,

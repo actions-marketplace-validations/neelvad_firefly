@@ -344,6 +344,48 @@ def render_recipe(
     return console.export_text()
 
 
+def render_auto(result: dict, console: Console | None = None) -> str:
+    """Render a deterministic auto-quant run: diagnosis → routed recipe →
+    verified recovery vs the plain-quant baseline → residual attribution."""
+    console = console or Console(record=True, width=100)
+    r = result
+    console.print(f"[bold]auto-quant[/] {r['model']}  (scheme={r['scheme']})")
+
+    summary = r.get("diagnosis_summary", {})
+    if summary:
+        console.print(
+            "[bold]diagnosis:[/] "
+            + ", ".join(f"[yellow]{sig}[/] ×{n}" for sig, n in summary.items())
+        )
+    console.print("[bold]routed recipe:[/] " + "; ".join(r["routing"]))
+    rec = r["recipe"]
+    console.print(
+        f"  quantizer=[bold]{rec['quantizer']}[/]  pre-transforms={rec['pre_transforms'] or '[]'}  "
+        f"keep-fp={rec['kept_fp_fqns']}/{rec['kept_fp_fqns'] + rec['quantize_fqns']} Linears"
+    )
+
+    p = r["perplexity"]
+    console.print(
+        f"[bold]verified:[/] perplexity fp {p['fp']:.2f} → plain {r['scheme']} {p['plain']:.2f} "
+        f"→ routed {p['routed']:.2f}"
+    )
+    if r["accepted"]:
+        console.print(
+            f"[bold green]ACCEPTED[/] — routed recipe recovers "
+            f"[green]{r['recovery']:.0%}[/] of the degradation; ship it."
+        )
+    else:
+        console.print(
+            f"[bold red]REJECTED[/] by verification — the routed recipe didn't beat plain "
+            f"{r['scheme']} (would ship plain). The measurement caught it: the proposed "
+            f"intervention doesn't help this model."
+        )
+    if r["attribution_worst_taps"]:
+        residual = ", ".join(f"{t} ({v:.1%})" for t, v in r["attribution_worst_taps"][:3])
+        console.print(f"[dim]residual divergence concentrated at: {residual}[/]")
+    return console.export_text()
+
+
 def render_salience(saliences, top_n: int = 15, console: Console | None = None) -> str:
     """Render the weight-salience (AWQ signal) sensor: Linears ranked by how
     concentrated their per-input-channel salience is. High = a few channels carry

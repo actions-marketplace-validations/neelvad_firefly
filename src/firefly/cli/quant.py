@@ -75,6 +75,49 @@ def quant_risk(
         typer.echo(f"Wrote quant-risk report to {report_json}")
 
 
+@app.command("quant-auto")
+def quant_auto(
+    model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Calibration inputs JSON."),
+    eval_set: Path = typer.Option(..., "--eval", help="Held-out eval set for perplexity."),
+    scheme: str = typer.Option("int4wo", "--scheme", help="Target scheme: w8a8 or int4wo."),
+    group_size: int = typer.Option(128, "--group-size", help="Quant group size."),
+    device: str = typer.Option("cpu", "--device", "-d"),
+    dtype: str = typer.Option("float32", "--dtype"),
+    eval_max_length: int = typer.Option(64, "--eval-max-length"),
+    export: Path | None = typer.Option(None, "--export", help="Write the routed recipe.json here."),
+) -> None:
+    """Deterministic auto-quant: diagnose the model, route the diagnosis to a
+    recipe (the non-LLM agent), apply + verify it against the plain-quant
+    baseline, and report the recovery + explanation. The agent-agnostic harness
+    with the deterministic proposer.
+    """
+    from firefly.quant.auto import auto_quant
+    from firefly.quant.evaluate import load_eval_texts
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
+    from firefly.report import render_auto
+
+    try:
+        quant_preflight(scheme, device)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    try:
+        result = auto_quant(
+            model, inputs, load_eval_texts(eval_set), scheme=scheme, group_size=group_size,
+            device=device, dtype=dtype, max_length=eval_max_length,
+        )
+    except (ImportError, QuantCompatibilityError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(render_auto(result))
+    if export is not None:
+        result["recipe_obj"].to_json(export)
+        typer.echo(f"Wrote routed recipe to {export}")
+
+
 @app.command("quant-salience")
 def quant_salience(
     model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
