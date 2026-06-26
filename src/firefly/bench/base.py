@@ -54,9 +54,15 @@ class BenchmarkResult:
 
     ``decode_throughput_tok_s`` is the headline (steady-state generation speed,
     the QPS proxy users feel); ``prefill_throughput_tok_s`` and ``ttft_ms``
-    cover the prompt-processing side. ``peak_memory_bytes`` /
-    ``weight_memory_bytes`` are best-effort reads from the engine worker (``None``
-    if the engine didn't expose them)."""
+    cover the prompt-processing side. Weight quantization typically helps decode
+    (memory-bound) while *costing* prefill (dequant overhead on a compute-bound
+    pass) — measured, e.g. fp8 on Qwen2.5-1.5B: +20% decode, -24% prefill. That
+    split is the whole reason to measure rather than assume "quant = faster".
+
+    ``weight_memory_bytes`` is the meaningful memory signal (model footprint).
+    ``peak_memory_bytes`` is best-effort and, under vLLM, reflects the reserved
+    ``gpu_memory_utilization`` KV pool — roughly constant across configs, *not*
+    the model footprint. Both are ``None`` if the engine didn't expose them."""
 
     engine: str
     dtype: str
