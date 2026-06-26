@@ -210,6 +210,19 @@ def _quant_config(scheme: str, group_size: int = 32):
             )
         except TypeError:
             return Int4WeightOnlyConfig(group_size=group_size)
+    if scheme == "int8wo":
+        # int8 weight-only (W8A16): weights int8, activations stay fp. Unlike
+        # w8a8, it produces a plain AffineQuantizedTensor (no dynamic-activation
+        # wrapper), so it *serializes* through save_pretrained and serves via
+        # vLLM — the robust, cross-family deployable weight-only scheme.
+        try:
+            from torchao.quantization import Int8WeightOnlyConfig
+
+            return Int8WeightOnlyConfig()
+        except ImportError:  # older torchao API
+            from torchao.quantization import int8_weight_only
+
+            return int8_weight_only()
     raise ValueError(f"unknown quant scheme {scheme!r}; choose from {QUANT_SCHEMES}")
 
 

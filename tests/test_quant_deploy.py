@@ -22,7 +22,7 @@ from firefly.quant.intervention import RTNQuantizer
 from firefly.quant.recipe_io import Recipe, serialize_intervention
 
 
-def _recipe(*, scheme="w8a8", kept_fp=None, pre=None, quantizer=None) -> Recipe:
+def _recipe(*, scheme="int8wo", kept_fp=None, pre=None, quantizer=None) -> Recipe:
     return Recipe(
         model_id="some/model",
         scheme=scheme,
@@ -36,14 +36,21 @@ def _recipe(*, scheme="w8a8", kept_fp=None, pre=None, quantizer=None) -> Recipe:
 
 
 class TestClassify:
-    def test_uniform_rtn_is_directly_deployable(self):
-        status, reason = classify_recipe(_recipe(scheme="w8a8"))
+    def test_int8wo_uniform_rtn_is_directly_deployable(self):
+        status, reason = classify_recipe(_recipe(scheme="int8wo"))
         assert status == DIRECTLY_DEPLOYABLE
         assert "torchao" in reason
 
     def test_int4wo_uniform_rtn_is_deployable(self):
         status, _ = classify_recipe(_recipe(scheme="int4wo"))
         assert status == DIRECTLY_DEPLOYABLE
+
+    def test_w8a8_not_directly_deployable_serialization(self):
+        # w8a8's dynamic-activation tensor subclass won't serialize → not servable
+        # via this path (GPU-confirmed); reported, not faked.
+        status, reason = classify_recipe(_recipe(scheme="w8a8"))
+        assert status == NOT_YET
+        assert "serialize" in reason and "weight-only" in reason
 
     def test_smoothquant_needs_folding(self):
         r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])

@@ -1,11 +1,16 @@
 """GPU validation for the deploy loop — apply → save → vLLM-load → benchmark.
 
-Proves Gap 2 end to end: a uniform w8a8 recipe is exported to a real torchao
-checkpoint (firefly.quant.deploy.export_deployable), then that *saved directory*
-is loaded by vLLM (quantization=torchao) and benchmarked — confirming the
-artifact actually serves, and measuring the speedup/footprint vs the bf16
+Proves Gap 2 end to end: a uniform weight-only recipe is exported to a real
+torchao checkpoint (firefly.quant.deploy.export_deployable), then that *saved
+directory* is loaded by vLLM (quantization=torchao) and benchmarked — confirming
+the artifact actually serves, and measuring the speedup/footprint vs the bf16
 baseline. This is the difference between handing someone a recipe and handing
 them a faster model.
+
+Weight-only schemes (int8wo / int4wo) are the deployable tier: they serialize
+through save_pretrained and load in vLLM. w8a8 (dynamic-activation) does NOT
+serialize (its LinearActivationQuantizedTensor isn't supported by save_pretrained)
+— a real stack constraint, so it's a measurement scheme, not a serving one.
 
 Each config runs in its own container (vLLM holds ~90% of the GPU per process).
 
@@ -31,15 +36,15 @@ image = (
 
 GPU = "A100-80GB"
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-# (label, export-as-w8a8?)
-CONFIGS = [("bf16 baseline", False), ("w8a8 exported", True)]
+# (label, scheme-or-None) — None = bf16 baseline; a scheme exports + serves it.
+CONFIGS = [("bf16 baseline", None), ("int8wo exported", "int8wo"), ("int4wo exported", "int4wo")]
 
 
 @app.function(
     image=image, gpu=GPU, timeout=3600,
     volumes={"/root/.cache/huggingface": hf_cache}, secrets=[hf_secret],
 )
-def bench_one(label: str, do_export: bool) -> dict:
+def bench_one(label: str, scheme: str | None) -> dict:
     import gc
 
     import torch
@@ -54,15 +59,15 @@ def bench_one(label: str, do_export: bool) -> dict:
     bench = get_benchmarker("vllm")
 
     try:
-        if do_export:
+        if scheme is not None:
             recipe = Recipe(
-                model_id=MODEL, scheme="w8a8", group_size=32, granularity="layer",
+                model_id=MODEL, scheme=scheme, group_size=128, granularity="layer",
                 quantize_fqns=[], kept_fp_fqns=[], pre_transforms=[],
                 quantizer=serialize_intervention(RTNQuantizer()),
             )
             status, reason = classify_recipe(recipe)
             print(f"  deployability: {status} — {reason}")
-            art = export_deployable(recipe, "/tmp/q_w8a8", dtype="bfloat16", device="cuda")
+            art = export_deployable(recipe, f"/tmp/q_{scheme}", dtype="bfloat16", device="cuda")
             print(f"  exported → {art.path}\n  serve: {art.serve_command}")
             # Free the transformers export model before vLLM grabs the GPU.
             gc.collect()
@@ -95,7 +100,7 @@ def main() -> None:
     print(f"\n{'=' * 70}\nDEPLOY LOOP — apply→save→vLLM-load→benchmark ({MODEL})\n{'=' * 70}")
     for e in out:
         if "error" in e:
-            print(f"  {e['label']:16s}  FAILED ({e['error'][:60]})")
+            print(f"  {e['label']:18s}  FAILED ({e['error'][:60]})")
         else:
-            print(f"  {e['label']:16s}  {e['decode_tok_s']:8.1f} dec tok/s  {e['weight_mb']} MB weights")
+            print(f"  {e['label']:18s}  {e['decode_tok_s']:8.1f} dec tok/s  {e['weight_mb']} MB weights")
     print(json.dumps(out, indent=2, default=str))

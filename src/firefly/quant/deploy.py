@@ -9,10 +9,16 @@ good luck."
 
 **Honesty boundary.** Not every recipe is loadable by a serving engine, and
 faking a checkpoint that silently serves something other than what we measured
-would betray the whole thesis. A *uniform* torchao checkpoint (w8a8 / int4wo,
-every quantizable Linear at one precision) loads via vLLM's ``quantization=
-"torchao"`` and is faithful to our RTN quantizer (same torchao call). But:
+would betray the whole thesis. A *uniform weight-only* torchao checkpoint
+(int8wo / int4wo, every quantizable Linear at one precision) loads via vLLM's
+``quantization="torchao"`` and is faithful to our RTN quantizer (same torchao
+call). But:
 
+* **w8a8** (int8 *dynamic-activation*) produces a ``LinearActivationQuantizedTensor``
+  that transformers' ``save_pretrained`` can't serialize in the current
+  torchao/transformers stack (GPU-confirmed). It stays a measurement/recovery
+  scheme; for *serving*, deploy a weight-only scheme (this is also where the
+  decode-throughput win lives — weight quant helps the memory-bound regime).
 * **SmoothQuant** applies a runtime input scale (a forward hook) — to serve, its
   scale must be *folded* into the producing layer so the checkpoint is a plain
   rescaled model. Not yet automated → reported, not faked.
@@ -38,9 +44,12 @@ DIRECTLY_DEPLOYABLE = "directly_deployable"  # uniform torchao → vLLM today
 NEEDS_FOLDING = "needs_folding"              # SmoothQuant: fold scale, then deployable
 NOT_YET = "not_yet"                          # mixed precision / AWQ: separate exporter
 
-#: scheme → (transformers TorchAoConfig string quant_type) fallback names.
+#: Weight-only schemes that serialize through save_pretrained AND load in vLLM.
+#: w8a8 (dynamic-activation) is deliberately absent — its tensor subclass won't
+#: serialize (GPU-confirmed), so it can't be exported to a servable checkpoint.
+#: Values are the transformers TorchAoConfig string quant_type fallback names.
 _TORCHAO_QUANT_TYPE = {
-    "w8a8": "int8_dynamic_activation_int8_weight",
+    "int8wo": "int8_weight_only",
     "int4wo": "int4_weight_only",
 }
 
@@ -67,7 +76,7 @@ def classify_recipe(recipe: Recipe) -> tuple[str, str]:
     if quant_name == "awq":
         return NOT_YET, (
             "AWQ checkpoints need the AutoAWQ export format, a separate exporter "
-            "(the torchao→vLLM path here covers uniform RTN w8a8 / int4wo)."
+            "(the torchao→vLLM path here covers uniform RTN int8wo / int4wo)."
         )
     if recipe.kept_fp_fqns:
         return NOT_YET, (
@@ -75,9 +84,16 @@ def classify_recipe(recipe: Recipe) -> tuple[str, str]:
             "mixed precision), which vLLM's torchao loader doesn't reconstruct; "
             "serve a uniform scheme, or wait for the mixed-precision exporter."
         )
+    if recipe.scheme == "w8a8":
+        return NOT_YET, (
+            "w8a8 (int8 dynamic-activation) produces a LinearActivationQuantizedTensor "
+            "that save_pretrained can't serialize in this torchao/transformers stack; "
+            "deploy a weight-only scheme for serving (int8wo for ~2x robust, int4wo "
+            "for ~4x) — w8a8 stays available for measurement/recovery analysis."
+        )
     if recipe.scheme in _TORCHAO_QUANT_TYPE and quant_name == "rtn":
         return DIRECTLY_DEPLOYABLE, (
-            f"uniform {recipe.scheme} (RTN) — loads via vLLM quantization=torchao."
+            f"uniform {recipe.scheme} weight-only (RTN) — loads via vLLM quantization=torchao."
         )
     return NOT_YET, (
         f"no deployable path for scheme={recipe.scheme!r} quantizer={quant_name!r}."
