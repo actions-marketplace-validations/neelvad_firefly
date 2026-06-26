@@ -24,8 +24,9 @@ def test_quant_config_selects_scheme() -> None:
     Guards the W8A8 / int4-weight-only fork the breadth sweep relies on."""
     from firefly.quant.torchao import QUANT_SCHEMES, _quant_config
 
-    assert set(QUANT_SCHEMES) == {"w8a8", "int4wo"}
+    assert set(QUANT_SCHEMES) == {"w8a8", "int8wo", "int4wo"}
     assert _quant_config("w8a8") is not None
+    assert _quant_config("int8wo") is not None
     assert _quant_config("int4wo", group_size=32) is not None
     with pytest.raises(ValueError, match="unknown quant scheme"):
         _quant_config("bogus")

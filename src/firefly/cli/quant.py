@@ -833,3 +833,77 @@ def quant_apply(
 
         torch.save(quantized.state_dict(), out)
         typer.echo(f"saved quantized state_dict to {out} (load with torchao imported)")
+
+
+@app.command("optimize")
+def optimize_cmd(
+    model: str = typer.Option(..., "--model", "-m", help="HF model ID or checkpoint path."),
+    inputs: Path = typer.Option(..., "--inputs", "-i", help="Calibration inputs JSON."),
+    eval_set: Path = typer.Option(..., "--eval", help="Held-out eval set for perplexity."),
+    scheme: str = typer.Option("w8a8", "--scheme", help="w8a8 / int8wo / int4wo."),
+    group_size: int = typer.Option(128, "--group-size"),
+    device: str = typer.Option("cpu", "--device", "-d"),
+    dtype: str = typer.Option("float32", "--dtype"),
+    eval_max_length: int = typer.Option(64, "--eval-max-length"),
+    with_sensitivity: bool = typer.Option(False, "--with-sensitivity/--no-sensitivity"),
+    quality_bar: float | None = typer.Option(
+        None, "--quality-bar",
+        help="Max tolerated relative perplexity increase vs fp (0.05 = within 5%). "
+        "Reports MEETS/MISSES; does not block the export.",
+    ),
+    out_dir: Path | None = typer.Option(
+        None, "--out-dir",
+        help="Export the servable compressed-tensors checkpoint here (needs the "
+        "'deploy' extra). Without it, optimize reports a measured plan only.",
+    ),
+    benchmark: bool = typer.Option(
+        False, "--benchmark/--no-benchmark",
+        help="Also measure the served artifact's real QPS/memory via vLLM "
+        "(needs a GPU + the 'vllm' extra). Implies --out-dir.",
+    ),
+    batch_size: int = typer.Option(8, "--batch-size", help="Benchmark batch size."),
+    input_len: int = typer.Option(512, "--input-len", help="Benchmark prompt length."),
+    output_len: int = typer.Option(128, "--output-len", help="Benchmark generated length."),
+) -> None:
+    """End-to-end: model + bar → a faster *servable* model + the evidence.
+
+    Selects a recipe (diagnose → route → measurement-gate), exports the
+    deployable one to a portable compressed-tensors checkpoint with a `vllm
+    serve` command, and — with --benchmark — measures the served artifact's real
+    QPS/memory. Ships only what's directly servable; reports any recovery a
+    not-yet-servable recipe leaves on the table as headroom.
+    """
+    from firefly.quant.evaluate import load_eval_texts
+    from firefly.quant.optimize import optimize
+    from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
+    from firefly.report import render_optimize
+
+    if benchmark and out_dir is None:
+        out_dir = Path("./firefly-optimized")
+        typer.echo(f"--benchmark implies an export; using --out-dir {out_dir}", err=True)
+
+    try:
+        quant_preflight(scheme, device)
+    except QuantCompatibilityError as e:
+        typer.echo(f"Incompatible quantization config: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    bench_config = None
+    if benchmark:
+        from firefly.bench import BenchmarkConfig
+
+        bench_config = BenchmarkConfig(batch_size=batch_size, input_len=input_len, output_len=output_len)
+
+    try:
+        result = optimize(
+            model, inputs, load_eval_texts(eval_set), scheme=scheme, group_size=group_size,
+            device=device, dtype=dtype, max_length=eval_max_length, with_sensitivity=with_sensitivity,
+            quality_bar=quality_bar, out_dir=out_dir, benchmark=benchmark, bench_config=bench_config,
+        )
+    except (ImportError, QuantCompatibilityError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(render_optimize(result))
+    if result["meets_bar"] is False:
+        raise typer.Exit(1)

@@ -429,6 +429,64 @@ def render_auto(result: dict, console: Console | None = None) -> str:
     return console.export_text()
 
 
+def render_optimize(result: dict, console: Console | None = None) -> str:
+    """Render the end-to-end optimize verdict: shipped recipe → quality vs the
+    bar → cost (estimated + measured) → the deployable artifact + serve command,
+    and any headroom a not-yet-servable recipe leaves on the table."""
+    console = console or Console(record=True, width=100)
+    r = result
+    console.print(f"[bold]optimize[/] {r['model']}  (scheme={r['scheme']})")
+
+    summary = r.get("diagnosis_summary", {})
+    if summary:
+        console.print(
+            "[bold]diagnosis:[/] " + ", ".join(f"[yellow]{s}[/] ×{n}" for s, n in summary.items())
+        )
+
+    q = r["quality"]
+    console.print(
+        f"[bold]ship:[/] [cyan]{r['ship']}[/] {r['scheme']}  —  perplexity fp {q['fp']:.2f} → "
+        f"shipped {q['shipped']:.2f} ([yellow]{q['rel_to_fp']:+.1%}[/] vs fp)"
+    )
+    if r["quality_bar"] is not None:
+        if r["meets_bar"]:
+            console.print(f"[bold green]MEETS BAR[/] (≤ {r['quality_bar']:.1%} vs fp)")
+        else:
+            console.print(
+                f"[bold red]MISSES BAR[/] ({q['rel_to_fp']:+.1%} > {r['quality_bar']:.1%} vs fp) — "
+                f"try a milder scheme or relax the bar."
+            )
+
+    cost = f"[bold]cost:[/] ~{r['compression_estimate']:.1f}× smaller weights (est)"
+    if r.get("measured"):
+        m = r["measured"]
+        wt = f", {m['weight_mb']:.0f} MB weights" if m.get("weight_mb") else ""
+        cost += (
+            f"  •  [bold]measured:[/] decode [green]{m['decode_tok_s']:.0f}[/] tok/s, "
+            f"prefill {m['prefill_tok_s']:.0f} tok/s, TTFT {m['ttft_ms']:.0f} ms{wt}"
+        )
+    console.print(cost)
+
+    art = r.get("artifact")
+    if art:
+        console.print(
+            f"[bold]deployable:[/] {art['path']} ([dim]{art['compressed_tensors_scheme']}[/])\n"
+            f"  [bold]serve:[/] [cyan]{art['serve_command']}[/]"
+        )
+    else:
+        console.print("[dim]plan only — pass an output dir to export the servable checkpoint.[/]")
+
+    h = r.get("headroom")
+    if h:
+        pre = "+".join(h["pre_transforms"]) if h["pre_transforms"] else h["recipe"]
+        console.print(
+            f"[dim]headroom: a [italic]{pre}[/] recipe recovers {h['recovery']:.0%} more "
+            f"(perplexity {h['perplexity']:.2f}) but isn't directly servable yet "
+            f"({h['blocked_by']})[/]"
+        )
+    return console.export_text()
+
+
 def render_salience(saliences, top_n: int = 15, console: Console | None = None) -> str:
     """Render the weight-salience (AWQ signal) sensor: Linears ranked by how
     concentrated their per-input-channel salience is. High = a few channels carry

@@ -22,7 +22,7 @@ from torch import nn
 
 #: Effective *weight* bits per scheme (w8a8 also quantizes activations, but
 #: that's runtime, not weight footprint).
-SCHEME_WEIGHT_BITS = {"w8a8": 8, "int4wo": 4}
+SCHEME_WEIGHT_BITS = {"w8a8": 8, "int8wo": 8, "int4wo": 4}
 
 _DTYPE_BITS = {"float32": 32, "fp32": 32, "bfloat16": 16, "bf16": 16, "float16": 16, "fp16": 16}
 

@@ -128,8 +128,10 @@ class TorchaoValidationResult:
 #: activation analysis is designed to predict. ``int4wo`` is int4 weight-only
 #: (W4A16): activations stay in fp, only weights are quantized. quant-risk
 #: looks at activations, so it is *expected* not to predict int4wo — running it
-#: maps the tool's boundary, it isn't a target we expect to hit.
-QUANT_SCHEMES = ("w8a8", "int4wo")
+#: maps the tool's boundary, it isn't a target we expect to hit. ``int8wo`` is
+#: int8 weight-only (W8A16) — like int4wo but 8-bit; the gentlest scheme and the
+#: robust deployable one (it serializes to compressed-tensors where w8a8 can't).
+QUANT_SCHEMES = ("w8a8", "int8wo", "int4wo")
 
 
 class QuantCompatibilityError(RuntimeError):
