@@ -36,27 +36,22 @@ def _recipe(*, scheme="int8wo", kept_fp=None, pre=None, quantizer=None) -> Recip
 
 
 class TestClassify:
-    def test_int8wo_uniform_rtn_is_directly_deployable(self):
-        status, reason = classify_recipe(_recipe(scheme="int8wo"))
+    @pytest.mark.parametrize(
+        "scheme,ct", [("int8wo", "W8A16"), ("int4wo", "W4A16"), ("w8a8", "W8A8")]
+    )
+    def test_uniform_rtn_schemes_are_directly_deployable(self, scheme, ct):
+        # All three uniform RTN schemes map to a compressed-tensors preset and
+        # serve — including w8a8, which torchao's save_pretrained couldn't
+        # serialize but compressed-tensors handles cleanly.
+        status, reason = classify_recipe(_recipe(scheme=scheme))
         assert status == DIRECTLY_DEPLOYABLE
-        assert "torchao" in reason
-
-    def test_int4wo_uniform_rtn_is_deployable(self):
-        status, _ = classify_recipe(_recipe(scheme="int4wo"))
-        assert status == DIRECTLY_DEPLOYABLE
-
-    def test_w8a8_not_directly_deployable_serialization(self):
-        # w8a8's dynamic-activation tensor subclass won't serialize → not servable
-        # via this path (GPU-confirmed); reported, not faked.
-        status, reason = classify_recipe(_recipe(scheme="w8a8"))
-        assert status == NOT_YET
-        assert "serialize" in reason and "weight-only" in reason
+        assert ct in reason
 
     def test_smoothquant_needs_folding(self):
         r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
         status, reason = classify_recipe(r)
         assert status == NEEDS_FOLDING
-        assert "fold" in reason.lower()
+        assert "SmoothQuant" in reason
 
     def test_mixed_precision_not_yet(self):
         status, reason = classify_recipe(_recipe(kept_fp=["model.layers.5.mlp.down_proj"]))
@@ -83,10 +78,11 @@ class TestClassify:
 
 
 class TestServeCommand:
-    def test_includes_quantization_flag(self):
+    def test_serves_the_dir_no_quant_flag(self):
+        # vLLM auto-detects compressed-tensors from config.json — no flag needed.
         cmd = serve_command(Path("/models/q"))
         assert "vllm serve /models/q" in cmd
-        assert "--quantization torchao" in cmd
+        assert "--quantization" not in cmd
 
     def test_max_model_len_optional(self):
         assert "--max-model-len" not in serve_command(Path("/m"))
@@ -96,7 +92,7 @@ class TestServeCommand:
 class TestExportRefusesUndeployable:
     def test_export_raises_on_smoothquant(self, tmp_path):
         r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
-        with pytest.raises(DeployabilityError, match="fold"):
+        with pytest.raises(DeployabilityError, match="SmoothQuant"):
             export_deployable(r, tmp_path)
 
     def test_export_raises_on_mixed_precision(self, tmp_path):

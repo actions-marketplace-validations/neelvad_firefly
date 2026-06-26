@@ -1,16 +1,16 @@
 """GPU validation for the deploy loop — apply → save → vLLM-load → benchmark.
 
-Proves Gap 2 end to end: a uniform weight-only recipe is exported to a real
-torchao checkpoint (firefly.quant.deploy.export_deployable), then that *saved
-directory* is loaded by vLLM (quantization=torchao) and benchmarked — confirming
-the artifact actually serves, and measuring the speedup/footprint vs the bf16
-baseline. This is the difference between handing someone a recipe and handing
-them a faster model.
+Proves Gap 2 end to end: a uniform recipe is exported to a portable
+compressed-tensors checkpoint (firefly.quant.deploy.export_deployable, via
+llm-compressor), then that *saved directory* is loaded by vLLM and benchmarked —
+confirming the artifact actually serves, and measuring the speedup/footprint vs
+the bf16 baseline. This is the difference between handing someone a recipe and
+handing them a faster model.
 
-Weight-only schemes (int8wo / int4wo) are the deployable tier: they serialize
-through save_pretrained and load in vLLM. w8a8 (dynamic-activation) does NOT
-serialize (its LinearActivationQuantizedTensor isn't supported by save_pretrained)
-— a real stack constraint, so it's a measurement scheme, not a serving one.
+Deployment goes through compressed-tensors (vLLM-native, portable), NOT torchao:
+a GPU run confirmed torchao's quantized subclasses don't serialize through
+save_pretrained in the current stack. compressed-tensors handles w8a8 / int8 /
+int4 cleanly. (torchao stays the measurement backend.)
 
 Each config runs in its own container (vLLM holds ~90% of the GPU per process).
 
@@ -30,14 +30,14 @@ hf_secret = modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.11")
-    .pip_install("vllm>=0.8.5", "torchao>=0.7", "transformers>=4.44", "accelerate")
+    .pip_install("vllm>=0.8.5", "llmcompressor>=0.3", "transformers>=4.44", "accelerate")
     .add_local_python_source("firefly")
 )
 
 GPU = "A100-80GB"
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 # (label, scheme-or-None) — None = bf16 baseline; a scheme exports + serves it.
-CONFIGS = [("bf16 baseline", None), ("int8wo exported", "int8wo"), ("int4wo exported", "int4wo")]
+CONFIGS = [("bf16 baseline", None), ("int8wo (W8A16)", "int8wo"), ("w8a8 (W8A8)", "w8a8")]
 
 
 @app.function(
@@ -67,16 +67,17 @@ def bench_one(label: str, scheme: str | None) -> dict:
             )
             status, reason = classify_recipe(recipe)
             print(f"  deployability: {status} — {reason}")
-            art = export_deployable(recipe, f"/tmp/q_{scheme}", dtype="bfloat16", device="cuda")
-            print(f"  exported → {art.path}\n  serve: {art.serve_command}")
-            # Free the transformers export model before vLLM grabs the GPU.
+            art = export_deployable(recipe, f"/tmp/q_{scheme}")
+            print(f"  exported → {art.path}  ({art.compressed_tensors_scheme})\n  serve: {art.serve_command}")
+            # Free the export model before vLLM grabs the GPU.
             gc.collect()
             torch.cuda.empty_cache()
-            target, quant = str(art.path), "torchao"
+            target = str(art.path)
         else:
-            target, quant = MODEL, None
+            target = MODEL
 
-        r = bench.benchmark(target, cfg, dtype="bfloat16", quantization=quant)
+        # vLLM auto-detects compressed-tensors from the checkpoint config.
+        r = bench.benchmark(target, cfg, dtype="bfloat16", quantization=None)
         entry = {
             "label": label,
             "decode_tok_s": round(r.decode_throughput_tok_s, 1),

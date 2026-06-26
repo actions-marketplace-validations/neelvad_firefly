@@ -46,6 +46,13 @@ sglang = [
 torchao = [
     "torchao>=0.7",
 ]
+# Exporting a chosen recipe to a portable, vLLM-native compressed-tensors
+# checkpoint (firefly.quant.deploy). Separate from torchao (the measurement
+# backend): torchao's save_pretrained can't serialize its quantized subclasses
+# in current transformers, so deployment goes through llm-compressor instead.
+deploy = [
+    "llmcompressor>=0.3",
+]
 # LLM proposer for the quant auto-search harness (firefly.quant.llm). The
 # deterministic router needs none of this; only the LLM agent path imports it.
 agent = [
