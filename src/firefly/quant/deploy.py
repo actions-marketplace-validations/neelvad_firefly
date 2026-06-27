@@ -168,3 +168,34 @@ def export_deployable(
         path=out, scheme=recipe.scheme, compressed_tensors_scheme=ct_scheme,
         serve_command=cmd, manifest=manifest,
     )
+
+
+def evaluate_deployed(
+    checkpoint_dir: str | Path,
+    eval_texts: list[str],
+    *,
+    max_length: int = 64,
+    device: str = "cuda",
+    dtype: str = "bfloat16",
+) -> float:
+    """Perplexity of the *served* compressed-tensors checkpoint, via the same
+    evaluator selection used on the torchao model.
+
+    The point is the cross-backend check: selection measures quality on a
+    *torchao*-quantized model, but we ship a *compressed-tensors* one — the same
+    scheme, not a bit-identical implementation. Loading the exported checkpoint
+    in transformers (which auto-applies the compressed-tensors config) and
+    running the identical perplexity evaluator isolates exactly that handoff, so
+    the quality we *report* is the quality we *ship*, not a proxy from a different
+    backend.
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from firefly.capture import parse_dtype
+    from firefly.quant.evaluate import perplexity_evaluator
+
+    model = AutoModelForCausalLM.from_pretrained(
+        str(checkpoint_dir), torch_dtype=parse_dtype(dtype), device_map=device,
+    )
+    tok = AutoTokenizer.from_pretrained(str(checkpoint_dir))
+    return perplexity_evaluator(eval_texts, max_length=max_length)(model, tok)

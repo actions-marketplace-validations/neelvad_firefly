@@ -446,15 +446,25 @@ def render_optimize(result: dict, console: Console | None = None) -> str:
     q = r["quality"]
     console.print(
         f"[bold]ship:[/] [cyan]{r['ship']}[/] {r['scheme']}  —  perplexity fp {q['fp']:.2f} → "
-        f"shipped {q['shipped']:.2f} ([yellow]{q['rel_to_fp']:+.1%}[/] vs fp)"
+        f"shipped {q['shipped']:.2f} ([yellow]{q['rel_to_fp']:+.1%}[/] vs fp, torchao)"
     )
+    if q.get("served") is not None:
+        delta = q["backend_delta"]
+        flag = "" if abs(delta) < 0.05 * q["fp"] else "  [yellow](backends disagree)[/]"
+        console.print(
+            f"[bold]served:[/] compressed-tensors perplexity {q['served']:.2f} "
+            f"([yellow]{q['served_rel_to_fp']:+.1%}[/] vs fp)  "
+            f"[dim]Δ {delta:+.2f} vs torchao[/]{flag}"
+        )
+    # The bar is checked against the served quality when we have it, else selection.
+    basis_rel = q["served_rel_to_fp"] if q.get("served") is not None else q["rel_to_fp"]
     if r["quality_bar"] is not None:
         if r["meets_bar"]:
-            console.print(f"[bold green]MEETS BAR[/] (≤ {r['quality_bar']:.1%} vs fp)")
+            console.print(f"[bold green]MEETS BAR[/] (≤ {r['quality_bar']:.1%} vs fp, {r['bar_basis']})")
         else:
             console.print(
-                f"[bold red]MISSES BAR[/] ({q['rel_to_fp']:+.1%} > {r['quality_bar']:.1%} vs fp) — "
-                f"try a milder scheme or relax the bar."
+                f"[bold red]MISSES BAR[/] ({basis_rel:+.1%} > {r['quality_bar']:.1%} vs fp, "
+                f"{r['bar_basis']}) — try a milder scheme or relax the bar."
             )
 
     cost = f"[bold]cost:[/] ~{r['compression_estimate']:.1f}× smaller weights (est)"

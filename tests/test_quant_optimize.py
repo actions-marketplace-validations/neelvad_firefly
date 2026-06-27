@@ -118,6 +118,42 @@ class TestOptimizeExportAndBenchmark:
         assert written["measured"]["decode_tok_s"] == 5000.0
 
 
+class TestCrossBackendReeval:
+    def test_served_quality_drives_the_bar(self, monkeypatch, tmp_path):
+        # selection (torchao) ships plain ppl 15 (+50% vs fp 10) → would MISS a 60%
+        # bar; but the served (compressed-tensors) model re-evals at 11 (+10%), so
+        # the honest bar (against served) MEETS, and bar_basis flips to 'served'.
+        monkeypatch.setattr(optmod, "auto_quant", lambda *a, **k: _auto(accepted=False))
+        monkeypatch.setattr(
+            optmod, "export_deployable",
+            lambda recipe, out_dir, **kw: DeployArtifact(
+                path=tmp_path, scheme=recipe.scheme, compressed_tensors_scheme="W8A8",
+                serve_command="vllm serve x", manifest={},
+            ),
+        )
+        monkeypatch.setattr(optmod, "evaluate_deployed", lambda *a, **k: 11.0)
+
+        r = optimize("m", "i", ["t"], out_dir=tmp_path, reeval_quality=True, quality_bar=0.2)
+        assert r["quality"]["served"] == 11.0
+        assert r["quality"]["backend_delta"] == pytest.approx(11.0 - 15.0)  # served − torchao
+        assert r["bar_basis"] == "served"
+        assert r["meets_bar"] is True  # +10% served ≤ 20% bar (despite +50% torchao)
+
+    def test_backend_delta_surfaces_disagreement(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(optmod, "auto_quant", lambda *a, **k: _auto(accepted=False, plain=12.0))
+        monkeypatch.setattr(
+            optmod, "export_deployable",
+            lambda recipe, out_dir, **kw: DeployArtifact(
+                path=tmp_path, scheme=recipe.scheme, compressed_tensors_scheme="W8A8",
+                serve_command="vllm serve x", manifest={},
+            ),
+        )
+        # compressed-tensors disagrees materially with torchao for the same scheme.
+        monkeypatch.setattr(optmod, "evaluate_deployed", lambda *a, **k: 20.0)
+        r = optimize("m", "i", ["t"], out_dir=tmp_path, reeval_quality=True)
+        assert r["quality"]["backend_delta"] == pytest.approx(8.0)
+
+
 def test_render_optimize_smoke(monkeypatch):
     from firefly.report import render_optimize
 

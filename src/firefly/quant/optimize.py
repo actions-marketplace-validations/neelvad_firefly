@@ -26,7 +26,12 @@ from pathlib import Path
 
 from firefly.quant.auto import auto_quant
 from firefly.quant.cost import SCHEME_WEIGHT_BITS, dtype_bits
-from firefly.quant.deploy import DIRECTLY_DEPLOYABLE, classify_recipe, export_deployable
+from firefly.quant.deploy import (
+    DIRECTLY_DEPLOYABLE,
+    classify_recipe,
+    evaluate_deployed,
+    export_deployable,
+)
 from firefly.quant.intervention import RTNQuantizer
 from firefly.quant.recipe_io import Recipe, serialize_intervention
 
@@ -100,16 +105,19 @@ def optimize(
     with_sensitivity: bool = False,
     quality_bar: float | None = None,
     out_dir: str | Path | None = None,
+    reeval_quality: bool = False,
     benchmark: bool = False,
     bench_config=None,
 ) -> dict:
-    """Run the full select → export → benchmark loop and return the verdict.
+    """Run the full select → export → (re-eval) → benchmark loop and return the verdict.
 
     ``quality_bar`` is the max tolerated relative perplexity increase vs fp
     (``0.05`` = ship must be within 5% of fp). ``out_dir`` exports the deployable
-    checkpoint; ``benchmark`` additionally measures the served artifact's
-    QPS/memory (needs a GPU + vLLM). With neither, it's a measured *plan*: the
-    chosen recipe, its quality, and the estimated cost.
+    checkpoint; ``reeval_quality`` re-measures the *served* (compressed-tensors)
+    checkpoint's perplexity — the quality we actually ship, vs the torchao one
+    selection used — and checks the bar against it; ``benchmark`` additionally
+    measures the served artifact's QPS/memory (needs a GPU + vLLM). With none of
+    them it's a measured *plan*: the chosen recipe, its quality, the estimated cost.
     """
     auto = auto_quant(
         model_id, inputs_path, eval_texts, scheme=scheme, group_size=group_size,
@@ -128,9 +136,16 @@ def optimize(
         "model": model_id,
         "scheme": scheme,
         "ship": ship_kind,
-        "quality": {"fp": ppl_fp, "shipped": ship_ppl, "rel_to_fp": rel_to_fp},
+        # "shipped"/"rel_to_fp" = the torchao (selection) backend; "served*" is
+        # filled by the cross-backend re-eval below (the compressed-tensors model
+        # we actually deploy). The bar tracks served when we have it.
+        "quality": {
+            "fp": ppl_fp, "shipped": ship_ppl, "rel_to_fp": rel_to_fp,
+            "served": None, "served_rel_to_fp": None, "backend_delta": None,
+        },
         "quality_bar": quality_bar,
         "meets_bar": meets_bar,
+        "bar_basis": "selection",  # 'served' once re-eval runs
         "compression_estimate": compression_estimate,
         "diagnosis_summary": auto.get("diagnosis_summary", {}),
         "headroom": _headroom(auto),
@@ -150,6 +165,21 @@ def optimize(
         "compressed_tensors_scheme": artifact.compressed_tensors_scheme,
         "serve_command": artifact.serve_command,
     }
+
+    if reeval_quality:
+        _free_accelerator()
+        served = evaluate_deployed(
+            artifact.path, eval_texts, max_length=max_length, device=device, dtype=dtype
+        )
+        served_rel = (served - ppl_fp) / ppl_fp if ppl_fp > 0 else 0.0
+        result["quality"].update({
+            "served": served,
+            "served_rel_to_fp": served_rel,
+            "backend_delta": served - ship_ppl,  # compressed-tensors − torchao, same scheme
+        })
+        # The honest bar: check the model we actually ship.
+        result["meets_bar"] = quality_bar is None or served_rel <= quality_bar
+        result["bar_basis"] = "served"
 
     if benchmark:
         _free_accelerator()
