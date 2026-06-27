@@ -856,6 +856,12 @@ def optimize_cmd(
         help="Export the servable compressed-tensors checkpoint here (needs the "
         "'deploy' extra). Without it, optimize reports a measured plan only.",
     ),
+    reeval: bool = typer.Option(
+        True, "--reeval/--no-reeval",
+        help="Re-evaluate the exported (compressed-tensors) checkpoint's perplexity "
+        "and check the bar against it — selection measures on torchao, which can "
+        "differ from the served backend (esp. int4). Default on; needs --out-dir.",
+    ),
     benchmark: bool = typer.Option(
         False, "--benchmark/--no-benchmark",
         help="Also measure the served artifact's real QPS/memory via vLLM "
@@ -898,7 +904,8 @@ def optimize_cmd(
         result = optimize(
             model, inputs, load_eval_texts(eval_set), scheme=scheme, group_size=group_size,
             device=device, dtype=dtype, max_length=eval_max_length, with_sensitivity=with_sensitivity,
-            quality_bar=quality_bar, out_dir=out_dir, benchmark=benchmark, bench_config=bench_config,
+            quality_bar=quality_bar, out_dir=out_dir, reeval_quality=reeval and out_dir is not None,
+            benchmark=benchmark, bench_config=bench_config,
         )
     except (ImportError, QuantCompatibilityError) as e:
         typer.echo(str(e), err=True)
