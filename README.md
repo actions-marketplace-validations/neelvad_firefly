@@ -3,20 +3,80 @@
 [![CI](https://github.com/neelvad/firefly/actions/workflows/ci.yml/badge.svg)](https://github.com/neelvad/firefly/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Firefly instruments a model's internals and attributes where two executions
-diverge** — down to the layer, attention head, or ATen op. It hooks every
-decoder layer's attention/MLP outputs (and, on demand, per-head taps or
-op-level traces via `TorchDispatchMode`), captures the activations, and walks
-them in forward order to name the *first* place two runs disagree.
+**Firefly turns a model into a faster, servable one — and proves it.** Give it a
+model, a calibration set, an eval set, and a quality bar; it diagnoses where
+quantization would hurt, applies the treatment that fits, exports a portable
+checkpoint a serving engine loads, and **measures the real speedup, memory, and
+served quality** before it hands the model back.
 
-That one engine — **capture → compare → attribute** — is the shared core; each
-use-case below is the same engine pointed at a different divergence:
+```bash
+firefly optimize -m Qwen/Qwen2.5-1.5B-Instruct -i calib.json --eval eval.json \
+    --scheme int8wo --quality-bar 0.05 --out-dir ./optimized --benchmark
+# → ./optimized  (vllm serve ./optimized)
+#   ship int8wo: perplexity +1.1% vs fp — MEETS BAR
+#   measured: +20% decode, 1.74× smaller weights
+```
+
+What makes that more than another auto-quantizer is the engine underneath:
+**capture → compare → attribute**. Firefly instruments every decoder layer's
+attention/MLP outputs (and, on demand, per-head taps or op-level ATen traces via
+`TorchDispatchMode`), walks them in forward order to name the *first* place two
+runs diverge, and uses that to diagnose the failure mode, route it to a
+treatment, and verify what it ships. The attribution is the moat — it's why the
+tool can explain *why* a quant hurts and check the model it actually serves,
+where a blind auto-quantizer can't. The same engine doubles as a standalone
+**numerical-parity CI gate**.
 
 | Surface | The question it answers | Maturity |
 | --- | --- | --- |
+| **`firefly optimize`** — model + bar → servable faster model | Quantize to a memory/QPS target, pick the treatment, and prove the served speedup + quality | **Built & GPU-validated** end-to-end (select → export compressed-tensors → benchmark → re-eval) |
+| **Quantization diagnosis** — `quant-diff` / `quant-sensitivity` / `quant-recipe` / `quant-diagnose` | *Which* layers does a quantized build break, what treats it, which to keep in higher precision? | **Built & verified** — routes a detected failure mode to the intervention that treats it (activation-outliers → SmoothQuant; single-unit-dominance → mixed precision), gated on a real eval. A *general* technique-search agent is aspirational |
 | **Parity CI gate** — `firefly check` + GitHub Action | Did a kernel swap / dep bump / serving-stack drift silently change my model's activations? | **Shipped** — on the Marketplace, validated across 9 models / 8 families |
-| **Quantization diagnosis** — `quant-diff` / `quant-sensitivity` / `quant-recipe` / `quant-diagnose` | *Which* layers does my quantized build break, what treats it, and which do I keep in higher precision? | **Built & verified** — diagnosis routes a detected failure mode to the intervention that treats it (activation-outliers → SmoothQuant; single-unit-dominance → mixed precision), verified against a real eval. A *general* technique-search agent is aspirational |
-| **Shadow mode** — `firefly.shadow` | What are a *live production* model's internals doing? (survives `torch.compile` + CUDA graphs) | **Experimental mechanism** — GPU-validated but not deployed anywhere; overhead unmeasured |
+
+## Optimize: model + bar → a servable, faster model
+
+`firefly optimize` is the end-to-end command. It **selects** a recipe (diagnose →
+route the failure mode to a treatment → measurement-gate it against plain quant),
+**exports** the deployable recipe to a portable [compressed-tensors](https://github.com/neuralmagic/compressed-tensors)
+checkpoint a serving engine loads, **benchmarks** the served artifact's real
+QPS/memory, and **re-evaluates** the served model's quality — then checks your
+bar against the model it actually ships.
+
+```bash
+firefly optimize -m Qwen/Qwen2.5-1.5B-Instruct -i calib.json --eval eval.json \
+    --scheme int8wo --quality-bar 0.05 --device cuda --dtype bfloat16 \
+    --out-dir ./optimized --benchmark
+```
+
+```
+optimize Qwen/Qwen2.5-1.5B-Instruct  (scheme=int8wo)
+diagnosis: activation_outliers ×61, salient_weight_channels ×5
+ship: plain int8wo  —  perplexity fp 9.38 → shipped 9.48 (+1.1% vs fp, torchao)
+served: compressed-tensors perplexity 9.63 (+2.7% vs fp)  Δ +0.14 vs torchao
+MEETS BAR (≤ 5.0% vs fp, served)
+cost: ~2.0× smaller weights (est)  •  measured: decode 3567 tok/s, 1779 MB weights
+deployable: ./optimized (W8A16)   serve: vllm serve ./optimized
+```
+
+Three design calls keep it honest:
+
+- **It ships only what it can actually serve.** If the *quality-optimal* recipe
+  (e.g. SmoothQuant, AWQ) isn't directly servable yet, it ships the uniform
+  scheme and reports the better recipe's extra recovery as *headroom* — never a
+  checkpoint that serves something it didn't measure.
+- **It measures what it ships, not a proxy.** Selection runs on a torchao model
+  but deployment is compressed-tensors. `--reeval` (default on) re-scores the
+  *served* checkpoint and checks the bar against it. The two backends agree for
+  int8 (Δ ~2%); for int4 they diverge ~29% — so the re-eval is load-bearing.
+- **The cost axis is measured, not estimated.** `--benchmark` reports real
+  decode/prefill throughput + memory from vLLM (weight quant helps memory-bound
+  decode but can cost compute-bound prefill — a regime split only measurement
+  reveals).
+
+Two backends with one job: **torchao** is the measurement backend (it has the
+per-layer filters and activation hooks the diagnosis needs); **compressed-tensors**
+is the deployment backend (vLLM-native, portable). A recipe is just a scheme +
+which layers — measured by one, served by the other.
 
 ## Parity CI gate
 
@@ -318,12 +378,12 @@ is more honest than `source="calibrated"` numbers that measured nothing.
 | `compare.py` | Per-tap diff with effective-atol composition |
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
-| `quant/` | Quantization surface on the engine. **Interventions** (the seam): `intervention.py` (PrecisionPolicy + Pipeline + RTN), `smoothquant.py`, `awq.py`. **Sensors/analysis**: `torchao.py` (real w8a8/int4wo + preflight), `risk.py`, `sensitivity.py` (per-unit), `salience.py` (AWQ signal), `cost.py` (memory/Pareto/budget), `evaluate.py` (perplexity + accuracy bar). **Recipe/agent**: `recipe.py`+`bar.py` (curves), `recipe_io.py` (serialize/apply a recipe), `diagnose.py`+`route.py` (diagnosis→recipe), `auto.py` (deterministic auto-quant), `step.py` (agent step primitive), `llm.py`+`search.py` (LLM proposer harness) |
+| `quant/` | Quantization surface on the engine. **Orchestration**: `optimize.py` (the end-to-end select→export→benchmark→re-eval), `auto.py` (deterministic auto-quant), `deploy.py` (recipe → portable compressed-tensors checkpoint + serve command). **Interventions** (the seam): `intervention.py` (PrecisionPolicy + Pipeline + RTN), `smoothquant.py`, `awq.py`. **Sensors/analysis**: `torchao.py` (real w8a8/int8wo/int4wo + preflight), `risk.py`, `sensitivity.py` (per-unit), `salience.py` (AWQ signal), `cost.py` (memory/Pareto/budget), `evaluate.py` (perplexity + accuracy bar). **Recipe/agent**: `recipe.py`+`bar.py` (curves), `recipe_io.py` (serialize/apply a recipe), `diagnose.py`+`route.py` (diagnosis→recipe), `step.py` (agent step primitive), `llm.py`+`search.py` (LLM proposer harness) |
+| `bench/` | Measured serving cost behind one interface: real decode/prefill throughput + memory via `vllm.py` / `sglang.py` (CUDA graphs on — the opposite of the eager capture runner) |
 | `op_drill.py` | Op-level drill-down (engine attribution rung): `TorchDispatchMode` scoped to a module → first diverging ATen op |
-| `shadow/` | Shadow-mode capture package: custom ops + Triton kernel + Tappers + sinks that survive torch.compile and CUDA graphs |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
-| `cli/` | Flat `firefly` command surface in command modules (parity / quant / drill): capture / calibrate / check / quant-risk / quant-diff / quant-sensitivity / quant-recipe / op-diff / publish |
+| `cli/` | Flat `firefly` command surface in command modules (parity / quant / drill): optimize / capture / calibrate / check / quant-auto / quant-diff / quant-sensitivity / quant-recipe / op-diff / publish |
 | `action.yml` | GitHub Action wrapper for `firefly check` and `quant-diff` (`mode:` input) |
 | `scripts/capture_vllm.py` | Modal harness around the vLLM runner (multi-version blog repros) |
 | `scripts/plot_validation.py` | Diff and magnitude figures for the writeup |
@@ -375,14 +435,9 @@ changed upstream.
   granularity)
 - **Op-level drill-down** (`firefly op-diff`) — a `TorchDispatchMode` scoped to
   a flagged module finds the first ATen op where two runs diverge
-- **Shadow-mode capture mechanism** (`firefly.shadow`) — custom ops + a
-  Triton kernel that survive `torch.compile` and CUDA-graph replay, with
-  local and S3/GCS/Azure streaming sinks. This is a *mechanism*, not yet a
-  product: it's unit-tested and passes a synthetic-model integration test,
-  but overhead is unmeasured and it hasn't been run against a real serving
-  stack. It targets teams that can instrument their **own** torch model
-  (`instrument()` / `@tap`) — vLLM and SGLang own their model forward, so
-  this does not capture from those engines.
+- **Servable recovery recipes** — wire llm-compressor's SmoothQuant / AWQ
+  modifiers into the export so the *recovery* recipes (not just uniform quant)
+  ship as compressed-tensors checkpoints
 - Recsys domain selector (TorchRec / DLRM / DCN-v2 tap conventions)
 
 **Planned:**

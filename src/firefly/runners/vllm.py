@@ -12,8 +12,7 @@ clear error if vLLM is missing.
 Capture mechanics (unchanged from the validated script):
 
 * Load with ``enforce_eager=True`` so forward hooks fire (CUDA graphs would
-  skip them). Fine for a CI diagnostic; the always-on shadow path is
-  ``firefly.shadow`` instead.
+  skip them). Fine for a CI diagnostic / a capture pass.
 * Hooks store ``.detach()`` only; a single bulk d2h at drain time.
 * The register/drain/probe functions are module-level so they pickle cleanly
   to vLLM's worker (``collective_rpc`` on V1, ``apply_model`` on V0).

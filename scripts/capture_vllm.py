@@ -13,11 +13,9 @@ Add a new version by extending ``_VLLM_VERSIONS`` and registering a new
 Design notes:
 
   * Loaded with ``enforce_eager=True`` to disable CUDA graphs, otherwise
-    forward hooks force graph breaks. Acceptable for the CI diagnostic
-    use case; not acceptable for shadow-mode capture against production
-    traffic — that path uses the CUDA-graph-safe custom op in
-    ``firefly.shadow`` (``capture_static``), which this CI script does
-    not wire up.
+    forward hooks force graph breaks. Acceptable for the CI diagnostic /
+    capture use case (a candidate-vs-reference comparison), which is what
+    this script does.
   * Hooks store ``.detach()`` only — tensors stay on GPU during forward,
     one bulk d2h via a second ``apply_model`` call at the end. Collapses
     ~90 per-tap sync points into 1.

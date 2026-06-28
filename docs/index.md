@@ -87,8 +87,8 @@ you can't ask a serving stack to drop CUDA graphs and torch.compile.
 That path needs a custom op that Dynamo treats as opaque
 (tensor-in/tensor-out) so it survives compilation, plus something that
 survives CUDA-graph replay, where there's no Python callback to hang a
-hook on at all. Both of those now exist in the repo
-(`firefly.shadow`): `torch.ops.firefly.capture` for the
+hook on at all. Both of those exist in a separate `shadow-mechanism`
+branch (`firefly.shadow`): `torch.ops.firefly.capture` for the
 eager/`torch.compile` path, and a Triton-kernel custom op
 (`capture_static`) that writes stats into a pre-allocated GPU buffer
 whose pointers get captured into the graph and re-run on every replay.
@@ -861,8 +861,9 @@ will miss most real upgrade-time bugs.
 - **Live shadow capture is a built mechanism, not a proven product.**
   Every number in this post came from eager-mode CI capture (forward hooks
   can't survive CUDA graphs). The CUDA-graph-safe custom op for capturing
-  against live compiled traffic exists in `firefly.shadow` and survives a
-  synthetic compiled model, but two things are open: I haven't measured its
+  against live compiled traffic exists in the `shadow-mechanism` branch
+  (`firefly.shadow`) and survives a synthetic compiled model, but two
+  things are open: I haven't measured its
   per-token overhead (the first question any latency-sensitive team asks),
   and I haven't run it against a real serving deployment. It's also
   structurally limited to models you instrument yourself — vLLM and SGLang
