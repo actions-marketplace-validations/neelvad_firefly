@@ -159,11 +159,23 @@ def optimize(
 
     _free_accelerator()
     max_model_len = None if bench_config is None else (bench_config.input_len + bench_config.output_len + 16)
-    artifact = export_deployable(ship_recipe, out_dir, max_model_len=max_model_len)
+    # A SmoothQuant recipe needs the calibration set at export time (it re-derives
+    # the smoothing scales) — feed the same texts the recipe was diagnosed on.
+    calib_texts = None
+    if any(p.get("name") == "smoothquant" for p in ship_recipe.pre_transforms):
+        import json
+        from pathlib import Path as _Path
+
+        calib_texts = json.loads(_Path(inputs_path).read_text()).get("texts")
+    artifact = export_deployable(
+        ship_recipe, out_dir, max_model_len=max_model_len,
+        calib_texts=calib_texts, calib_max_length=max_length,
+    )
     result["artifact"] = {
         "path": str(artifact.path),
         "compressed_tensors_scheme": artifact.compressed_tensors_scheme,
         "serve_command": artifact.serve_command,
+        "treatments": artifact.manifest.get("treatments"),
     }
 
     if reeval_quality:

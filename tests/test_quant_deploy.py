@@ -11,7 +11,6 @@ import pytest
 
 from firefly.quant.deploy import (
     DIRECTLY_DEPLOYABLE,
-    NEEDS_FOLDING,
     NOT_YET,
     DeployabilityError,
     classify_recipe,
@@ -47,16 +46,26 @@ class TestClassify:
         assert status == DIRECTLY_DEPLOYABLE
         assert ct in reason
 
-    def test_smoothquant_needs_folding(self):
+    def test_smoothquant_is_deployable(self):
+        # SmoothQuant now maps to llm-compressor's SmoothQuantModifier → servable.
         r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
         status, reason = classify_recipe(r)
-        assert status == NEEDS_FOLDING
+        assert status == DIRECTLY_DEPLOYABLE
         assert "SmoothQuant" in reason
 
-    def test_mixed_precision_not_yet(self):
+    def test_mixed_precision_is_deployable_via_ignore_list(self):
         status, reason = classify_recipe(_recipe(kept_fp=["model.layers.5.mlp.down_proj"]))
-        assert status == NOT_YET
-        assert "mixed precision" in reason
+        assert status == DIRECTLY_DEPLOYABLE
+        assert "fp-kept" in reason
+
+    def test_smoothquant_plus_mixed_precision_is_deployable(self):
+        r = _recipe(
+            kept_fp=["model.layers.5.mlp.down_proj"],
+            pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}],
+        )
+        status, reason = classify_recipe(r)
+        assert status == DIRECTLY_DEPLOYABLE
+        assert "SmoothQuant" in reason and "fp-kept" in reason
 
     def test_awq_not_yet(self):
         r = _recipe(quantizer={"name": "awq", "params": {"group_size": 128}})
@@ -64,13 +73,10 @@ class TestClassify:
         assert status == NOT_YET
         assert "AWQ" in reason
 
-    def test_smoothquant_reported_before_mixed_precision(self):
-        # A SmoothQuant + mixed-precision recipe surfaces the folding blocker first.
-        r = _recipe(
-            kept_fp=["model.layers.5.mlp.down_proj"],
-            pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}],
-        )
-        assert classify_recipe(r)[0] == NEEDS_FOLDING
+    def test_unmapped_pre_transform_not_yet(self):
+        status, reason = classify_recipe(_recipe(pre=[{"name": "magic-transform", "params": {}}]))
+        assert status == NOT_YET
+        assert "magic-transform" in reason
 
     def test_unknown_scheme_not_yet(self):
         status, _ = classify_recipe(_recipe(scheme="fp6"))
@@ -89,12 +95,16 @@ class TestServeCommand:
         assert "--max-model-len 4096" in serve_command(Path("/m"), max_model_len=4096)
 
 
-class TestExportRefusesUndeployable:
-    def test_export_raises_on_smoothquant(self, tmp_path):
-        r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
-        with pytest.raises(DeployabilityError, match="SmoothQuant"):
+class TestExportRefuses:
+    def test_export_raises_on_awq(self, tmp_path):
+        # AWQ is still NOT_YET → refused before any model load.
+        r = _recipe(quantizer={"name": "awq", "params": {"group_size": 128}})
+        with pytest.raises(DeployabilityError, match="AWQ"):
             export_deployable(r, tmp_path)
 
-    def test_export_raises_on_mixed_precision(self, tmp_path):
-        with pytest.raises(DeployabilityError, match="mixed precision"):
-            export_deployable(_recipe(kept_fp=["model.layers.5.mlp.down_proj"]), tmp_path)
+    def test_smoothquant_export_without_calib_raises(self, tmp_path):
+        # SmoothQuant is deployable, but its scales need calibration data — refuse
+        # clearly rather than silently exporting a mis-calibrated checkpoint.
+        r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
+        with pytest.raises(DeployabilityError, match="calibration"):
+            export_deployable(r, tmp_path)

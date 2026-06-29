@@ -16,35 +16,36 @@ from firefly.quant.optimize import choose_ship_recipe, optimize
 from firefly.quant.recipe_io import Recipe, serialize_intervention
 
 
-def _recipe(*, scheme="w8a8", pre=None) -> Recipe:
+def _recipe(*, scheme="w8a8", pre=None, quantizer="rtn") -> Recipe:
+    q = {"name": "awq", "params": {"group_size": 128}} if quantizer == "awq" \
+        else serialize_intervention(RTNQuantizer())
     return Recipe(
         model_id="m", scheme=scheme, group_size=128, granularity="layer",
-        quantize_fqns=[], kept_fp_fqns=[], pre_transforms=pre or [],
-        quantizer=serialize_intervention(RTNQuantizer()),
+        quantize_fqns=[], kept_fp_fqns=[], pre_transforms=pre or [], quantizer=q,
     )
 
 
-def _auto(*, accepted, routed_pre=None, fp=10.0, plain=15.0, routed=11.0) -> dict:
+def _auto(*, accepted, routed_pre=None, routed_quantizer="rtn", fp=10.0, plain=15.0, routed=11.0) -> dict:
     return {
-        "recipe_obj": _recipe(pre=routed_pre),
+        "recipe_obj": _recipe(pre=routed_pre, quantizer=routed_quantizer),
         "accepted": accepted,
         "recovery": 0.8,
         "perplexity": {"fp": fp, "plain": plain, "routed": routed},
-        "recipe": {"quantizer": "rtn", "pre_transforms": [p["name"] for p in (routed_pre or [])]},
+        "recipe": {"quantizer": routed_quantizer, "pre_transforms": [p["name"] for p in (routed_pre or [])]},
         "diagnosis_summary": {"ACTIVATION_OUTLIERS": 3},
     }
 
 
 class TestChooseShipRecipe:
     def test_ships_routed_when_accepted_and_deployable(self):
-        # routed is plain uniform RTN (no pre-transform) → deployable.
-        auto = _auto(accepted=True)
+        # routed is a SmoothQuant recipe — now directly deployable, so we ship it.
+        auto = _auto(accepted=True, routed_pre=[{"name": "smoothquant", "params": {}}])
         recipe, kind, ppl = choose_ship_recipe(auto, "m", "w8a8", 128)
         assert kind == "routed" and ppl == 11.0
 
     def test_ships_plain_when_routed_not_deployable(self):
-        # routed uses SmoothQuant → not directly deployable → fall back to uniform.
-        auto = _auto(accepted=True, routed_pre=[{"name": "smoothquant", "params": {}}])
+        # routed uses AWQ → not directly deployable yet → fall back to uniform.
+        auto = _auto(accepted=True, routed_quantizer="awq")
         recipe, kind, ppl = choose_ship_recipe(auto, "m", "w8a8", 128)
         assert kind == "plain" and ppl == 15.0
 
@@ -69,10 +70,11 @@ class TestOptimizePlan:
         assert optimize("m", "i", ["t"], quality_bar=0.4)["meets_bar"] is False
 
     def test_headroom_when_better_recipe_not_servable(self, monkeypatch):
-        auto = _auto(accepted=True, routed_pre=[{"name": "smoothquant", "params": {}}], routed=10.5)
+        # AWQ recovers but isn't servable yet → reported as headroom, not shipped.
+        auto = _auto(accepted=True, routed_quantizer="awq", routed=10.5)
         monkeypatch.setattr(optmod, "auto_quant", lambda *a, **k: auto)
         h = optimize("m", "i", ["t"])["headroom"]
-        assert h is not None and "smoothquant" in h["pre_transforms"]
+        assert h is not None and h["recipe"] == "awq"
         assert h["perplexity"] == 10.5
 
     def test_no_headroom_when_shipping_the_winner(self, monkeypatch):
@@ -157,6 +159,7 @@ class TestCrossBackendReeval:
 def test_render_optimize_smoke(monkeypatch):
     from firefly.report import render_optimize
 
-    monkeypatch.setattr(optmod, "auto_quant", lambda *a, **k: _auto(accepted=True, routed_pre=[{"name": "smoothquant", "params": {}}]))
+    # AWQ routed → reported as headroom (not yet servable), so the render shows it.
+    monkeypatch.setattr(optmod, "auto_quant", lambda *a, **k: _auto(accepted=True, routed_quantizer="awq"))
     text = render_optimize(optimize("m", "i", ["t"], scheme="w8a8", quality_bar=0.05))
     assert "optimize" in text and "ship:" in text and "headroom" in text
