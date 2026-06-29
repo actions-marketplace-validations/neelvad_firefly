@@ -14,7 +14,8 @@ from firefly.storage import publish_reference, resolve_reference
 
 app = typer.Typer(
     name="firefly",
-    help="Numerical-parity CI gate for ML model deployments.",
+    help="Diagnose, quantize, and ship a faster servable model (firefly optimize) "
+    "— on a numerical-divergence attribution engine that also runs as a parity CI gate.",
     no_args_is_help=True,
 )
 

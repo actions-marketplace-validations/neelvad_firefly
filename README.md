@@ -5,9 +5,11 @@
 
 **Firefly turns a model into a faster, servable one — and proves it.** Give it a
 model, a calibration set, an eval set, and a quality bar; it diagnoses where
-quantization would hurt, applies the treatment that fits, exports a portable
-checkpoint a serving engine loads, and **measures the real speedup, memory, and
-served quality** before it hands the model back.
+quantization would hurt, exports a portable quantized checkpoint a serving engine
+loads, and **measures the real speedup, memory, and served quality** before it
+hands the model back. The directly-exportable path today is uniform quantization;
+when a recovery treatment (SmoothQuant, AWQ) would beat it, Firefly measures and
+reports that gain as *headroom* — shipping those recovery recipes is the next step.
 
 ```bash
 firefly optimize -m Qwen/Qwen2.5-1.5B-Instruct -i calib.json --eval eval.json \
@@ -379,7 +381,7 @@ is more honest than `source="calibrated"` numbers that measured nothing.
 | `attribution.py` | Forward-order walk → first divergent tap |
 | `head_attribution.py` | Per-attention-head drill-down: which head diverged, how concentrated |
 | `quant/` | Quantization surface on the engine. **Orchestration**: `optimize.py` (the end-to-end select→export→benchmark→re-eval), `auto.py` (deterministic auto-quant), `deploy.py` (recipe → portable compressed-tensors checkpoint + serve command). **Interventions** (the seam): `intervention.py` (PrecisionPolicy + Pipeline + RTN), `smoothquant.py`, `awq.py`. **Sensors/analysis**: `torchao.py` (real w8a8/int8wo/int4wo + preflight), `risk.py`, `sensitivity.py` (per-unit), `salience.py` (AWQ signal), `cost.py` (memory/Pareto/budget), `evaluate.py` (perplexity + accuracy bar). **Recipe/agent**: `recipe.py`+`bar.py` (curves), `recipe_io.py` (serialize/apply a recipe), `diagnose.py`+`route.py` (diagnosis→recipe), `step.py` (agent step primitive), `llm.py`+`search.py` (LLM proposer harness) |
-| `bench/` | Measured serving cost behind one interface: real decode/prefill throughput + memory via `vllm.py` / `sglang.py` (CUDA graphs on — the opposite of the eager capture runner) |
+| `bench/` | Measured serving cost behind one interface: real decode/prefill throughput + memory, CUDA graphs on (opposite of the eager capture runner). `vllm.py` is GPU-validated; `sglang.py` is experimental (throughput-only; worker-memory not wired, unvalidated) |
 | `op_drill.py` | Op-level drill-down (engine attribution rung): `TorchDispatchMode` scoped to a module → first diverging ATen op |
 | `storage.py` | Reference resolution/publish for `hf://`, `s3://`, `gs://`, `az://` |
 | `report.py` | Rich-terminal table + markdown PR-comment formatter |
@@ -435,9 +437,23 @@ changed upstream.
   granularity)
 - **Op-level drill-down** (`firefly op-diff`) — a `TorchDispatchMode` scoped to
   a flagged module finds the first ATen op where two runs diverge
-- **Servable recovery recipes** — wire llm-compressor's SmoothQuant / AWQ
-  modifiers into the export so the *recovery* recipes (not just uniform quant)
-  ship as compressed-tensors checkpoints
+- **End-to-end `firefly optimize`** — model + quality bar → diagnose → route →
+  measurement-gate → export a portable **compressed-tensors** checkpoint
+  (`deploy.py`) → **benchmark** the served artifact's real QPS/memory (`bench/`,
+  vLLM) → **re-eval** the served model's quality (the bar is checked on what
+  ships, not a proxy). GPU-validated. Directly-exportable schemes today: uniform
+  w8a8 / int8wo / int4wo (RTN)
+
+**Next:**
+
+- **Servable recovery recipes** *(the main unlock)* — wire llm-compressor's
+  SmoothQuant / AWQ / ignore-list modifiers into the export so the *recovery*
+  recipes ship as compressed-tensors checkpoints. Today the diagnosis
+  selects/reports recovery, but the exported artifact falls back to uniform quant
+  when the optimal recipe isn't yet servable — closing that is the highest-value
+  next step
+- **Evidence breadth** — bigger eval sets + a downstream task metric + 3–5
+  architecture comparisons (more valuable now than another subsystem)
 - Recsys domain selector (TorchRec / DLRM / DCN-v2 tap conventions)
 
 **Planned:**
