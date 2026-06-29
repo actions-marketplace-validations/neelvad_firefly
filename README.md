@@ -7,9 +7,9 @@
 model, a calibration set, an eval set, and a quality bar; it diagnoses where
 quantization would hurt, exports a portable quantized checkpoint a serving engine
 loads, and **measures the real speedup, memory, and served quality** before it
-hands the model back. The directly-exportable path today is uniform quantization;
-when a recovery treatment (SmoothQuant, AWQ) would beat it, Firefly measures and
-reports that gain as *headroom* — shipping those recovery recipes is the next step.
+hands the model back. For **int4** it applies and serves the recovery (GPTQ, or
+AWQ when the diagnosis routes there) — GPU-validated to recover ~80–96% of int4
+degradation *in the served model*; int8 weight-only serves cleanly as-is.
 
 ```bash
 firefly optimize -m Qwen/Qwen2.5-1.5B-Instruct -i calib.json --eval eval.json \
@@ -62,14 +62,16 @@ deployable: ./optimized (W8A16)   serve: vllm serve ./optimized
 
 Three design calls keep it honest:
 
-- **It ships only what it can actually serve.** If the *quality-optimal* recipe
-  (e.g. SmoothQuant, AWQ) isn't directly servable yet, it ships the uniform
-  scheme and reports the better recipe's extra recovery as *headroom* — never a
-  checkpoint that serves something it didn't measure.
+- **It ships the recovery that actually serves.** int4 exports via GPTQ/AWQ
+  (validated to recover ~80–96% when served). Where a recovery *doesn't* transfer
+  to the deployment backend — w8a8 SmoothQuant is a measured no-op in
+  compressed-tensors, its torchao "recovery" an artifact — it says so rather than
+  shipping a false win; for int8, w8a8 has no servable recovery so ship the
+  already-clean int8wo.
 - **It measures what it ships, not a proxy.** Selection runs on a torchao model
   but deployment is compressed-tensors. `--reeval` (default on) re-scores the
-  *served* checkpoint and checks the bar against it. The two backends agree for
-  int8 (Δ ~2%); for int4 they diverge ~29% — so the re-eval is load-bearing.
+  *served* checkpoint and checks the bar against it — this is exactly what caught
+  the w8a8 SmoothQuant non-transfer, and why int4's served recovery is trusted.
 - **The cost axis is measured, not estimated.** `--benchmark` reports real
   decode/prefill throughput + memory from vLLM (weight quant helps memory-bound
   decode but can cost compute-bound prefill — a regime split only measurement
@@ -441,19 +443,21 @@ changed upstream.
   measurement-gate → export a portable **compressed-tensors** checkpoint
   (`deploy.py`) → **benchmark** the served artifact's real QPS/memory (`bench/`,
   vLLM) → **re-eval** the served model's quality (the bar is checked on what
-  ships, not a proxy). GPU-validated. Directly-exportable schemes today: uniform
-  w8a8 / int8wo / int4wo (RTN)
+  ships, not a proxy). GPU-validated.
+- **Servable int4 recovery** — int4 exports via GPTQ (or AWQ when routed),
+  GPU-validated to recover ~80–96% of int4 degradation *in the served model*
+  (plain int4 RTN serves at +113% perplexity; GPTQ ~+5%). int8 weight-only
+  serves clean as-is. *Finding:* w8a8 SmoothQuant recovery does **not** transfer
+  to compressed-tensors serving (a torchao-measurement artifact, a no-op when
+  served) — the re-eval gate catches it; so w8a8 isn't a recoverable serving
+  scheme and Firefly ships int8wo for int8 instead.
 
 **Next:**
 
-- **Servable recovery recipes** *(the main unlock)* — wire llm-compressor's
-  SmoothQuant / AWQ / ignore-list modifiers into the export so the *recovery*
-  recipes ship as compressed-tensors checkpoints. Today the diagnosis
-  selects/reports recovery, but the exported artifact falls back to uniform quant
-  when the optimal recipe isn't yet servable — closing that is the highest-value
-  next step
 - **Evidence breadth** — bigger eval sets + a downstream task metric + 3–5
   architecture comparisons (more valuable now than another subsystem)
+- **AWQ for non-int4 + multi-scheme search** — broaden the recovery wiring and
+  let `optimize` pick the bar-meeting scheme at best cost across {int8wo, int4}
 - Recsys domain selector (TorchRec / DLRM / DCN-v2 tap conventions)
 
 **Planned:**
