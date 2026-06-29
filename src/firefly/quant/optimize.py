@@ -31,6 +31,7 @@ from firefly.quant.deploy import (
     classify_recipe,
     evaluate_deployed,
     export_deployable,
+    export_method,
 )
 from firefly.quant.intervention import RTNQuantizer
 from firefly.quant.recipe_io import Recipe, serialize_intervention
@@ -159,10 +160,10 @@ def optimize(
 
     _free_accelerator()
     max_model_len = None if bench_config is None else (bench_config.input_len + bench_config.output_len + 16)
-    # A SmoothQuant recipe needs the calibration set at export time (it re-derives
-    # the smoothing scales) — feed the same texts the recipe was diagnosed on.
+    # int4 export (GPTQ/AWQ) re-derives its corrections from calibration, so feed
+    # the same texts the recipe was diagnosed on; int8 RTN needs none.
     calib_texts = None
-    if any(p.get("name") == "smoothquant" for p in ship_recipe.pre_transforms):
+    if export_method(ship_recipe) in ("gptq", "awq"):
         import json
         from pathlib import Path as _Path
 

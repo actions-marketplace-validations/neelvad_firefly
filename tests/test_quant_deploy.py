@@ -15,6 +15,7 @@ from firefly.quant.deploy import (
     DeployabilityError,
     classify_recipe,
     export_deployable,
+    export_method,
     serve_command,
 )
 from firefly.quant.intervention import RTNQuantizer
@@ -34,49 +35,53 @@ def _recipe(*, scheme="int8wo", kept_fp=None, pre=None, quantizer=None) -> Recip
     )
 
 
+class TestExportMethod:
+    def test_int4_rtn_maps_to_gptq(self):
+        # plain int4 RTN serves wrecked (+113%); GPTQ recovers ~96% → int4 uses GPTQ.
+        assert export_method(_recipe(scheme="int4wo")) == "gptq"
+
+    def test_int4_awq_maps_to_awq(self):
+        r = _recipe(scheme="int4wo", quantizer={"name": "awq", "params": {"group_size": 128}})
+        assert export_method(r) == "awq"
+
+    @pytest.mark.parametrize("scheme", ["w8a8", "int8wo"])
+    def test_int8_maps_to_rtn(self, scheme):
+        assert export_method(_recipe(scheme=scheme)) == "rtn"
+
+
 class TestClassify:
     @pytest.mark.parametrize(
-        "scheme,ct", [("int8wo", "W8A16"), ("int4wo", "W4A16"), ("w8a8", "W8A8")]
+        "scheme,ct,method", [("int8wo", "W8A16", "RTN"), ("w8a8", "W8A8", "RTN"), ("int4wo", "W4A16", "GPTQ")]
     )
-    def test_uniform_rtn_schemes_are_directly_deployable(self, scheme, ct):
-        # All three uniform RTN schemes map to a compressed-tensors preset and
-        # serve — including w8a8, which torchao's save_pretrained couldn't
-        # serialize but compressed-tensors handles cleanly.
+    def test_schemes_are_directly_deployable_with_method(self, scheme, ct, method):
         status, reason = classify_recipe(_recipe(scheme=scheme))
         assert status == DIRECTLY_DEPLOYABLE
-        assert ct in reason
+        assert ct in reason and method in reason
 
-    def test_smoothquant_is_deployable(self):
-        # SmoothQuant now maps to llm-compressor's SmoothQuantModifier → servable.
-        r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
+    def test_int4_awq_is_deployable(self):
+        r = _recipe(scheme="int4wo", quantizer={"name": "awq", "params": {"group_size": 128}})
         status, reason = classify_recipe(r)
         assert status == DIRECTLY_DEPLOYABLE
-        assert "SmoothQuant" in reason
+        assert "AWQ" in reason
+
+    def test_smoothquant_pre_transform_is_dropped_still_deployable(self):
+        # SmoothQuant is a no-op for serving → dropped, recipe deploys by scheme.
+        r = _recipe(scheme="w8a8", pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
+        status, reason = classify_recipe(r)
+        assert status == DIRECTLY_DEPLOYABLE
+        assert "RTN" in reason  # ships as plain w8a8; SmoothQuant not mentioned
 
     def test_mixed_precision_is_deployable_via_ignore_list(self):
         status, reason = classify_recipe(_recipe(kept_fp=["model.layers.5.mlp.down_proj"]))
         assert status == DIRECTLY_DEPLOYABLE
         assert "fp-kept" in reason
 
-    def test_smoothquant_plus_mixed_precision_is_deployable(self):
-        r = _recipe(
-            kept_fp=["model.layers.5.mlp.down_proj"],
-            pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}],
-        )
-        status, reason = classify_recipe(r)
-        assert status == DIRECTLY_DEPLOYABLE
-        assert "SmoothQuant" in reason and "fp-kept" in reason
-
-    def test_awq_not_yet(self):
-        r = _recipe(quantizer={"name": "awq", "params": {"group_size": 128}})
+    def test_awq_on_non_int4_not_yet(self):
+        # AWQ recovery is wired for int4 only.
+        r = _recipe(scheme="int8wo", quantizer={"name": "awq", "params": {"group_size": 128}})
         status, reason = classify_recipe(r)
         assert status == NOT_YET
-        assert "AWQ" in reason
-
-    def test_unmapped_pre_transform_not_yet(self):
-        status, reason = classify_recipe(_recipe(pre=[{"name": "magic-transform", "params": {}}]))
-        assert status == NOT_YET
-        assert "magic-transform" in reason
+        assert "int4" in reason
 
     def test_unknown_scheme_not_yet(self):
         status, _ = classify_recipe(_recipe(scheme="fp6"))
@@ -96,15 +101,14 @@ class TestServeCommand:
 
 
 class TestExportRefuses:
-    def test_export_raises_on_awq(self, tmp_path):
-        # AWQ is still NOT_YET → refused before any model load.
-        r = _recipe(quantizer={"name": "awq", "params": {"group_size": 128}})
-        with pytest.raises(DeployabilityError, match="AWQ"):
+    def test_export_raises_on_awq_non_int4(self, tmp_path):
+        # AWQ on a non-int4 scheme is NOT_YET → refused before any model load.
+        r = _recipe(scheme="int8wo", quantizer={"name": "awq", "params": {"group_size": 128}})
+        with pytest.raises(DeployabilityError, match="int4"):
             export_deployable(r, tmp_path)
 
-    def test_smoothquant_export_without_calib_raises(self, tmp_path):
-        # SmoothQuant is deployable, but its scales need calibration data — refuse
-        # clearly rather than silently exporting a mis-calibrated checkpoint.
-        r = _recipe(pre=[{"name": "smoothquant", "params": {"alpha": 0.5}}])
+    def test_int4_export_without_calib_raises(self, tmp_path):
+        # int4 GPTQ/AWQ derive corrections from calibration — refuse clearly rather
+        # than silently exporting an uncalibrated (wrecked) int4 checkpoint.
         with pytest.raises(DeployabilityError, match="calibration"):
-            export_deployable(r, tmp_path)
+            export_deployable(_recipe(scheme="int4wo"), tmp_path)

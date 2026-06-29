@@ -57,48 +57,47 @@ class DeployabilityError(RuntimeError):
     raised with the reason + what would make it deployable."""
 
 
-#: pre-transforms with a compressed-tensors export mapping. SmoothQuant maps to
-#: llm-compressor's SmoothQuantModifier (calibration-driven), so it's servable;
-#: anything else has no mapping yet.
-_DEPLOYABLE_PRE_TRANSFORMS = {"smoothquant"}
+def export_method(recipe: Recipe) -> str:
+    """The llm-compressor weight-quant method this recipe maps to.
+
+    GPU-validated recovery picture (Qwen2.5-1.5B): plain int4 RTN is wrecked
+    (+113% perplexity) but **GPTQ recovers it ~96% when served** (AWQ ~94%); int8
+    schemes serve fine on RTN; and SmoothQuant is a *no-op* for compressed-tensors
+    W8A8 (its recovery was a torchao-measurement artifact). So int4 always uses a
+    calibration-based method (AWQ if the recipe routed to it, else GPTQ); int8
+    uses RTN; SmoothQuant pre-transforms are dropped (no servable effect).
+    """
+    if recipe.scheme == "int4wo":
+        return "awq" if recipe.quantizer.get("name") == "awq" else "gptq"
+    return "rtn"
 
 
 def classify_recipe(recipe: Recipe) -> tuple[str, str]:
     """``(status, human reason)`` — which deployability bucket the recipe is in.
 
-    Deployable today via llm-compressor: a compressed-tensors scheme (RTN)
-    optionally with a **SmoothQuant** pre-transform (→ SmoothQuantModifier) and/or
-    **kept-fp Linears** (→ an ignore-list, i.e. mixed precision). AWQ still needs
-    its own modifier wiring. Order matters — report the blocker the user must
-    resolve first.
+    Deployable via llm-compressor: int8wo / w8a8 (RTN) and int4wo (GPTQ, or AWQ
+    when the recipe routed there), each optionally with kept-fp Linears (an
+    ignore-list = mixed precision). int4 needs a calibration set. AWQ is wired for
+    int4 only. SmoothQuant pre-transforms are accepted but *dropped* (proven a
+    no-op for serving), so they never block or drive deployability.
     """
     quant_name = recipe.quantizer.get("name")
-    if quant_name == "awq":
+    if quant_name == "awq" and recipe.scheme != "int4wo":
         return NOT_YET, (
-            "AWQ needs llm-compressor's AWQModifier in the export path (a separate "
-            "wiring); this path covers RTN schemes, optionally with SmoothQuant "
-            "and/or mixed precision."
+            f"AWQ recovery is wired for int4 (W4A16) only, not scheme={recipe.scheme!r}."
         )
-    pre_names = [p.get("name") for p in recipe.pre_transforms]
-    unmapped = [n for n in pre_names if n not in _DEPLOYABLE_PRE_TRANSFORMS]
-    if unmapped:
+    if recipe.scheme not in _COMPRESSED_TENSORS_SCHEME or quant_name not in ("rtn", "awq"):
         return NOT_YET, (
-            f"pre-transform(s) {unmapped} have no compressed-tensors mapping yet "
-            "(SmoothQuant is the supported recovery pre-transform)."
+            f"no deployable path for scheme={recipe.scheme!r} quantizer={quant_name!r}."
         )
-    if recipe.scheme in _COMPRESSED_TENSORS_SCHEME and quant_name == "rtn":
-        extras = []
-        if "smoothquant" in pre_names:
-            extras.append("SmoothQuant")
-        if recipe.kept_fp_fqns:
-            extras.append(f"{len(recipe.kept_fp_fqns)} fp-kept")
-        detail = f" + {', '.join(extras)}" if extras else ""
-        return DIRECTLY_DEPLOYABLE, (
-            f"{recipe.scheme} (RTN){detail} → compressed-tensors "
-            f"{_COMPRESSED_TENSORS_SCHEME[recipe.scheme]}, loads in vLLM."
-        )
-    return NOT_YET, (
-        f"no deployable path for scheme={recipe.scheme!r} quantizer={quant_name!r}."
+    method = export_method(recipe).upper()
+    extras = []
+    if recipe.kept_fp_fqns:
+        extras.append(f"{len(recipe.kept_fp_fqns)} fp-kept")
+    detail = f" + {', '.join(extras)}" if extras else ""
+    return DIRECTLY_DEPLOYABLE, (
+        f"{recipe.scheme} ({method}){detail} → compressed-tensors "
+        f"{_COMPRESSED_TENSORS_SCHEME[recipe.scheme]}, loads in vLLM."
     )
 
 
@@ -125,17 +124,12 @@ def serve_command(path: Path, *, max_model_len: int | None = None) -> str:
     return " ".join(parts)
 
 
-def _smoothquant_spec(recipe: Recipe) -> dict | None:
-    """The SmoothQuant pre-transform's serialized dict, or ``None``."""
-    return next((p for p in recipe.pre_transforms if p.get("name") == "smoothquant"), None)
-
-
 def _build_calib_dataset(model_id: str, texts: list[str], max_length: int):
     """A pre-tokenized HF dataset for llm-compressor's calibration forward pass.
 
-    SmoothQuant derives its per-channel smoothing scales from activation stats, so
-    it needs calibration data — we feed the *same* texts the recipe was diagnosed
-    on (faithful to what we measured), pre-tokenized so oneshot doesn't have to
+    GPTQ/AWQ derive their corrections from activation stats, so they need
+    calibration data — we feed the *same* texts the recipe was diagnosed on
+    (faithful to what we measured), pre-tokenized so oneshot doesn't have to
     guess a text column.
     """
     from datasets import Dataset
@@ -146,6 +140,21 @@ def _build_calib_dataset(model_id: str, texts: list[str], max_length: int):
     return Dataset.from_list(
         [{"input_ids": r["input_ids"], "attention_mask": r["attention_mask"]} for r in rows]
     )
+
+
+def _quant_modifier(recipe: Recipe, method: str, ct_scheme: str, ignore: list[str]):
+    """The llm-compressor weight-quant modifier for the recipe's method."""
+    if method == "gptq":
+        from llmcompressor.modifiers.quantization import GPTQModifier
+
+        return GPTQModifier(targets="Linear", scheme=ct_scheme, ignore=ignore)
+    if method == "awq":
+        from llmcompressor.modifiers.awq import AWQModifier
+
+        return AWQModifier(targets="Linear", scheme=ct_scheme, ignore=ignore)
+    from llmcompressor.modifiers.quantization import QuantizationModifier
+
+    return QuantizationModifier(targets="Linear", scheme=ct_scheme, ignore=ignore)
 
 
 def export_deployable(
@@ -163,64 +172,58 @@ def export_deployable(
     :class:`DeployabilityError` with the reason from :func:`classify_recipe`
     (rather than writing a checkpoint that serves something we didn't measure).
 
-    The recipe maps to an llm-compressor one-shot pipeline:
-
-    * a ``QuantizationModifier`` for the scheme (weight-only W8A16/W4A16, or W8A8
-      with dynamic activations), with ``lm_head`` **plus any kept-fp Linears** in
-      the ignore-list (that ignore-list *is* mixed precision);
-    * an optional ``SmoothQuantModifier`` (when the recipe carries a SmoothQuant
-      pre-transform) — the recovery treatment, now served rather than reported as
-      headroom. It needs ``calib_texts`` (the diagnosis calibration set).
-
-    The output dir holds the packed safetensors + a ``firefly_serving.json``
-    manifest recording the scheme, treatments, serve command, and ``measured``.
+    The weight-quant method is chosen by :func:`export_method` from the
+    GPU-validated recovery picture: **int4 → GPTQ** (or AWQ when the recipe routed
+    there) — RTN int4 serves at +113% perplexity but GPTQ recovers it ~96%;
+    **int8 (w8a8 / int8wo) → RTN** (serves fine). ``lm_head`` plus any kept-fp
+    Linears go in the ignore-list (that ignore-list *is* mixed precision). int4
+    (GPTQ/AWQ) needs ``calib_texts``. SmoothQuant pre-transforms are **dropped** —
+    they're a no-op for compressed-tensors serving (its recovery was a
+    torchao-measurement artifact). The output dir holds the packed safetensors +
+    a ``firefly_serving.json`` manifest recording the method, serve command, and
+    ``measured``.
     """
     status, reason = classify_recipe(recipe)
     if status != DIRECTLY_DEPLOYABLE:
         raise DeployabilityError(f"{recipe.model_id}: {reason}")
 
-    sq = _smoothquant_spec(recipe)
-    if sq is not None and not calib_texts:
+    method = export_method(recipe)
+    needs_calib = method in ("gptq", "awq")
+    if needs_calib and not calib_texts:
         raise DeployabilityError(
-            f"{recipe.model_id}: SmoothQuant export needs calibration data — pass "
-            "calib_texts (the same set the recipe was diagnosed on)."
+            f"{recipe.model_id}: int4 {method.upper()} export needs calibration data — "
+            "pass calib_texts (the same set the recipe was diagnosed on)."
         )
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     ct_scheme = _COMPRESSED_TENSORS_SCHEME[recipe.scheme]
     ignore = ["lm_head", *sorted(recipe.kept_fp_fqns)]
+    dropped = [p["name"] for p in recipe.pre_transforms]  # SmoothQuant etc.: no servable effect
 
     from llmcompressor import oneshot
-    from llmcompressor.modifiers.quantization import QuantizationModifier
 
-    pipeline: list = []
-    if sq is not None:
-        from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
-
-        alpha = float(sq.get("params", {}).get("alpha", 0.5))
-        pipeline.append(SmoothQuantModifier(smoothing_strength=alpha))
-    pipeline.append(QuantizationModifier(targets="Linear", scheme=ct_scheme, ignore=ignore))
-
-    if sq is not None:
+    pipeline = [_quant_modifier(recipe, method, ct_scheme, ignore)]
+    if needs_calib:
         ds = _build_calib_dataset(recipe.model_id, calib_texts, calib_max_length)
         oneshot(
             model=recipe.model_id, recipe=pipeline, dataset=ds,
-            num_calibration_samples=len(calib_texts), output_dir=str(out),
+            num_calibration_samples=len(calib_texts), max_seq_length=calib_max_length,
+            output_dir=str(out),
         )
     else:
         oneshot(model=recipe.model_id, recipe=pipeline, output_dir=str(out))
 
     cmd = serve_command(out, max_model_len=max_model_len)
-    treatments = ([sq["name"]] if sq is not None else []) + (
-        ["mixed-precision"] if recipe.kept_fp_fqns else []
-    )
+    treatments = [method] + (["mixed-precision"] if recipe.kept_fp_fqns else [])
     manifest = {
+        "dropped_pre_transforms": dropped,
         "firefly_serving_version": 1,
         "model_id": recipe.model_id,
         "scheme": recipe.scheme,
         "compressed_tensors_scheme": ct_scheme,
-        "treatments": treatments or ["uniform-rtn"],
+        "method": method,
+        "treatments": treatments,
         "kept_fp_count": len(recipe.kept_fp_fqns),
         "quantization_backend": "llm-compressor / compressed-tensors",
         "measurement_backend": "torchao",
