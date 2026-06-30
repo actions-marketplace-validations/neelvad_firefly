@@ -195,16 +195,7 @@ def optimize(
         result["bar_basis"] = "served"
 
     if benchmark:
-        _free_accelerator()
-        from firefly.bench import get_benchmarker
-
-        b = get_benchmarker("vllm").benchmark(str(artifact.path), bench_config, dtype=dtype, quantization=None)
-        measured = {
-            "decode_tok_s": b.decode_throughput_tok_s,
-            "prefill_tok_s": b.prefill_throughput_tok_s,
-            "ttft_ms": b.ttft_ms,
-            "weight_mb": (b.weight_memory_bytes / 1e6) if b.weight_memory_bytes else None,
-        }
+        measured = _benchmark_path(artifact.path, bench_config, dtype)
         result["measured"] = measured
         # Fold the measurement into the shipped manifest so the artifact records it.
         import json
@@ -214,3 +205,97 @@ def optimize(
         (artifact.path / "firefly_serving.json").write_text(json.dumps(manifest, indent=2))
 
     return result
+
+
+def _benchmark_path(path, bench_config, dtype: str) -> dict:
+    """Measure a served checkpoint's QPS/memory via the vLLM benchmarker."""
+    _free_accelerator()
+    from firefly.bench import get_benchmarker
+
+    b = get_benchmarker("vllm").benchmark(str(path), bench_config, dtype=dtype, quantization=None)
+    return {
+        "decode_tok_s": b.decode_throughput_tok_s,
+        "prefill_tok_s": b.prefill_throughput_tok_s,
+        "ttft_ms": b.ttft_ms,
+        "weight_mb": (b.weight_memory_bytes / 1e6) if b.weight_memory_bytes else None,
+    }
+
+
+def optimize_over_schemes(
+    model_id: str,
+    inputs_path,
+    eval_texts: list[str],
+    *,
+    schemes: tuple[str, ...] = ("int4wo", "int8wo"),
+    quality_bar: float,
+    group_size: int = 128,
+    device: str = "cpu",
+    dtype: str = "float32",
+    max_length: int = 64,
+    with_sensitivity: bool = False,
+    out_dir: str | Path,
+    benchmark: bool = False,
+    bench_config=None,
+) -> dict:
+    """Pick the most-compressed scheme whose *served* quality meets ``quality_bar``.
+
+    Greedy over the candidate schemes ordered by compression (fewest weight bits
+    first): run the full :func:`optimize` (select → export → re-eval) per scheme
+    and stop at the first that clears the bar — that's the maximum compression
+    that still meets it. If none clear it, ship the best served quality and flag
+    it. The cost axis for *selection* is memory (unambiguous: int4 < int8); QPS is
+    measured once, on the winner only (so the search never needs a vLLM process).
+
+    ``quality_bar`` is required — "the cheapest scheme that meets the bar" is
+    meaningless without one.
+    """
+    if quality_bar is None:
+        raise ValueError("optimize_over_schemes requires a quality_bar.")
+
+    out = Path(out_dir)
+    ordered = sorted(schemes, key=lambda s: SCHEME_WEIGHT_BITS.get(s, 99))
+    explored: list[dict] = []
+    winner: dict | None = None
+    for scheme in ordered:
+        r = optimize(
+            model_id, inputs_path, eval_texts, scheme=scheme, group_size=group_size,
+            device=device, dtype=dtype, max_length=max_length, with_sensitivity=with_sensitivity,
+            quality_bar=quality_bar, out_dir=out / scheme, reeval_quality=True, benchmark=False,
+        )
+        explored.append(r)
+        if r["meets_bar"]:
+            winner = r
+            break
+    if winner is None:  # nothing met the bar → the best served quality available
+        winner = min(
+            explored,
+            key=lambda r: r["quality"]["served_rel_to_fp"]
+            if r["quality"]["served_rel_to_fp"] is not None else float("inf"),
+        )
+
+    if benchmark:
+        measured = _benchmark_path(winner["artifact"]["path"], bench_config, dtype)
+        winner["measured"] = measured
+        import json
+
+        manifest_path = Path(winner["artifact"]["path"]) / "firefly_serving.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["measured"] = measured
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    return {
+        "model": model_id,
+        "quality_bar": quality_bar,
+        "chosen_scheme": winner["scheme"],
+        "met_bar": winner["meets_bar"],
+        "per_scheme": [
+            {
+                "scheme": r["scheme"],
+                "served_rel_to_fp": r["quality"]["served_rel_to_fp"],
+                "compression": r["compression_estimate"],
+                "meets_bar": r["meets_bar"],
+            }
+            for r in explored
+        ],
+        "winner": winner,
+    }

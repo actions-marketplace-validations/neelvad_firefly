@@ -497,6 +497,39 @@ def render_optimize(result: dict, console: Console | None = None) -> str:
     return console.export_text()
 
 
+def render_optimize_schemes(result: dict, console: Console | None = None) -> str:
+    """Render a multi-scheme search: the per-scheme served-quality-vs-bar table,
+    which scheme was chosen (most compression that meets the bar), then the
+    winner's full optimize detail."""
+    console = console or Console(record=True, width=100)
+    r = result
+    console.print(
+        f"[bold]optimize (multi-scheme)[/] {r['model']}  —  bar ≤ "
+        f"[cyan]{r['quality_bar']:.1%}[/] vs fp"
+    )
+    for s in r["per_scheme"]:
+        rel = s["served_rel_to_fp"]
+        rel_str = f"{rel:+.1%}" if rel is not None else "n/a"
+        mark = "[green]✓[/]" if s["meets_bar"] else "[red]✗[/]"
+        chosen = "  [bold cyan]← chosen[/]" if s["scheme"] == r["chosen_scheme"] else ""
+        console.print(
+            f"  {mark} [bold]{s['scheme']:8s}[/]  ~{s['compression']:.1f}× smaller  "
+            f"served {rel_str} vs fp{chosen}"
+        )
+    if r["met_bar"]:
+        console.print(
+            f"[bold green]chosen {r['chosen_scheme']}[/] — the most compression that meets the bar"
+        )
+    else:
+        console.print(
+            f"[bold red]no scheme meets the bar[/] — shipping the best served quality "
+            f"([cyan]{r['chosen_scheme']}[/])"
+        )
+    console.print("")
+    console.print(render_optimize(r["winner"]))
+    return console.export_text()
+
+
 def render_salience(saliences, top_n: int = 15, console: Console | None = None) -> str:
     """Render the weight-salience (AWQ signal) sensor: Linears ranked by how
     concentrated their per-input-channel salience is. High = a few channels carry

@@ -841,6 +841,12 @@ def optimize_cmd(
     inputs: Path = typer.Option(..., "--inputs", "-i", help="Calibration inputs JSON."),
     eval_set: Path = typer.Option(..., "--eval", help="Held-out eval set for perplexity."),
     scheme: str = typer.Option("w8a8", "--scheme", help="w8a8 / int8wo / int4wo."),
+    schemes: str | None = typer.Option(
+        None, "--schemes",
+        help="Comma-separated schemes to search (e.g. int4wo,int8wo). Triggers a "
+        "multi-scheme search: ships the MOST-compressed scheme that meets "
+        "--quality-bar (required). Overrides --scheme.",
+    ),
     group_size: int = typer.Option(128, "--group-size"),
     device: str = typer.Option("cpu", "--device", "-d"),
     dtype: str = typer.Option("float32", "--dtype"),
@@ -880,16 +886,22 @@ def optimize_cmd(
     not-yet-servable recipe leaves on the table as headroom.
     """
     from firefly.quant.evaluate import load_eval_texts
-    from firefly.quant.optimize import optimize
+    from firefly.quant.optimize import optimize, optimize_over_schemes
     from firefly.quant.torchao import QuantCompatibilityError, quant_preflight
-    from firefly.report import render_optimize
+    from firefly.report import render_optimize, render_optimize_schemes
 
     if benchmark and out_dir is None:
         out_dir = Path("./firefly-optimized")
         typer.echo(f"--benchmark implies an export; using --out-dir {out_dir}", err=True)
 
+    scheme_list = [s.strip() for s in schemes.split(",")] if schemes else None
+    if scheme_list and quality_bar is None:
+        typer.echo("--schemes (multi-scheme search) requires --quality-bar.", err=True)
+        raise typer.Exit(2)
+
     try:
-        quant_preflight(scheme, device)
+        for s in scheme_list or [scheme]:
+            quant_preflight(s, device)
     except QuantCompatibilityError as e:
         typer.echo(f"Incompatible quantization config: {e}", err=True)
         raise typer.Exit(2) from e
@@ -901,6 +913,19 @@ def optimize_cmd(
         bench_config = BenchmarkConfig(batch_size=batch_size, input_len=input_len, output_len=output_len)
 
     try:
+        if scheme_list:
+            if out_dir is None:
+                out_dir = Path("./firefly-optimized")
+            result = optimize_over_schemes(
+                model, inputs, load_eval_texts(eval_set), schemes=tuple(scheme_list),
+                quality_bar=quality_bar, group_size=group_size, device=device, dtype=dtype,
+                max_length=eval_max_length, with_sensitivity=with_sensitivity, out_dir=out_dir,
+                benchmark=benchmark, bench_config=bench_config,
+            )
+            typer.echo(render_optimize_schemes(result))
+            if result["met_bar"] is False:
+                raise typer.Exit(1)
+            return
         result = optimize(
             model, inputs, load_eval_texts(eval_set), scheme=scheme, group_size=group_size,
             device=device, dtype=dtype, max_length=eval_max_length, with_sensitivity=with_sensitivity,

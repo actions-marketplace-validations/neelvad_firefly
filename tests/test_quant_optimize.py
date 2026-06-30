@@ -12,7 +12,7 @@ from firefly.bench import BenchmarkConfig, BenchmarkResult
 from firefly.quant import optimize as optmod
 from firefly.quant.deploy import DeployArtifact
 from firefly.quant.intervention import RTNQuantizer
-from firefly.quant.optimize import choose_ship_recipe, optimize
+from firefly.quant.optimize import choose_ship_recipe, optimize, optimize_over_schemes
 from firefly.quant.recipe_io import Recipe, serialize_intervention
 
 
@@ -154,6 +154,94 @@ class TestCrossBackendReeval:
         monkeypatch.setattr(optmod, "evaluate_deployed", lambda *a, **k: 20.0)
         r = optimize("m", "i", ["t"], out_dir=tmp_path, reeval_quality=True)
         assert r["quality"]["backend_delta"] == pytest.approx(8.0)
+
+
+_COMPRESSION = {"int4wo": 4.0, "int8wo": 2.0, "w8a8": 2.0}
+
+
+def _fake_optimize(served_by_scheme, bar):
+    """A stand-in optimize() returning canned served quality per scheme, and the
+    list of schemes it was called with (to assert greedy early-stop)."""
+    calls: list[str] = []
+
+    def fake(model, inputs, evals, *, scheme, out_dir, **k):
+        calls.append(scheme)
+        rel = served_by_scheme[scheme]
+        return {
+            "scheme": scheme,
+            "meets_bar": rel <= bar,
+            "quality": {"served_rel_to_fp": rel},
+            "compression_estimate": _COMPRESSION[scheme],
+            "artifact": {"path": str(out_dir)},
+            "measured": None,
+        }
+
+    return fake, calls
+
+
+class TestMultiScheme:
+    def test_picks_most_compressed_meeting_bar_and_early_stops(self, monkeypatch, tmp_path):
+        # int4 (0.10) clears the 0.20 bar → ship it, never evaluate int8wo.
+        fake, calls = _fake_optimize({"int4wo": 0.10, "int8wo": 0.02}, bar=0.20)
+        monkeypatch.setattr(optmod, "optimize", fake)
+        r = optimize_over_schemes("m", "i", ["t"], quality_bar=0.20, out_dir=tmp_path)
+        assert r["chosen_scheme"] == "int4wo" and r["met_bar"] is True
+        assert calls == ["int4wo"]  # early stop — int8wo not run
+
+    def test_falls_back_to_next_scheme_when_int4_misses(self, monkeypatch, tmp_path):
+        fake, calls = _fake_optimize({"int4wo": 0.30, "int8wo": 0.05}, bar=0.20)
+        monkeypatch.setattr(optmod, "optimize", fake)
+        r = optimize_over_schemes("m", "i", ["t"], quality_bar=0.20, out_dir=tmp_path)
+        assert r["chosen_scheme"] == "int8wo" and r["met_bar"] is True
+        assert calls == ["int4wo", "int8wo"]
+
+    def test_none_meet_bar_ships_best_quality(self, monkeypatch, tmp_path):
+        fake, _ = _fake_optimize({"int4wo": 0.30, "int8wo": 0.25}, bar=0.20)
+        monkeypatch.setattr(optmod, "optimize", fake)
+        r = optimize_over_schemes("m", "i", ["t"], quality_bar=0.20, out_dir=tmp_path)
+        assert r["chosen_scheme"] == "int8wo"  # best served quality (0.25 < 0.30)
+        assert r["met_bar"] is False
+
+    def test_evaluates_most_compressed_first_regardless_of_input_order(self, monkeypatch, tmp_path):
+        fake, calls = _fake_optimize({"int4wo": 0.10, "int8wo": 0.02}, bar=0.20)
+        monkeypatch.setattr(optmod, "optimize", fake)
+        # pass int8wo first; the search still tries int4wo (more compression) first.
+        optimize_over_schemes("m", "i", ["t"], schemes=("int8wo", "int4wo"),
+                              quality_bar=0.20, out_dir=tmp_path)
+        assert calls[0] == "int4wo"
+
+    def test_requires_a_bar(self, tmp_path):
+        with pytest.raises(ValueError, match="quality_bar"):
+            optimize_over_schemes("m", "i", ["t"], quality_bar=None, out_dir=tmp_path)
+
+
+def test_render_optimize_schemes_smoke(monkeypatch, tmp_path):
+    from firefly.report import render_optimize_schemes
+
+    fake, _ = _fake_optimize({"int4wo": 0.30, "int8wo": 0.05}, bar=0.20)
+    monkeypatch.setattr(optmod, "optimize", fake)
+    # winner (int8wo) needs the full optimize-result shape render_optimize reads;
+    # extend the fake's winner with the missing keys via a wrapper.
+    base = fake
+
+    def fake2(*a, **k):
+        r = base(*a, **k)
+        r.update({
+            "model": a[0], "ship": "plain", "scheme": k["scheme"],
+            "quality": {"fp": 10.0, "shipped": 10.5, "rel_to_fp": 0.05,
+                        "served": r["quality"]["served_rel_to_fp"] * 10 + 10,
+                        "served_rel_to_fp": r["quality"]["served_rel_to_fp"], "backend_delta": 0.1},
+            "quality_bar": 0.20, "bar_basis": "served",
+            "diagnosis_summary": {}, "headroom": None,
+            "artifact": {"path": str(k["out_dir"]), "compressed_tensors_scheme": "W8A16",
+                         "serve_command": "vllm serve x", "treatments": ["rtn"]},
+        })
+        return r
+
+    monkeypatch.setattr(optmod, "optimize", fake2)
+    r = optimize_over_schemes("m", "i", ["t"], quality_bar=0.20, out_dir=tmp_path)
+    text = render_optimize_schemes(r)
+    assert "multi-scheme" in text and "chosen" in text and "int4wo" in text
 
 
 def test_render_optimize_smoke(monkeypatch):
