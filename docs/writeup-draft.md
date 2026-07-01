@@ -29,23 +29,29 @@ your serving engine loads). We measure with **torchao** and deploy with
 **compressed-tensors**. Same scheme name, same bit-width — different
 implementation.
 
-On Qwen2.5-1.5B, int4 weight-only:
+The same int4 weight-only scheme, measured in torchao vs served via
+compressed-tensors, across three architecture families:
 
-| | perplexity |
-|---|---|
-| fp | 9.38 |
-| int4, measured in **torchao** | 21.45 |
-| int4, served via **compressed-tensors** | **18.73** |
+| family | fp | int4 in **torchao** | int4 served (**compressed-tensors**) | gap |
+|---|---|---|---|---|
+| Qwen2.5-1.5B | 10.3 | 21.7 | 20.5 | −6% |
+| Llama-arch (SmolLM2-1.7B) | 8.9 | 34.7 | **23.1** | **−33%** |
+| Gemma-2-2B | 20.5 | 59.0 | **22.2** | **−62%** |
 
-That's a **~29%-of-fp gap between the number you measured and the model you
-ship** — and, notably, the deployed model is *better* than the measurement said.
-For int8 the two backends agree to within ~2%; for int4 they diverge hard,
-because int4 packing and calibration differ between implementations.
+The gap is real, it grows across families, and it is *directional*: torchao's int4
+consistently reads **worse** than the served model — dramatically so on non-Qwen
+(Gemma int4 measures 59 in torchao but serves at 22, a 2.7× discrepancy). In other
+words, the cheaper-to-measure backend systematically *under-sells* models it wasn't
+tuned on, and you'd reject an int4 deployment that would actually have been fine.
+(For int8 the two backends agree to ~2%; int4 is where packing and calibration
+differences bite.)
 
 **The lesson:** a quantization number is only valid for the exact backend that
-produced it. If you measure in framework A and serve from framework B, re-measure
-in B. We made this a default step — re-evaluate the *served* checkpoint — and it
-paid for itself immediately, twice more below.
+produced it, and the error is worst on the architectures your measurement backend
+wasn't tuned on — precisely the ones where you have the least prior intuition to
+sanity-check it. If you measure in framework A and serve from framework B,
+re-measure in B. We made this a default step — re-evaluate the *served* checkpoint
+— and it paid for itself immediately, twice more below.
 
 ## Finding 2 — "98% recovery" can be a serving no-op
 
@@ -55,16 +61,17 @@ wrecks the model (18.1 perplexity vs 9.4 fp), and SmoothQuant brings it back to
 9.7 — a near-full recovery.
 
 We wired the *same* SmoothQuant into the served (compressed-tensors) export,
-expecting the same recovery. Instead:
+expecting the same recovery. Instead, across all three families:
 
-| w8a8 on Qwen2.5-1.5B (served) | perplexity |
-|---|---|
-| plain RTN | 20.82 |
-| **+ SmoothQuant** | **20.82** |
+| w8a8, served (compressed-tensors) | plain | + SmoothQuant | torchao's recovery for reference |
+|---|---|---|---|
+| Qwen2.5-1.5B | 18.71 | **18.71** | 18.6 → 10.6 (−43%) |
+| Llama-arch | 52.85 | **52.85** | 52.4 → 22.4 (−57%) |
+| Gemma-2-2B | 19.80 | **19.80** | — (w8a8 already fine) |
 
-Bit-identical. SmoothQuant did *nothing* when served — the calibration ran, the
-smoothing was applied to every layer (we checked the logs), and the output was
-unchanged. The reason is mechanical: SmoothQuant migrates outliers from
+Bit-identical, every family. SmoothQuant did *nothing* when served — the
+calibration ran, the smoothing was applied to every layer (we checked the logs),
+and the output was unchanged — even where torchao showed it recovering 43–57%. The reason is mechanical: SmoothQuant migrates outliers from
 activations into weights, but compressed-tensors' W8A8 uses a per-token /
 per-channel activation-quant granularity that is *invariant* to exactly that
 rescaling. The recovery it shows in torchao is real — and specific to torchao's
@@ -73,9 +80,11 @@ measured in, and it does not exist in the one you serve from.**
 
 **The lesson:** a recovery technique's benefit is a property of the (technique ×
 quant-granularity × backend) triple, not the technique alone. "SmoothQuant
-recovers X%" is meaningless without naming where it was measured. Our re-eval gate
-flagged this automatically — it re-scored the served model, saw 20.82 not 9.7, and
-refused to claim a recovery.
+recovers X%" is meaningless without naming where it was measured — and because
+this one is mechanical (it's about the serving backend's activation-quant
+granularity, not the model), it's a *bit-identical* no-op on every architecture we
+tried. Our re-eval gate flagged it automatically — it re-scored the served model,
+saw no change, and refused to claim a recovery.
 
 ## Finding 3 — per-layer mixed precision helps at 1.5B and *hurts* at 7B
 
@@ -185,9 +194,10 @@ one it measured — which is the whole story above.
 
 ## Honest scope
 
-- The re-eval gate, int4 recovery, and multi-scheme search are built and
-  GPU-validated on Qwen2.5 (1.5B/7B). Cross-architecture breadth (3–5 families +
-  a downstream task metric) is the open evidence work.
+- Findings 1 and 2 (backend transfer, SmoothQuant no-op) are confirmed across
+  three architecture families (Qwen, Llama-arch, Gemma). The re-eval gate, int4
+  recovery, and multi-scheme search are built and GPU-validated on Qwen2.5
+  (1.5B/7B); a downstream task metric beyond perplexity is the open evidence work.
 - Per-layer mixed precision is a real mechanism whose payoff is modest on every
   regime we can currently access (int4-robust LLMs, toy-scale recsys); it's
   parked pending fp4/mx4 tooling or production-recsys scale, deliberately.
