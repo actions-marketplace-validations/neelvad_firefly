@@ -35,7 +35,7 @@ image = (
 
 GPU = "A100-80GB"
 MODEL = "Qwen/Qwen2.5-7B-Instruct"
-K_VALUES = [2, 4, 8]
+K_VALUES = [2, 4]  # the decisive pair: tight-budget vs the 1.5B K=4 comparison
 
 _CALIB = [
     "The mitochondria is the powerhouse of the cell, producing ATP through respiration.",
