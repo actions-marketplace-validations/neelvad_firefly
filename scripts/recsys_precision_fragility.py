@@ -141,16 +141,27 @@ def run() -> dict:
             opt.step()
 
     @torch.no_grad()
-    def auc(mdl):
+    def metrics(mdl) -> dict:
+        """AUC (rank quality), logloss + ECE (calibration — what AUC can't see and
+        what a CTR-into-auction pipeline actually cares about)."""
         mdl.eval()
         ps, ys = [], []
         for u, m, g, a, o, gi, go, y in batchify(val):
             ps.append(torch.sigmoid(mdl(u, m, g, a, o, gi, go)).cpu().numpy())
             ys.append(y.cpu().numpy())
-        return roc_auc_score(np.concatenate(ys), np.concatenate(ps))
+        p = np.clip(np.concatenate(ps), 1e-7, 1 - 1e-7)
+        yv = np.concatenate(ys)
+        logloss = float(-np.mean(yv * np.log(p) + (1 - yv) * np.log(1 - p)))
+        edges = np.linspace(0, 1, 16)
+        ece = 0.0
+        for i in range(15):
+            mk = (p >= edges[i]) & (p < edges[i + 1])
+            if mk.sum() > 0:
+                ece += abs(p[mk].mean() - yv[mk].mean()) * mk.mean()
+        return {"auc": float(roc_auc_score(yv, p)), "logloss": logloss, "ece": float(ece)}
 
-    fp_auc = auc(model)
-    print(f"\nfp AUC: {fp_auc:.4f}")
+    fp_m = metrics(model)
+    print(f"\nfp: AUC {fp_m['auc']:.4f}  logloss {fp_m['logloss']:.4f}  ECE {fp_m['ece']:.4f}")
 
     # --- per-component int4 fake-quant (per-row symmetric) → AUC drop ---
     @torch.no_grad()
@@ -170,26 +181,27 @@ def run() -> dict:
         "head": ["head"],
     }
 
-    def quantized(prefixes: list[str]) -> float:
+    def quantized(prefixes: list[str]) -> dict:
         want = set(prefixes)
         q = copy.deepcopy(model)
         for name, p in q.named_parameters():
             if name.split(".")[0] in want:  # top-level module/param name
                 fq_(p)
-        return auc(q)
+        return metrics(q)
 
-    results = {"fp": round(fp_auc, 4)}
-    results["all-int4"] = round(quantized([p for ps in components.values() for p in ps]), 4)
+    results = {"fp": fp_m}
+    results["all-int4"] = quantized([p for ps in components.values() for p in ps])
     for label, prefixes in components.items():
-        results[label] = round(quantized(prefixes), 4)
+        results[label] = quantized(prefixes)
 
-    print(f"\n{'=' * 64}\nPER-COMPONENT int4 FRAGILITY — DCN-v2 on MovieLens-1M\n{'=' * 64}")
-    print(f"  {'component':30s}  AUC     ΔAUC vs fp")
-    print(f"  {'fp (baseline)':30s}  {fp_auc:.4f}   —")
+    print(f"\n{'=' * 78}\nPER-COMPONENT int4 FRAGILITY — DCN-v2 on MovieLens-1M "
+          f"(AUC misses calibration)\n{'=' * 78}")
+    print(f"  {'component':30s}  ΔAUC      Δlogloss   ΔECE")
     for label in ["all-int4", *components]:
-        drop = fp_auc - results[label]
-        print(f"  {label:30s}  {results[label]:.4f}   {drop:+.4f}")
-    return {"fp_auc": round(fp_auc, 4), "results": results}
+        r = results[label]
+        print(f"  {label:30s}  {r['auc'] - fp_m['auc']:+.4f}   {r['logloss'] - fp_m['logloss']:+.4f}    "
+              f"{r['ece'] - fp_m['ece']:+.4f}")
+    return {"fp": fp_m, "results": results}
 
 
 @app.local_entrypoint()
