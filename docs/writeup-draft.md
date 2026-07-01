@@ -1,159 +1,197 @@
 ---
 layout: default
-title: "Firefly: measured, attribution-guided model compression"
+title: "Your quantization numbers were measured in the wrong place"
 ---
 
-# Firefly — a measurement oracle for model compression
+# Your quantization numbers were measured in the wrong place
 
-*Draft. Honest about scope; the numbers are real and the limits are stated.*
+*Draft. Every number below is measured; every limit is stated. The point is not
+"use our tool" — it's four specific, checkable ways a quantization measurement
+lies, and one discipline that catches them.*
 
-## The one idea
+Quantization tooling asks you to trust a number. You quantize a model, run an
+eval, see "1.2% perplexity increase" or "98% recovery," and ship. The problem is
+that the number was almost always produced somewhere other than where the model
+runs in production — a different quantization backend, a proxy metric, a smaller
+model, a single layer in isolation — and **the number does not transfer.**
 
-Firefly is **one capability** — *detect and attribute numerical divergence in
-model execution* — pointed at the problems where "did this change break the
-model, and where?" is the hard question. It started as a numerical-parity CI
-gate (does this serving stack still produce the same activations as my
-reference?) and grew into the **measurement oracle** for a quantization/compression
-agent: a thing that, given a proposed model transform, *applies it, verifies it
-against a real metric, attributes the residual per-layer, and reports the cost* —
-so a search over transforms is grounded in measurement instead of guesswork.
+We built a measurement engine (it started life as a numerical-parity CI gate for
+model deployments) and pointed it at quantization, with one rule: *always measure
+the model you actually ship, on the metric that matters.* That rule kept catching
+the tooling lying. Here are four cases, each one a thing worth checking in your
+own pipeline.
 
-The thesis, in one line: **you cannot trust a compression recipe across
-architectures — you have to measure it — and the value is in the measurement +
-attribution + verification, not the technique.**
+## Finding 1 — the backend you measure in isn't the backend you serve in
 
-## Why this matters (the problem)
+The most common quantization split in practice: you measure with one library
+(it has the nice per-layer hooks and filters) and deploy with another (it's what
+your serving engine loads). We measure with **torchao** and deploy with
+**compressed-tensors**. Same scheme name, same bit-width — different
+implementation.
 
-Quantization (and pruning, low-rank, …) ships on faith in an average. Three
-gaps the field mostly papers over:
+On Qwen2.5-1.5B, int4 weight-only:
 
-- **No accuracy bound.** Post-training quantization gives a *sample estimate on
-  one distribution*, not a guarantee. Error is input-dependent and worst exactly
-  in the tails benchmarks under-sample.
-- **Aggregate metrics hide localized failure.** A 0.1 perplexity bump can conceal
-  that one capability collapsed. Averaging washes out concentrated damage.
-- **Recipes don't transfer.** The config that recovers 94% on one model can
-  silently ship garbage on another (we measured exactly this — see below).
+| | perplexity |
+|---|---|
+| fp | 9.38 |
+| int4, measured in **torchao** | 21.45 |
+| int4, served via **compressed-tensors** | **18.73** |
 
-The honest consequence: the useful artifact isn't a faster blind search, it's a
-**truthful, per-model, localized verdict** on what a transform did.
+That's a **~29%-of-fp gap between the number you measured and the model you
+ship** — and, notably, the deployed model is *better* than the measurement said.
+For int8 the two backends agree to within ~2%; for int4 they diverge hard,
+because int4 packing and calibration differ between implementations.
 
-## The engine
+**The lesson:** a quantization number is only valid for the exact backend that
+produced it. If you measure in framework A and serve from framework B, re-measure
+in B. We made this a default step — re-evaluate the *served* checkpoint — and it
+paid for itself immediately, twice more below.
 
-Forward-hook telemetry captures per-layer activations at architecturally stable
-tap points. Two runs (reference vs candidate) are diffed per tap; a forward-order
-walk names the **first divergent tap** — the layer where two executions part. The
-same machinery drills to the worst attention head, and (via `TorchDispatchMode`)
-to the first diverging ATen op inside a layer. Tolerances are *calibrated* from
-controlled-noise re-runs, so the gate distinguishes real divergence from FP
-jitter.
+## Finding 2 — "98% recovery" can be a serving no-op
 
-This is the verifier. It's empirical (measures specific inputs), not a sound
-proof — but it's cheap relative to retraining and *non-gameable*: you can't
-reward-hack a measured perplexity the way you can an RLHF reward model.
+SmoothQuant is a well-known technique for recovering int8 activation-quantization
+quality. In torchao, on Qwen2.5-1.5B, it works exactly as advertised: plain w8a8
+wrecks the model (18.1 perplexity vs 9.4 fp), and SmoothQuant brings it back to
+9.7 — a near-full recovery.
 
-## The compression loop
+We wired the *same* SmoothQuant into the served (compressed-tensors) export,
+expecting the same recovery. Instead:
 
-On top of the engine: **diagnose → route → verify.**
+| w8a8 on Qwen2.5-1.5B (served) | perplexity |
+|---|---|
+| plain RTN | 20.82 |
+| **+ SmoothQuant** | **20.82** |
 
-- **Sensors** emit failure-mode *signatures* from measurements: activation
-  outliers (`channel_concentration`), salient weight channels (`|W|·|X|`
-  concentration), single-unit dominance (one layer's quant sensitivity ≫ the
-  rest).
-- **A closed intervention seam** is the action space: `apply(model, policy,
-  calib) -> model'` — one opaque verb, mechanism inside. Shipped interventions:
-  RTN, SmoothQuant (a pre-transform that migrates activation outliers into the
-  weights), AWQ (activation-aware int4, wrapping torchao). Precision (which layers
-  at what bits) is *data* the agent edits, not a plugin.
-- **The router** (deterministic, non-LLM) maps each signature to the intervention
-  that treats it: activation-outliers → SmoothQuant, salient-weights → AWQ,
-  single-unit → keep-fp.
-- **The measurement gate** is the point: the router *proposes* by signature, the
-  *measurement decides*. A routed recipe ships only if it actually beat the
-  plain-quant baseline.
+Bit-identical. SmoothQuant did *nothing* when served — the calibration ran, the
+smoothing was applied to every layer (we checked the logs), and the output was
+unchanged. The reason is mechanical: SmoothQuant migrates outliers from
+activations into weights, but compressed-tensors' W8A8 uses a per-token /
+per-channel activation-quant granularity that is *invariant* to exactly that
+rescaling. The recovery it shows in torchao is real — and specific to torchao's
+activation-quant granularity. **It is a measurement artifact of the framework you
+measured in, and it does not exist in the one you serve from.**
 
-A recipe is a serialized `(PrecisionPolicy, [Intervention])` artifact — the
-action is **sandboxed by construction** (it can only compose validated
-interventions, never run code) and **measured by construction**.
+**The lesson:** a recovery technique's benefit is a property of the (technique ×
+quant-granularity × backend) triple, not the technique alone. "SmoothQuant
+recovers X%" is meaningless without naming where it was measured. Our re-eval gate
+flagged this automatically — it re-scored the served model, saw 20.82 not 9.7, and
+refused to claim a recovery.
 
-## The agent framing
+## Finding 3 — per-layer mixed precision helps at 1.5B and *hurts* at 7B
 
-Firefly is the *oracle*; an external coding agent is the *searcher*. This is the
-generator–verifier decomposition that makes Lean-style proof agents work — a
-smart-but-unsound generator + a dumb-but-sound-enough, cheap, non-gameable
-verifier — applied to compression. The closest prior art (CEG4N) pairs an SMT
-equivalence checker with a *genetic* searcher; AlphaEvolve pairs an LLM searcher
-with a *scoring* evaluator. Firefly occupies the reachable cell between them:
-**LLM searcher × measured-parity verifier × the structured intervention algebra**,
-with first-divergence attribution as the counterexample-localization that turns
-"reject" into "here's the layer to re-tune."
+"Keep the fragile layers in higher precision, quantize the rest" is the intuitive
+recipe for mixed-precision. We tested whether a *cheap* per-layer fragility
+ranking (measure each layer's int4 sensitivity once) predicts which layers, kept
+at fp16, actually recover the served int4 model.
 
-Two proposers plug into the same `diagnose → recipe` slot:
-- **Deterministic router** — reproducible, no hallucination surface; the default.
-- **LLM proposer** (Anthropic tool-use) — for composition/tradeoff cases where a
-  fixed rule can't reach the answer. It emits a *compact, structured* recipe;
-  every proposal is verified; a bad one wastes one measurement, not a deploy.
+On Qwen2.5-1.5B it works and transfers cleanly. Keeping 4 layers fp16, choosing
+*which* four:
 
-## The evidence (real numbers, honest limits)
+| kept fp16 (1.5B) | served perplexity |
+|---|---|
+| all-int4 | 12.66 |
+| top-4 (by our ranking) | **11.28** |
+| random-4 | 11.73 |
+| bottom-4 | 11.96 |
 
-**SmoothQuant recovers w8a8 degradation — across families.** Small models where
-w8a8 actually degrades, measured per-model with the gate:
+Monotonic: the ranking is real. So we scaled to 7B, expecting a *larger* effect
+(outlier features sharpen with model size). Instead it **inverted**:
 
-| model | family | fp → w8a8 → +SmoothQuant | recovered | gate |
-|---|---|---|---|---|
-| Qwen2.5-1.5B | Qwen | 12.4 → 22.3 → 12.6 | 98% | accept |
-| Qwen2.5-0.5B | Qwen | 18.7 → 23.3 → 19.2 | 88% | accept |
-| SmolLM2-1.7B | Llama-arch | 11.4 → 53.9 → 27.4 | 62% | accept |
-| Gemma-2-2b | Gemma | 25.7 → 25.5 → 25.8 | — | **reject** (w8a8 already lossless) |
+| kept fp16 (7B), K=4 | served perplexity |
+|---|---|
+| all-int4 | **9.93** |
+| top-4 | 10.10 |
+| random-4 | 10.35 |
+| bottom-4 | 10.16 |
 
-The reject is the point: where w8a8 is lossless, the gate *declines* SmoothQuant
-rather than faking a recovery.
+At 7B, keeping *any* layers fp16 made the served model *worse* than plain
+all-int4 — and the "most fragile" layers were the worst to protect. Why:
+**bigger models are more int4-robust, so int4+GPTQ is already near-lossless at
+7B — there is no per-layer fragility left to exploit, because GPTQ's calibration
+correction already absorbed it.** The cheap ranking measures fragility *without*
+the recovery method; the served model *has* it. And pulling the early layers out
+of the GPTQ set disrupts its sequential error-compensation, so protecting them
+backfires.
 
-**AWQ recovers int4 — but the tooling is Qwen-overfit, and the gate caught it.**
-On Qwen2.5-7B int4, the deterministic auto-quant autonomously routes to AWQ and
-recovers **91%** of the degradation (where mixed-precision recovers ~9%). But a
-4-family int4 sweep surfaced that the int4/AWQ path *doesn't transfer*: torchao's
-int4 silently *breaks* Mistral-7B (perplexity 179k — isolated to a path bug, not
-the model), and AWQ *regresses below plain RTN* on Gemma/Llama — both of which the
-measurement gate **rejected**. The headline isn't "AWQ wins everywhere" (false);
-it's "the same recipe that recovers 91% on one model ships garbage on another,
-and measurement is the only thing that tells you which."
+**The lesson:** per-layer sensitivity measured on a bare quantizer does not
+predict a served model that includes a recovery method — and the whole
+optimization's value *shrinks* with scale exactly where you'd want to deploy it.
+The 1.5B result alone would have justified building a feature that's worthless at
+7B. Measuring at the scale you deploy is the only thing that caught it.
 
-**An LLM proposer composes a win a fixed rule can't (N=1).** On Qwen2.5-1.5B int4
-with a "minimum memory at a perplexity bar" goal, AWQ-alone misses the bar; the
-LLM adds an attribution-guided keep-fp set and navigates the memory frontier to a
-verified recipe at **2× compression**. This is one model, a grounded sandboxed
-demo — not yet a cross-architecture result.
+## Finding 4 — for recsys, AUC tells you the wrong component to protect
+
+Everything above is LLMs. Recommendation models are the more interesting
+quantization target precisely because they're *heterogeneous* — big and small
+embedding tables, cross layers, a deep MLP — so a single precision can't fit all
+of them, and you have to decide per component. We trained a DCN-v2 on
+MovieLens-1M and int4-quantized each component in isolation.
+
+By **AUC** (the offline ranking metric), int4 is nearly free and flat across
+components — nothing to see. But AUC is rank-based; it is *blind to calibration*,
+and a recommendation model's output is a probability that feeds a downstream
+auction, where a calibration shift is real money. Measured by **calibration error
+(ECE)** instead:
+
+| component (int4) | ΔAUC | ΔECE |
+|---|---|---|
+| head | −0.0025 | **+0.0058** |
+| side embeddings | −0.0010 | **+0.0045** |
+| cross layers | −0.0009 | +0.0023 |
+| big embeddings | −0.0018 | +0.0014 |
+| deep MLP | −0.0001 | −0.0004 |
+
+The calibration ranking **is not the AUC ranking**: by AUC you'd protect the big
+embeddings (2nd); by calibration they're 4th, and the side embeddings jump to 2nd.
+The deep MLP is free on both. So the offline proxy metric points you at the *wrong*
+component to keep in higher precision.
+
+**The lesson:** measure the metric your deployment actually cares about, per
+component — not the aggregate offline proxy. (Honest caveat: on a small model the
+magnitudes are small; this effect wants production-scale tables to become large.
+But the *ranking flip* is the point, and it's already visible.)
+
+## What actually works (and ships)
+
+The findings are cautionary; the constructive half is real too. Measuring the
+served model let us build a loop that ships what it verifies:
+
+- **int4 recovery that serves.** Plain int4 RTN serves at +113% perplexity;
+  GPTQ recovers it to +4% (~96%), AWQ ~94% — *measured on the served checkpoint*,
+  on Qwen2.5-1.5B. That's a real, deployable 4× smaller model.
+- **Pick the scheme by a quality bar.** Give a perplexity bar; the tool ships the
+  most-compressed scheme that meets it — bar 10% → int8wo (2×, +2.7%), bar 30% →
+  int4wo (4×). Same model, the bar decides.
+- **Measured cost, not estimated.** Real serving throughput/memory from vLLM:
+  fp8 is +20% decode *and* −24% prefill (weight quant helps memory-bound decode,
+  costs compute-bound prefill — a regime split only measurement reveals).
+
+These live behind one command — `firefly optimize <model> --quality-bar <b>` →
+a servable compressed-tensors checkpoint + a `vllm serve` line + the measured
+evidence.
+
+## The engine underneath
+
+None of this is quantization-specific. The core is a divergence-attribution
+engine — **capture → compare → attribute** — that hooks every layer's activations
+and names the first place two model executions diverge, down to the attention head
+or ATen op. Pointed at serving stacks instead of quantization, the same engine is
+a numerical-parity CI gate; it's how we found, in an earlier phase, that
+`FLASH_ATTN` vs `XFORMERS` diverge at exactly one attention head across a 60×
+model-scale range, and surfaced a live vLLM/FlashInfer bug that silently zeroed
+two of Qwen-7B's attention heads. The attribution is the moat: it's why the tool
+can say *which* layer a quant broke and *whether the model it ships* matches the
+one it measured — which is the whole story above.
 
 ## Honest scope
 
-- It is a **diagnosis-routed, measured recipe selector + oracle-grounded search**,
-  for the regime where no known recipe exists (custom / under-explored
-  architectures). On Llama-family where the recipe is known, a fast blind search
-  (torchao autoquant) wins.
-- It is **not** an autonomous technique-search agent, and not a sound verifier —
-  for the property that matters (deployment faithfulness), checking ≈ running the
-  model, so the cheap-verifier asymmetry that makes Lean magic does not transfer.
-- **Known limits, stated:** the cheap proxy (divergence) ≠ the real metric
-  (perplexity); per-layer signals don't generalize across families (we falsified
-  our own `channel_concentration` predictor: ρ=0.71 on one family, 0.23–0.42 on
-  another); and the eval is currently ~50-text perplexity — below the grade
-  ("thousands of sequences + a task metric") that "better than a human" would
-  require.
-
-## Maturity
-
-| surface | status |
-|---|---|
-| Parity CI gate | mature, broadly validated (3 runners: HF/vLLM/SGLang) |
-| Quant diagnosis + deterministic auto-quant | built & validated, cross-family |
-| LLM proposer / search harness | grounded sandboxed harness; one composition win (N=1) |
-| General autonomous agent | aspirational |
-
-## What would make it convincing (not more code — more measurement)
-
-Run the LLM-vs-router comparison on 3–5 architectures; grow the eval to thousands
-of sequences + a downstream task metric (the `Evaluator` callable seam already
-takes one — the set is the gap); calibrate the diagnosis thresholds across a model
-family. The infrastructure exists; it's an evidence-breadth problem now. That's a
-good place to be.
+- The re-eval gate, int4 recovery, and multi-scheme search are built and
+  GPU-validated on Qwen2.5 (1.5B/7B). Cross-architecture breadth (3–5 families +
+  a downstream task metric) is the open evidence work.
+- Per-layer mixed precision is a real mechanism whose payoff is modest on every
+  regime we can currently access (int4-robust LLMs, toy-scale recsys); it's
+  parked pending fp4/mx4 tooling or production-recsys scale, deliberately.
+- The tool measures and verifies; it does not prove. There is no worst-case
+  accuracy bound for post-training quantization — the honest guarantee is "we
+  measured the model you're about to ship, on your metric," which is a great deal
+  more than most tooling offers, and less than a proof.
