@@ -76,29 +76,21 @@ _EVAL = [
 
 
 @app.function(
-    image=image, gpu=GPU, timeout=10800,
+    image=image, gpu=GPU, timeout=5400,
     volumes={"/root/.cache/huggingface": hf_cache}, secrets=[hf_secret],
 )
-def run() -> dict:
+def rank() -> dict:
+    """Compute the torchao int4 per-layer sensitivity ranking (one container)."""
     import copy
     import gc
     import json
-    import random
     import tempfile
     from pathlib import Path
 
     import torch
 
-    from firefly.capture import (
-        load_golden_inputs,
-        load_model_and_tokenizer,
-        parse_dtype,
-        run_capture,
-    )
+    from firefly.capture import load_golden_inputs, load_model_and_tokenizer, parse_dtype, run_capture
     from firefly.determinism import set_deterministic
-    from firefly.quant.deploy import evaluate_deployed, export_deployable
-    from firefly.quant.intervention import RTNQuantizer
-    from firefly.quant.recipe_io import Recipe, serialize_intervention
     from firefly.quant.sensitivity import discover_units
     from firefly.quant.torchao import quantize_model, rel_l1
 
@@ -121,63 +113,71 @@ def run() -> dict:
         del q
         gc.collect()
         torch.cuda.empty_cache()
-    del fp_model
-    gc.collect()
-    torch.cuda.empty_cache()
 
     ranked = sorted(sens, key=sens.get, reverse=True)
+    print("sensitivity (top 6):", [(u, round(sens[u], 4)) for u in ranked[:6]])
+    return {"ranked": ranked, "units": {u: units[u] for u in units}, "sens": {u: round(sens[u], 4) for u in ranked}}
+
+
+@app.function(
+    image=image, gpu=GPU, timeout=3600,
+    volumes={"/root/.cache/huggingface": hf_cache}, secrets=[hf_secret],
+)
+def export_eval(kept_units: list[str], units: dict, tag: str) -> dict:
+    """Export one int4 checkpoint (K kept-units fp16) and re-eval — isolated container."""
+    import gc
+
+    import torch
+
+    from firefly.quant.deploy import evaluate_deployed, export_deployable
+    from firefly.quant.intervention import RTNQuantizer
+    from firefly.quant.recipe_io import Recipe, serialize_intervention
+
     all_fqns = {f for fqns in units.values() for f in fqns}
-    print("\ntorchao int4 per-layer sensitivity (top 6):", [(u, round(sens[u], 4)) for u in ranked[:6]])
-
-    def recipe_for(kept_units: list[str]) -> Recipe:
-        kept = sorted({f for u in kept_units for f in units[u]})
-        return Recipe(
-            model_id=MODEL, scheme="int4wo", group_size=128, granularity="layer",
-            quantize_fqns=sorted(all_fqns - set(kept)), kept_fp_fqns=kept,
-            pre_transforms=[], quantizer=serialize_intervention(RTNQuantizer()),
-        )
-
-    def served(kept_units: list[str], tag: str) -> float | None:
-        out_dir = f"/tmp/pr_{tag}"
-        try:
-            export_deployable(recipe_for(kept_units), out_dir, calib_texts=_CALIB, calib_max_length=64)
-            v = round(evaluate_deployed(out_dir, _EVAL, max_length=64, device="cuda", dtype="bfloat16"), 3)
-        except Exception as e:  # noqa: BLE001
-            print(f"  {tag} FAILED: {type(e).__name__}: {str(e)[:140]}")
-            v = None
-        gc.collect()
-        torch.cuda.empty_cache()
-        return v
-
-    rng = random.Random(0)
-    out: dict = {"sensitivity_top6": [(u, round(sens[u], 4)) for u in ranked[:6]], "K": {}}
-    base = served([], "all_int4")
-    out["all_int4"] = base
-    print(f"\nall-int4 (K=0) served ppl {base}")
-
-    for k in K_VALUES:
-        top = ranked[:k]
-        rand = rng.sample(ranked, k)
-        row = {"top": served(top, f"top{k}"), "random": served(rand, f"rand{k}")}
-        if k == 4:
-            row["bottom"] = served(ranked[-k:], "bot4")
-        out["K"][k] = row
-        print(f"K={k}: {row}")
-
-    print(f"\n{'=' * 66}\nRANKING MARGIN vs SCALE + BUDGET ({MODEL})\n{'=' * 66}")
-    print(f"  all-int4 (K=0): {base}")
-    for k, row in out["K"].items():
-        t, r = row["top"], row["random"]
-        rec_t = round(base - t, 3) if (base and t) else None
-        rec_r = round(base - r, 3) if (base and r) else None
-        ratio = round(rec_t / rec_r, 2) if (rec_t and rec_r and rec_r > 0) else None
-        print(f"  K={k}:  top {t} (rec {rec_t})  random {r} (rec {rec_r})  top/random={ratio}×"
-              + (f"  bottom {row['bottom']}" if "bottom" in row else ""))
-    return out
+    kept = sorted({f for u in kept_units for f in units[u]})
+    recipe = Recipe(
+        model_id=MODEL, scheme="int4wo", group_size=128, granularity="layer",
+        quantize_fqns=sorted(all_fqns - set(kept)), kept_fp_fqns=kept,
+        pre_transforms=[], quantizer=serialize_intervention(RTNQuantizer()),
+    )
+    try:
+        export_deployable(recipe, f"/tmp/{tag}", calib_texts=_CALIB, calib_max_length=64)
+        v = round(evaluate_deployed(f"/tmp/{tag}", _EVAL, max_length=64, device="cuda", dtype="bfloat16"), 3)
+    except Exception as e:  # noqa: BLE001
+        v = None
+        print(f"{tag} FAILED: {type(e).__name__}: {str(e)[:160]}")
+    gc.collect()
+    torch.cuda.empty_cache()
+    return {"tag": tag, "served": v}
 
 
 @app.local_entrypoint()
 def main() -> None:
     import json
+    import random
 
-    print(json.dumps(run.remote(), indent=2, default=str))
+    r = rank.remote()
+    ranked, units = r["ranked"], r["units"]
+    rng = random.Random(0)
+    configs = [([], "all_int4")]
+    for k in K_VALUES:
+        configs.append((ranked[:k], f"top{k}"))
+        configs.append((rng.sample(ranked, k), f"rand{k}"))
+        if k == 4:
+            configs.append((ranked[-k:], "bot4"))
+
+    # Each export in its own container (no memory accumulation), all in parallel.
+    served = {d["tag"]: d["served"] for d in export_eval.starmap([(kept, units, tag) for kept, tag in configs])}
+
+    base = served.get("all_int4")
+    print(f"\n{'=' * 66}\nRANKING MARGIN vs SCALE + BUDGET ({MODEL})\n{'=' * 66}")
+    print(f"  sensitivity top-6: {[(u, r['sens'][u]) for u in ranked[:6]]}")
+    print(f"  all-int4 (K=0): {base}")
+    for k in K_VALUES:
+        t, rr = served.get(f"top{k}"), served.get(f"rand{k}")
+        rec_t = round(base - t, 3) if (base and t) else None
+        rec_r = round(base - rr, 3) if (base and rr) else None
+        ratio = round(rec_t / rec_r, 2) if (rec_t and rec_r and rec_r > 0) else None
+        extra = f"  bottom {served.get('bot4')}" if k == 4 else ""
+        print(f"  K={k}:  top {t} (rec {rec_t})  random {rr} (rec {rec_r})  top/random={ratio}×{extra}")
+    print(json.dumps({"ranked": ranked, "served": served}, indent=2, default=str))
