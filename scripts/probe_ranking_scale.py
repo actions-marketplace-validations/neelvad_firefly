@@ -89,7 +89,12 @@ def rank() -> dict:
 
     import torch
 
-    from firefly.capture import load_golden_inputs, load_model_and_tokenizer, parse_dtype, run_capture
+    from firefly.capture import (
+        load_golden_inputs,
+        load_model_and_tokenizer,
+        parse_dtype,
+        run_capture,
+    )
     from firefly.determinism import set_deterministic
     from firefly.quant.sensitivity import discover_units
     from firefly.quant.torchao import quantize_model, rel_l1
