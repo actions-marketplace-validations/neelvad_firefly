@@ -6,7 +6,7 @@ imports vLLM, stands up an ``LLM`` on the local GPU, captures, and tears it
 down. Modal is only an experiment harness for the blog repros; it is never on
 a product run's path.
 
-Requires ``pip install 'firefly[vllm]'`` and a CUDA GPU. The runner raises a
+Requires ``pip install 'firefly-ml[vllm]'`` and a CUDA GPU. The runner raises a
 clear error if vLLM is missing.
 
 Capture mechanics (unchanged from the validated script):
@@ -300,12 +300,14 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         "capture_decode",
         "max_tokens",
         "speculative_tokens",
+        "trust_remote_code",
     }
     if unknown:
         raise ValueError(
             f"Unknown vLLM runner option(s): {sorted(unknown)}. "
             f"Supported: engine, attention_backend, max_seq_len, "
-            f"gpu_memory_utilization, capture_decode, max_tokens, speculative_tokens."
+            f"gpu_memory_utilization, capture_decode, max_tokens, "
+            f"speculative_tokens, trust_remote_code."
         )
     engine = opts.get("engine", "v1")
     if engine not in {"v0", "v1"}:
@@ -320,6 +322,9 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         # when capture_decode is set.
         "max_tokens": int(opts.get("max_tokens", "8")),
         "speculative_tokens": int(opts.get("speculative_tokens", "0")),
+        # Off by default: trust_remote_code executes Python shipped with the
+        # model repo — an arbitrary-code path a CI gate must not open silently.
+        "trust_remote_code": opts.get("trust_remote_code", "false").lower() in _BOOL_TRUE,
     }
 
 
@@ -361,7 +366,12 @@ class VLLMRunner:
 
         os.environ["VLLM_USE_V1"] = "0" if engine == "v0" else "1"
         # Newer vLLM refuses to msgspec-serialize arbitrary callables through
-        # collective_rpc without this; harmless on older versions.
+        # collective_rpc without this; harmless on older versions. The capture
+        # hooks are pickled to vLLM's worker over that RPC bus, so the runner
+        # cannot function without it — the trust boundary is the local process
+        # (in-process engine, no network listener), and only our own top-level
+        # functions cross it. Captures coming back are loaded with
+        # torch.load(weights_only=True).
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
         if opt["attention_backend"]:
             os.environ["VLLM_ATTENTION_BACKEND"] = opt["attention_backend"]
@@ -372,7 +382,7 @@ class VLLMRunner:
         except ImportError as e:
             raise ImportError(
                 "The vLLM runner needs vLLM installed and a CUDA GPU. "
-                "Install with: pip install 'firefly[vllm]'."
+                "Install with: pip install 'firefly-ml[vllm]'."
             ) from e
 
         llm_kwargs = dict(
@@ -382,7 +392,7 @@ class VLLMRunner:
             max_model_len=opt["max_seq_len"],
             gpu_memory_utilization=opt["gpu_memory_utilization"],
             seed=seed,
-            trust_remote_code=True,
+            trust_remote_code=opt["trust_remote_code"],
         )
         if opt["speculative_tokens"] > 0:
             llm_kwargs["speculative_config"] = {

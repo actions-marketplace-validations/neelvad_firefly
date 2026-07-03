@@ -93,7 +93,7 @@ quantized build — is a different question: opt in with
 
 ```yaml
 # .github/workflows/firefly.yml
-- uses: neelvad/firefly@v0.4.0
+- uses: neelvad/firefly@v0.6.0
   with:
     reference: hf://my-org/my-firefly-ref  # captured from my-org/my-model
     candidate: my-org/my-model             # same weights, new serving stack
@@ -123,7 +123,7 @@ jobs:
   quant-gate:
     runs-on: ubuntu-latest       # use a CUDA runner for scheme: int4wo
     steps:
-      - uses: neelvad/firefly@v0.4.0
+      - uses: neelvad/firefly@v0.6.0
         with:
           mode: quant-diff
           reference: hf://my-org/my-firefly-ref  # fp baseline (same model)
@@ -231,6 +231,13 @@ attention heads. Full findings with plots in
 ## Quickstart
 
 ```sh
+pip install firefly-ml          # installs the `firefly` CLI + library
+```
+
+(The PyPI distribution is `firefly-ml`; the import package and CLI are
+`firefly`. Extras follow the same name: `pip install 'firefly-ml[vllm]'`.)
+
+```sh
 # 1. Capture a reference from your current good model
 firefly capture \
     --model my-org/my-model-current \
@@ -257,7 +264,7 @@ delivers product value.
 By default capture runs the model through HF transformers. To capture
 from a real serving engine instead — the configuration your production
 stack actually serves — use `--runner vllm` or `--runner sglang` (each
-needs its extra, `pip install 'firefly[vllm]'` / `'firefly[sglang]'`, and
+needs its extra, `pip install 'firefly-ml[vllm]'` / `'firefly-ml[sglang]'`, and
 a CUDA GPU). Engine knobs go through repeatable `--runner-opt`:
 
 ```sh
@@ -277,6 +284,12 @@ firefly capture --runner sglang \
 A reference and its candidates should use the same runner — the serving
 engines flatten batch/seq into one token axis, so their tensor shapes
 differ from the HF runner's padded batches. Compare like with like.
+
+Models whose architecture ships as Python in the model repo need an
+explicit `--runner-opt trust_remote_code=true` (and the equivalent
+benchmarker option). It is **off by default** everywhere: a CI gate
+that executes repo-shipped code without opting in is an arbitrary-code
+path, so Firefly never turns it on for you.
 
 ## Publishing a reference
 
@@ -312,7 +325,7 @@ firefly publish --reference reference/ --to s3://my-bucket/firefly-refs/v1
 The action then reads the same URI in CI:
 
 ```yaml
-- uses: neelvad/firefly@v0.4.0
+- uses: neelvad/firefly@v0.6.0
   with:
     reference: hf://my-org/my-firefly-ref
     candidate: my-org/my-model
@@ -324,7 +337,7 @@ the `firefly-extras` input (`s3`, `gcs`, or `azure`) so the matching SDK
 is present on the runner:
 
 ```yaml
-- uses: neelvad/firefly@v0.4.0
+- uses: neelvad/firefly@v0.6.0
   with:
     reference: s3://my-bucket/firefly-refs/v1
     candidate: my-org/my-model
@@ -398,9 +411,9 @@ is more honest than `source="calibrated"` numbers that measured nothing.
 | --- | --- | --- |
 | local path | Reference checked into your repo | (built-in) |
 | `hf://<org>/<repo>[@<rev>][/<subpath>]` | Reference hosted on HF Hub | (built-in) |
-| `s3://<bucket>/<prefix>` | Reference in private AWS bucket | `pip install 'firefly[s3]'` |
-| `gs://<bucket>/<prefix>` | Reference in private GCS bucket | `pip install 'firefly[gcs]'` |
-| `az://<account>/<container>/<prefix>` | Reference in private Azure container | `pip install 'firefly[azure]'` |
+| `s3://<bucket>/<prefix>` | Reference in private AWS bucket | `pip install 'firefly-ml[s3]'` |
+| `gs://<bucket>/<prefix>` | Reference in private GCS bucket | `pip install 'firefly-ml[gcs]'` |
+| `az://<account>/<container>/<prefix>` | Reference in private Azure container | `pip install 'firefly-ml[azure]'` |
 
 All three cloud backends use their library's default credential chain —
 env vars, local credential files, or instance/runner metadata. Azure

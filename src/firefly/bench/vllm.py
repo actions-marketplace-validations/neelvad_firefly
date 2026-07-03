@@ -6,7 +6,7 @@ hooks fire) and times prompt processing and steady-state decode at a target
 ``(batch, input_len, output_len)``. This is the measurement the analytic cost
 model can't make: whether a given quantization actually serves faster *here*.
 
-Requires ``pip install 'firefly[vllm]'`` and a CUDA GPU.
+Requires ``pip install 'firefly-ml[vllm]'`` and a CUDA GPU.
 
 **One config per process.** An ``LLM`` claims ~``gpu_memory_utilization`` of the
 device and vLLM caches engine state per process, so a second config in the same
@@ -84,7 +84,7 @@ _BOOL_TRUE = {"1", "true", "yes", "on"}
 
 def _parse_options(options: dict[str, str] | None) -> dict:
     opts = dict(options or {})
-    known = {"engine", "gpu_memory_utilization", "max_model_len", "enforce_eager", "enable_prefix_caching"}
+    known = {"engine", "gpu_memory_utilization", "max_model_len", "enforce_eager", "enable_prefix_caching", "trust_remote_code"}
     unknown = set(opts) - known
     if unknown:
         raise ValueError(
@@ -99,6 +99,8 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         "max_model_len": int(opts["max_model_len"]) if "max_model_len" in opts else None,
         "enforce_eager": opts.get("enforce_eager", "false").lower() in _BOOL_TRUE,
         "enable_prefix_caching": opts.get("enable_prefix_caching", "false").lower() in _BOOL_TRUE,
+        # Off by default: executes Python shipped with the model repo.
+        "trust_remote_code": opts.get("trust_remote_code", "false").lower() in _BOOL_TRUE,
     }
 
 
@@ -131,6 +133,9 @@ class VLLMBenchmarker:
 
         engine = opt["engine"]
         os.environ["VLLM_USE_V1"] = "0" if engine == "v0" else "1"
+        # Needed so the worker memory reads above can be pickled through
+        # collective_rpc on newer vLLM (in-process only; see runners/vllm.py
+        # for the trust-boundary note).
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
         try:
@@ -138,7 +143,7 @@ class VLLMBenchmarker:
         except ImportError as e:
             raise ImportError(
                 "The vLLM benchmarker needs vLLM installed and a CUDA GPU. "
-                "Install with: pip install 'firefly[vllm]'."
+                "Install with: pip install 'firefly-ml[vllm]'."
             ) from e
 
         max_model_len = opt["max_model_len"] or (cfg.input_len + cfg.output_len + 16)
@@ -150,7 +155,7 @@ class VLLMBenchmarker:
             gpu_memory_utilization=opt["gpu_memory_utilization"],
             enable_prefix_caching=opt["enable_prefix_caching"],
             seed=seed,
-            trust_remote_code=True,
+            trust_remote_code=opt["trust_remote_code"],
         )
         if quantization:
             llm_kwargs["quantization"] = quantization

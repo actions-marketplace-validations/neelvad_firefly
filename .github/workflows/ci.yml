@@ -29,5 +29,17 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Check version consistency
+        # pyproject and __init__ must agree so a release tag can't ship a
+        # stale __version__ (release.yml re-checks both against the tag).
+        run: |
+          PYPROJECT=$(uv run python -c \
+            "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          INIT=$(uv run python -c "import firefly; print(firefly.__version__)")
+          if [ "$PYPROJECT" != "$INIT" ]; then
+            echo "::error::pyproject version $PYPROJECT != firefly.__version__ $INIT"
+            exit 1
+          fi
+
       - name: Test
         run: uv run pytest -v

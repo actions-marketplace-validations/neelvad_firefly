@@ -205,7 +205,7 @@ def _resolve_s3(uri: str) -> Path:
     except ImportError as e:
         raise ImportError(
             "boto3 is required for s3:// references but isn't installed. "
-            "Install with: pip install 'firefly[s3]' (or pip install boto3)."
+            "Install with: pip install 'firefly-ml[s3]' (or pip install boto3)."
         ) from e
 
     cache_dir = _s3_cache_dir(bucket, raw_prefix)
@@ -261,7 +261,7 @@ def _resolve_gcs(uri: str) -> Path:
     except ImportError as e:
         raise ImportError(
             "google-cloud-storage is required for gs:// references but "
-            "isn't installed. Install with: pip install 'firefly[gcs]' "
+            "isn't installed. Install with: pip install 'firefly-ml[gcs]' "
             "(or pip install google-cloud-storage)."
         ) from e
 
@@ -324,7 +324,7 @@ def _resolve_azure(uri: str) -> Path:
         raise ImportError(
             "azure-storage-blob and azure-identity are required for "
             "az:// references but aren't installed. Install with: "
-            "pip install 'firefly[azure]'."
+            "pip install 'firefly-ml[azure]'."
         ) from e
 
     cache_dir = _azure_cache_dir(account, container_name, raw_prefix)
@@ -334,7 +334,7 @@ def _resolve_azure(uri: str) -> Path:
         raise ImportError(
             "azure-storage-blob and azure-identity are required for "
             "az:// references but aren't installed. Install with: "
-            "pip install 'firefly[azure]'."
+            "pip install 'firefly-ml[azure]'."
         ) from e
 
     try:
@@ -551,7 +551,7 @@ def _publish_s3(local_path: Path, uri: str) -> None:
     except ImportError as e:
         raise ImportError(
             "boto3 is required for s3:// publish but isn't installed. "
-            "Install with: pip install 'firefly[s3]' (or pip install boto3)."
+            "Install with: pip install 'firefly-ml[s3]' (or pip install boto3)."
         ) from e
 
     client = boto3.client("s3")
@@ -591,7 +591,7 @@ def _publish_azure(local_path: Path, uri: str) -> None:
         raise ImportError(
             "azure-storage-blob and azure-identity are required for "
             "az:// publish but aren't installed. Install with: "
-            "pip install 'firefly[azure]'."
+            "pip install 'firefly-ml[azure]'."
         ) from e
 
     try:
@@ -600,7 +600,7 @@ def _publish_azure(local_path: Path, uri: str) -> None:
         raise ImportError(
             "azure-storage-blob and azure-identity are required for "
             "az:// publish but aren't installed. Install with: "
-            "pip install 'firefly[azure]'."
+            "pip install 'firefly-ml[azure]'."
         ) from e
 
     try:
@@ -640,7 +640,7 @@ def _publish_gcs(local_path: Path, uri: str) -> None:
     except ImportError as e:
         raise ImportError(
             "google-cloud-storage is required for gs:// publish but isn't "
-            "installed. Install with: pip install 'firefly[gcs]' "
+            "installed. Install with: pip install 'firefly-ml[gcs]' "
             "(or pip install google-cloud-storage)."
         ) from e
 

@@ -203,7 +203,7 @@ def _quant_config(scheme: str, group_size: int = 32):
         # an external 'mslk' kernel lib not shipped in our images. The
         # tile_packed_to_4d format uses the built-in tinygemm kernels and is the
         # only int4 config that runs cleanly on our GPUs (verified by
-        # scripts/probe_int4_torchao.py on A10G, torchao 0.17). Pass the format
+        # experiments/probe_int4_torchao.py on A10G, torchao 0.17). Pass the format
         # as a string so we don't depend on the enum's import path; fall back
         # for older torchao that lacks the kwarg.
         try:
@@ -246,7 +246,7 @@ def quantize_model(
     except ImportError as e:  # pragma: no cover - depends on optional extra
         raise ImportError(
             "torchao is required for quant-risk validation. "
-            "Install it with: uv pip install 'firefly[torchao]'"
+            "Install it with: uv pip install 'firefly-ml[torchao]'"
         ) from e
 
     cfg = _quant_config(scheme, group_size=group_size)

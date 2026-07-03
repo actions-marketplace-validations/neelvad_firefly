@@ -47,10 +47,10 @@ def capture(
         help=(
             "Engine-specific knob as key=value (repeatable). HF: "
             "quantize (w8a8/int4wo — apply real torchao quant, needs "
-            "firefly[torchao]), group_size (int4 only). vLLM: "
+            "firefly-ml[torchao]), group_size (int4 only). vLLM: "
             "attention_backend, engine (v0/v1), max_seq_len, "
-            "gpu_memory_utilization, capture_decode, speculative_tokens. "
-            "E.g. --runner-opt attention_backend=FLASH_ATTN."
+            "gpu_memory_utilization, capture_decode, speculative_tokens, "
+            "trust_remote_code. E.g. --runner-opt attention_backend=FLASH_ATTN."
         ),
     ),
     push: str | None = typer.Option(

@@ -6,7 +6,7 @@ other, which is the whole reason to *measure* rather than assume. This mirrors
 :class:`firefly.bench.vllm.VLLMBenchmarker` against SGLang's offline ``Engine``
 (CUDA graphs on by default; ``disable_cuda_graph`` opt to force eager).
 
-Requires ``pip install 'firefly[sglang]'`` and a CUDA GPU. Memory reads are not
+Requires ``pip install 'firefly-ml[sglang]'`` and a CUDA GPU. Memory reads are not
 wired yet (SGLang's offline engine doesn't expose a worker RPC as cleanly as
 vLLM's ``collective_rpc``); ``peak_memory_bytes`` / ``weight_memory_bytes`` are
 left ``None`` and the throughput numbers — the headline — are fully measured.
@@ -27,7 +27,7 @@ _BOOL_TRUE = {"1", "true", "yes", "on"}
 
 def _parse_options(options: dict[str, str] | None) -> dict:
     opts = dict(options or {})
-    known = {"mem_fraction_static", "disable_cuda_graph", "disable_radix_cache", "context_length"}
+    known = {"mem_fraction_static", "disable_cuda_graph", "disable_radix_cache", "context_length", "trust_remote_code"}
     unknown = set(opts) - known
     if unknown:
         raise ValueError(
@@ -40,6 +40,8 @@ def _parse_options(options: dict[str, str] | None) -> dict:
         # doesn't collapse to a single shared prefill (matches the vLLM path).
         "disable_radix_cache": opts.get("disable_radix_cache", "true").lower() in _BOOL_TRUE,
         "context_length": int(opts["context_length"]) if "context_length" in opts else None,
+        # Off by default: executes Python shipped with the model repo.
+        "trust_remote_code": opts.get("trust_remote_code", "false").lower() in _BOOL_TRUE,
     }
 
 
@@ -71,7 +73,7 @@ class SGLangBenchmarker:
         except ImportError as e:
             raise ImportError(
                 "The SGLang benchmarker needs SGLang installed and a CUDA GPU. "
-                "Install with: pip install 'firefly[sglang]'."
+                "Install with: pip install 'firefly-ml[sglang]'."
             ) from e
 
         engine_kwargs = dict(
@@ -80,7 +82,7 @@ class SGLangBenchmarker:
             random_seed=seed,
             disable_cuda_graph=opt["disable_cuda_graph"],
             disable_radix_cache=opt["disable_radix_cache"],
-            trust_remote_code=True,
+            trust_remote_code=opt["trust_remote_code"],
         )
         if quantization:
             engine_kwargs["quantization"] = quantization

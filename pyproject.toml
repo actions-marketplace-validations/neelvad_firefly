@@ -1,6 +1,7 @@
 [project]
-name = "firefly"
-version = "0.4.0"
+# Distribution name (PyPI): the import package and the CLI both stay `firefly`.
+name = "firefly-ml"
+version = "0.6.0"
 description = "Diagnosis-guided quantization to a faster, servable model — with measured speedup/quality — on a numerical-divergence attribution engine"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -8,7 +9,7 @@ license = { text = "MIT" }
 authors = [{ name = "Neel Vadoothker" }]
 dependencies = [
     "torch>=2.3",
-    "transformers>=4.40",
+    "transformers>=4.56",  # first line where from_pretrained takes `dtype=` (v5 removed `torch_dtype=`)
     "safetensors>=0.4",
     "typer>=0.12",
     "rich>=13",
@@ -85,6 +86,7 @@ include = [
 exclude = [
     ".uv-cache",
     "scripts",
+    "experiments",
     "examples",
     "docs",
     "tests",
@@ -102,6 +104,7 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "src/firefly/cli/*.py" = ["B008"]  # typer.Option in defaults is idiomatic
 "scripts/*.py" = ["B008"]        # ditto for typer/modal entrypoints
+"experiments/*.py" = ["B008"]    # ditto
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

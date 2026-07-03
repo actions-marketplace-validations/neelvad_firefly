@@ -10,7 +10,7 @@ terminal tap, flushes everything to a file the caller reads back.
 
 We get the layer/head counts from ``AutoConfig`` (config-only, no weights) to
 generate the per-tap specs up front, since the model isn't loaded in this
-process. Requires ``pip install 'firefly[sglang]'`` and a CUDA GPU.
+process. Requires ``pip install 'firefly-ml[sglang]'`` and a CUDA GPU.
 
 Like vLLM, a reference and its candidates should use the same runner — SGLang
 flattens batch/seq into one token axis, so shapes differ from the HF runner's
@@ -156,7 +156,7 @@ class SGLangRunner:
         except ImportError as e:
             raise ImportError(
                 "The SGLang runner needs SGLang installed and a CUDA GPU. "
-                "Install with: pip install 'firefly[sglang]'."
+                "Install with: pip install 'firefly-ml[sglang]'."
             ) from e
 
         valid_fields = {f.name for f in dataclasses.fields(ServerArgs)}

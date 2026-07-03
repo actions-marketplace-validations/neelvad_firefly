@@ -227,7 +227,7 @@ def test_s3_missing_boto3_raises_import_error(monkeypatch) -> None:
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ImportError, match="firefly\\[s3\\]"):
+    with pytest.raises(ImportError, match="firefly-ml\\[s3\\]"):
         resolve_reference("s3://my-bucket/refs/v1")
 
 
@@ -487,7 +487,7 @@ def test_gcs_missing_library_raises_import_error(monkeypatch) -> None:
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ImportError, match=r"firefly\[gcs\]"):
+    with pytest.raises(ImportError, match=r"firefly-ml\[gcs\]"):
         resolve_reference("gs://my-bucket/refs/v1")
 
 
@@ -681,7 +681,7 @@ def test_azure_missing_library_raises_import_error(monkeypatch) -> None:
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ImportError, match=r"firefly\[azure\]"):
+    with pytest.raises(ImportError, match=r"firefly-ml\[azure\]"):
         resolve_reference("az://myaccount/mycontainer/refs/v1")
 
 

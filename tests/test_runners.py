@@ -54,6 +54,14 @@ def test_vllm_runner_parses_options() -> None:
     assert opt["max_seq_len"] == 2048
     assert opt["capture_decode"] is True
     assert opt["speculative_tokens"] == 3
+    assert opt["trust_remote_code"] is False  # security default: opt-in only
+
+
+def test_vllm_runner_trust_remote_code_is_opt_in() -> None:
+    from firefly.runners.vllm import _parse_options
+
+    assert _parse_options({})["trust_remote_code"] is False
+    assert _parse_options({"trust_remote_code": "true"})["trust_remote_code"] is True
 
 
 def test_vllm_runner_rejects_non_llm_domain() -> None:

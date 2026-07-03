@@ -1,0 +1,66 @@
+name: release
+
+# Publish firefly-ml to PyPI when a version tag is pushed.
+#
+# Release procedure:
+#   1. Bump `version` in pyproject.toml AND `__version__` in
+#      src/firefly/__init__.py (the workflow fails if they disagree).
+#   2. Commit, then: git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# Publishing uses PyPI Trusted Publishing (OIDC) — no API token secret.
+# One-time setup on pypi.org: project firefly-ml → Settings → Publishing →
+# add GitHub publisher (owner: neelvad, repo: firefly, workflow:
+# release.yml, environment: pypi).
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Check tag matches the in-tree version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PYPROJECT=$(uv run --no-project python -c \
+            "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          INIT=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/firefly/__init__.py)
+          echo "tag=$TAG pyproject=$PYPROJECT __init__=$INIT"
+          if [ "$TAG" != "$PYPROJECT" ] || [ "$TAG" != "$INIT" ]; then
+            echo "::error::Version mismatch — tag v$TAG vs pyproject $PYPROJECT vs __init__ $INIT"
+            exit 1
+          fi
+
+      - name: Test
+        run: |
+          uv sync --extra dev --extra torchao
+          uv run pytest -q
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

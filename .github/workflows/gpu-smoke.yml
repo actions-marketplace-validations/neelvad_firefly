@@ -1,0 +1,40 @@
+name: gpu-smoke
+
+# Weekly canary: run the vLLM-runner capture end-to-end on a Modal GPU
+# against the LATEST vLLM release. The fast CI suite runs on CPU and can't
+# exercise the runner's vLLM internals (collective_rpc hooks, backend
+# verification), so this is what catches a vLLM release breaking them.
+#
+# Costs well under $1 per run (one A10G for a few minutes). Needs two repo
+# secrets from `modal token new`: MODAL_TOKEN_ID and MODAL_TOKEN_SECRET.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC (off the top-of-hour rush)
+  workflow_dispatch:
+
+jobs:
+  vllm-runner-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Sync dependencies
+        # The dev group carries the modal client; the GPU-side deps (vllm)
+        # install inside the Modal image, not on this runner.
+        run: uv sync
+
+      - name: Run vLLM runner smoke on Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: uv run modal run scripts/gpu_smoke.py

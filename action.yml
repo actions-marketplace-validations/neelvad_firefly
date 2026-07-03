@@ -8,8 +8,8 @@ inputs:
       workspace, an HF Hub URI (hf://org/repo[@rev][/subpath]), or a
       cloud URI: s3://bucket/prefix, gs://bucket/prefix, or
       az://account/container/prefix. Cloud backends need their extra
-      installed on the runner (`pip install 'firefly[s3]'` /
-      `'firefly[gcs]'` / `'firefly[azure]'`).
+      installed on the runner (`pip install 'firefly-ml[s3]'` /
+      `'firefly-ml[gcs]'` / `'firefly-ml[azure]'`).
     required: true
   candidate:
     description: 'HuggingFace model ID or local path to the candidate checkpoint.'

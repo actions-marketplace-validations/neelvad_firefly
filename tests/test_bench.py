@@ -110,3 +110,16 @@ class TestRegistry:
         # lives inside benchmark()); the class object is enough here.
         b = get_benchmarker(name)
         assert b.name == name
+
+
+class TestBenchmarkerOptions:
+    @pytest.mark.parametrize(
+        "module", ["firefly.bench.vllm", "firefly.bench.sglang"]
+    )
+    def test_trust_remote_code_is_opt_in(self, module):
+        # Security default: executing repo-shipped Python requires an explicit opt-in.
+        import importlib
+
+        parse = importlib.import_module(module)._parse_options
+        assert parse({})["trust_remote_code"] is False
+        assert parse({"trust_remote_code": "true"})["trust_remote_code"] is True
