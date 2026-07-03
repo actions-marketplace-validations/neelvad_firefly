@@ -7,7 +7,7 @@ the same machinery on a bigger GQA model (Qwen2.5-0.5B) with **int4 weight-only*
 
   1. Does the whole loop (sensitivity → recipe → verify) run on real int4
      kernels on GPU? (the kernel path is tile_packed_to_4d; see
-     scripts/probe_int4_torchao.py)
+     experiments/probe_int4_torchao.py)
   2. Does greedy (wrapper) pull ahead of isolated (filter) here, as the
      feature-selection analogy predicts when interactions are stronger?
   3. Does per-Linear granularity work on int4, and what does it surface?

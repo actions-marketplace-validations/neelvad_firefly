@@ -14,7 +14,7 @@ SmoothQuant has something to recover in torchao): Qwen (Qwen2.5-1.5B), Llama-arc
 Per model, all measured as served-equivalent perplexity on the same eval:
   fp | torchao{int4, w8a8, w8a8+SQ} | compressed-tensors{int4-RTN, w8a8, w8a8+SQ}
 
-Run:  uv run modal run scripts/harden_backend_transfer.py
+Run:  uv run modal run experiments/harden_backend_transfer.py
 """
 
 from __future__ import annotations

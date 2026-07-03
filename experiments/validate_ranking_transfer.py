@@ -20,7 +20,7 @@ real and backend-stable). top-4 ≈ random-4 → the ranking is worthless when s
 (any mixed precision helps equally) → fall back to method-coupled sensitivity.
 The random-4 control is the whole point.
 
-Run:  uv run modal run scripts/validate_ranking_transfer.py
+Run:  uv run modal run experiments/validate_ranking_transfer.py
 """
 
 from __future__ import annotations

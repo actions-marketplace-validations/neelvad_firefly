@@ -937,7 +937,7 @@ uv run python scripts/compare_per_head.py \
 For the Qwen zero-head result, use `--vllm-tag 0.8.5-fi --model
 Qwen/Qwen2.5-7B --gpu A100-40GB --gpu-memory-utilization 0.7` with
 backends `FLASH_ATTN` and `FLASHINFER`, then
-`scripts/analyze_qwen_layer27.py <flash_dir> <flashinfer_dir>` prints
+`experiments/analyze_qwen_layer27.py <flash_dir> <flashinfer_dir>` prints
 the per-head magnitude/divergence breakdown at layers 25–27.
 
 Finding 7 needs no GPU at all — any captured reference works:

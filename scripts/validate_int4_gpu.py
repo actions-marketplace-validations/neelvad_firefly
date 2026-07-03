@@ -1,7 +1,7 @@
 """Confirm int4wo runs end-to-end through the real quant-diff path on GPU.
 
 After fixing _quant_config to use the tile_packed_to_4d packing format (see
-scripts/probe_int4_torchao.py), this runs the actual product path — HF runner
+experiments/probe_int4_torchao.py), this runs the actual product path — HF runner
 quantizes the model (int4wo) and captures, then we diff against the fp baseline
 exactly like `firefly quant-diff` does — and confirms it no longer dies on the
 `mslk` kernel dep. Qwen2.5-0.5B on A10G, bf16.

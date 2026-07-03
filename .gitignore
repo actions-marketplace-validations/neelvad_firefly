@@ -50,6 +50,7 @@ examples/quantization_demo/_artifacts/report.json
 
 # Modal validation results
 scripts/results/
+experiments/results/
 
 # Models / data
 models/

@@ -13,7 +13,7 @@ the ranking's value scales toward the real targets (fp4 / heterogeneous recsys),
 justifying the per-layer feature. If the gap stays ~1.5× regardless, it's modest
 everywhere on homogeneous LLMs.
 
-Run:  uv run modal run scripts/probe_ranking_scale.py
+Run:  uv run modal run experiments/probe_ranking_scale.py
 """
 
 from __future__ import annotations

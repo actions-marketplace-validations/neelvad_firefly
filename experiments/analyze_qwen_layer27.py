@@ -7,7 +7,7 @@ is the spike concentrated in specific attention heads, and is the worst-
 diverging head also the largest-magnitude (outlier-feature) head?
 
 Usage:
-    uv run python scripts/analyze_qwen_layer27.py \
+    uv run python experiments/analyze_qwen_layer27.py \
         scripts/results/qwen_fi_flash_perhead \
         scripts/results/qwen_fi_flashinfer_perhead
 """

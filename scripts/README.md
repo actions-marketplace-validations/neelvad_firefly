@@ -1,6 +1,22 @@
 # scripts/
 
-One-off validation and exploration tooling. Not part of the product.
+GPU validation harnesses (`validate_*.py` — the runs behind the repo's
+"GPU-validated" claims), runnable demos (`demo_*.py`), and the Modal/vLLM
+capture suite that produced the writeup's findings. Not part of the shipped
+package, but maintained: these re-run when the claims need re-checking.
+
+Research one-offs (hypothesis probes, debugging sessions, spikes) live in
+[`experiments/`](../experiments/README.md) with an index of what each found.
+
+## gpu_smoke.py
+
+The weekly CI canary (`.github/workflows/gpu-smoke.yml`, also manually
+dispatchable): captures SmolLM-135M through the library `VLLMRunner` on a
+Modal A10G against the **latest** vLLM release and asserts the capture
+contract (all taps present, finite tensors, fingerprint + runner metadata).
+Structural asserts only, so it can only fail if a vLLM release actually
+breaks the runner — the code path the CPU-only fast suite can't reach.
+Needs `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` repo secrets.
 
 ## modal_validation.py
 

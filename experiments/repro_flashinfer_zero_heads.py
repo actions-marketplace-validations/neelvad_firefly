@@ -6,8 +6,8 @@ dependency. The core logic (between the markers) is what goes in the issue;
 the Modal scaffolding just provides the GPU + pinned environment.
 
 Run:
-    uv run modal run scripts/repro_flashinfer_zero_heads.py --backend FLASHINFER
-    uv run modal run scripts/repro_flashinfer_zero_heads.py --backend FLASH_ATTN
+    uv run modal run experiments/repro_flashinfer_zero_heads.py --backend FLASHINFER
+    uv run modal run experiments/repro_flashinfer_zero_heads.py --backend FLASH_ATTN
 """
 
 from __future__ import annotations

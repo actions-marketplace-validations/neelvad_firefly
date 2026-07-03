@@ -5,7 +5,7 @@ module-level gate localizes a divergence to, say, ``layer.7.self_attn``; this
 zooms *inside* that module to the individual ATen ops (matmul, softmax, add, ...)
 and reports the first op where two executions' numbers part.
 
-Mechanism (validated by scripts/spike_torch_dispatch.py): a ``TorchDispatchMode``
+Mechanism (validated by experiments/spike_torch_dispatch.py): a ``TorchDispatchMode``
 records every ATen op, gated by module forward hooks so only the target subtree
 is captured, in execution order. It's an opt-in drill-down, not a default — op
 interception is eager-only (bypassed under CUDA graphs), Python-per-op slow, and

@@ -6,8 +6,8 @@ underlying ``nn.Module`` structure so we can decide which tap names map
 cleanly across the HF-transformers reference and the vLLM candidate.
 
 Usage:
-    uv run modal run scripts/vllm_explore.py
-    uv run modal run scripts/vllm_explore.py --gpu A10G --model HuggingFaceTB/SmolLM-135M
+    uv run modal run experiments/vllm_explore.py
+    uv run modal run experiments/vllm_explore.py --gpu A10G --model HuggingFaceTB/SmolLM-135M
 """
 
 from __future__ import annotations

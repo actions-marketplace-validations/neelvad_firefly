@@ -14,7 +14,7 @@ Pass criteria:
   3. Two structurally-identical blocks record the SAME op sequence but DIFFERENT
      values — confirming scoping actually isolates the target module.
 
-Run:  uv run python scripts/spike_torch_dispatch.py
+Run:  uv run python experiments/spike_torch_dispatch.py
 """
 
 from __future__ import annotations

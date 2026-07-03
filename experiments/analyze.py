@@ -6,9 +6,9 @@ ramping into layer 11 in the captured reference — at the same layer where
 the noise floor in scripts/results/ jumps by ~250×.
 
 Usage:
-    uv run python scripts/analyze.py                            # capture fresh, analyze
-    uv run python scripts/analyze.py --reference ref/           # analyze an existing reference
-    uv run python scripts/analyze.py --model HuggingFaceTB/SmolLM-360M
+    uv run python experiments/analyze.py                            # capture fresh, analyze
+    uv run python experiments/analyze.py --reference ref/           # analyze an existing reference
+    uv run python experiments/analyze.py --model HuggingFaceTB/SmolLM-360M
 """
 
 from __future__ import annotations

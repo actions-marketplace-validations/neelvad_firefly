@@ -1,19 +1,20 @@
-"""Diagnostic: what actually recovers compressed-tensors W8A8 on Qwen2.5-1.5B?
+"""Diagnostic: does int4 (W4A16) recovery transfer to compressed-tensors serving?
 
-The recovery run showed SmoothQuant calibrates + applies (per the logs) yet the
-served perplexity is identical to plain W8A8 (18.37). So the question isn't
-"did SmoothQuant run" but "does SmoothQuant move compressed-tensors W8A8 at all,
-or do we need GPTQ?" This maps the space in ONE run, each config exported +
-re-evaluated via transformers (apples-to-apples, the same path optimize uses):
+w8a8 SmoothQuant recovery was a torchao artifact (debug_smoothquant_export.py) —
+nothing recovered compressed-tensors W8A8. This asks the analogous question for
+int4, where the *canonical* recovery is GPTQ / AWQ (calibration-based weight
+quant), not SmoothQuant. If GPTQ/AWQ recover W4A16 when served, recovery-export
+has real, servable value (for int4); if not, recovery-export is fundamentally
+limited and the product reframes around uniform int8wo.
 
-  1. plain W8A8 (QuantizationModifier RTN)        — the baseline (~18.4 expected)
-  2. SmoothQuant(0.8) + W8A8 RTN                   — does SmoothQuant help RTN?
-  3. GPTQ W8A8 (GPTQModifier, calibration weight)  — does GPTQ alone recover?
-  4. SmoothQuant(0.8) + GPTQ W8A8                  — the canonical llm-compressor combo
+Each config exported via llm-compressor + re-evaluated through transformers (the
+same path optimize uses), 24-sample calibration:
 
-A real calibration set (24 samples) so SmoothQuant/GPTQ have enough to estimate.
+  1. W4A16 RTN  (QuantizationModifier, data-free)  — the baseline int4
+  2. W4A16 GPTQ (GPTQModifier)                      — canonical int4 recovery
+  3. W4A16 AWQ  (AWQModifier)                        — activation-aware int4 recovery
 
-Run:  uv run modal run scripts/debug_smoothquant_export.py
+Run:  uv run modal run experiments/debug_int4_recovery.py
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import os
 
 import modal
 
-app = modal.App("firefly-debug-smoothquant")
+app = modal.App("firefly-debug-int4-recovery")
 
 hf_cache = modal.Volume.from_name("firefly-hf-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})
@@ -114,32 +115,29 @@ def run() -> list[dict]:
             oneshot(model=MODEL, recipe=modifiers, dataset=ds,
                     num_calibration_samples=len(_CALIB), max_seq_length=128, output_dir=out)
             served = ppl_of(out)
-            print(f"  {label:24s} served perplexity {served}")
+            print(f"  {label:16s} served perplexity {served}")
             return {"config": label, "served": served}
-        except Exception as e:  # noqa: BLE001
-            print(f"  {label:24s} FAILED: {type(e).__name__}: {str(e)[:150]}")
-            return {"config": label, "error": f"{type(e).__name__}: {str(e)[:150]}"}
-
-    from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
-    from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+        except Exception as e:  # noqa: BLE001 — resilient per-config
+            print(f"  {label:16s} FAILED: {type(e).__name__}: {str(e)[:160]}")
+            return {"config": label, "error": f"{type(e).__name__}: {str(e)[:160]}"}
 
     ig = ["lm_head"]
     out: list[dict] = [{"config": "fp", "served": fp}]
-    out.append(export("plain W8A8 (RTN)",
-                      [QuantizationModifier(targets="Linear", scheme="W8A8", ignore=ig)], "/tmp/d1"))
-    out.append(export("SmoothQuant0.8 + W8A8 RTN",
-                      [SmoothQuantModifier(smoothing_strength=0.8),
-                       QuantizationModifier(targets="Linear", scheme="W8A8", ignore=ig)], "/tmp/d2"))
-    out.append(export("GPTQ W8A8",
-                      [GPTQModifier(targets="Linear", scheme="W8A8", ignore=ig)], "/tmp/d3"))
-    out.append(export("SmoothQuant0.8 + GPTQ W8A8",
-                      [SmoothQuantModifier(smoothing_strength=0.8),
-                       GPTQModifier(targets="Linear", scheme="W8A8", ignore=ig)], "/tmp/d4"))
 
-    print(f"\n{'=' * 60}\nWHAT RECOVERS compressed-tensors W8A8 ({MODEL})\n{'=' * 60}")
+    from llmcompressor.modifiers.quantization import GPTQModifier, QuantizationModifier
+    out.append(export("W4A16 RTN", [QuantizationModifier(targets="Linear", scheme="W4A16", ignore=ig)], "/tmp/i1"))
+    out.append(export("W4A16 GPTQ", [GPTQModifier(targets="Linear", scheme="W4A16", ignore=ig)], "/tmp/i2"))
+
+    try:
+        from llmcompressor.modifiers.awq import AWQModifier
+        out.append(export("W4A16 AWQ", [AWQModifier(targets="Linear", scheme="W4A16", ignore=ig)], "/tmp/i3"))
+    except Exception as e:  # noqa: BLE001 — AWQModifier API may differ; don't fail the run
+        print(f"  W4A16 AWQ        SKIPPED (modifier import/init): {type(e).__name__}: {str(e)[:120]}")
+        out.append({"config": "W4A16 AWQ", "error": f"skip: {type(e).__name__}"})
+
+    print(f"\n{'=' * 60}\nDOES int4 RECOVERY TRANSFER TO SERVING ({MODEL})\n{'=' * 60}")
     for e in out:
-        v = e.get("served", e.get("error"))
-        print(f"  {e['config']:28s}  {v}")
+        print(f"  {e['config']:16s}  {e.get('served', e.get('error'))}")
     return out
 
 

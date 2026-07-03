@@ -11,7 +11,7 @@ Reading: fp sane + w8a8 sane + int4wo broken → int4wo specifically breaks Mist
 (real fragility or an int4-path arch issue). fp/w8a8 also broken → eval/harness.
 Qwen int4wo gs128 sane (matches the sweep's 15.3) → the harness is fine.
 
-Run:  uv run modal run scripts/sanity_mistral_int4.py
+Run:  uv run modal run experiments/sanity_mistral_int4.py
 """
 
 from __future__ import annotations

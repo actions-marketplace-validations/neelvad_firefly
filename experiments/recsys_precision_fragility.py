@@ -16,7 +16,7 @@ LLM and per-component is no more useful here.
 
 Standalone (no firefly/torchao/vllm) — a hypothesis probe, not a feature yet.
 
-Run:  uv run modal run scripts/recsys_precision_fragility.py
+Run:  uv run modal run experiments/recsys_precision_fragility.py
 """
 
 from __future__ import annotations

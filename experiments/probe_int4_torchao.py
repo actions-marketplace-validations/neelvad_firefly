@@ -9,7 +9,7 @@ both quantizes AND runs a forward cleanly.
 
 The winner gets wired into firefly.quant.torchao._quant_config.
 
-Run:  uv run modal run scripts/probe_int4_torchao.py
+Run:  uv run modal run experiments/probe_int4_torchao.py
 """
 
 from __future__ import annotations
