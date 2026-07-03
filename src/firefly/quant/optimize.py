@@ -177,6 +177,7 @@ def optimize(
         "compressed_tensors_scheme": artifact.compressed_tensors_scheme,
         "serve_command": artifact.serve_command,
         "treatments": artifact.manifest.get("treatments"),
+        "method_fallback": artifact.manifest.get("method_fallback"),
     }
 
     if reeval_quality:

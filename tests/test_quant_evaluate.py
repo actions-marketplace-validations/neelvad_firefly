@@ -162,3 +162,73 @@ def test_render_bar_recipe_smoke() -> None:
     assert "perplexity" in out
     assert "keep 2/4" in out
     assert "10.05" in out
+
+
+# --- BOS handling in the perplexity core ----------------------------------------
+
+
+class _TinyUniformLM(__import__("torch").nn.Module):
+    """Emits constant logits; records the exact ids it was called with."""
+
+    def __init__(self):
+        super().__init__()
+        import torch.nn as nn
+
+        self.dummy = nn.Parameter(__import__("torch").zeros(1))
+        self.seen_ids = []
+
+    def forward(self, input_ids, labels=None):
+        import torch
+
+        self.seen_ids.append(input_ids.clone())
+        vocab = 8
+        logits = torch.zeros(*input_ids.shape, vocab)
+        loss = torch.nn.functional.cross_entropy(
+            logits[:, :-1, :].reshape(-1, vocab), labels[:, 1:].reshape(-1)
+        )
+        return type("Out", (), {"loss": loss, "logits": logits})()
+
+
+class _NoBosTokenizer:
+    """Mimics Gemma 4 on transformers v5: defines BOS but never emits it."""
+
+    bos_token_id = 2
+
+    def __call__(self, text, **kwargs):
+        import torch
+
+        return {"input_ids": torch.tensor([[5, 6, 7]])}
+
+
+class _BosTokenizer(_NoBosTokenizer):
+    def __call__(self, text, **kwargs):
+        import torch
+
+        return {"input_ids": torch.tensor([[2, 5, 6, 7]])}
+
+
+def test_perplexity_prepends_missing_bos() -> None:
+    from firefly.quant.evaluate import _perplexity
+
+    model = _TinyUniformLM()
+    _perplexity(model, _NoBosTokenizer(), ["x"], max_length=8)
+    assert model.seen_ids[0][0].tolist() == [2, 5, 6, 7]
+
+
+def test_perplexity_does_not_double_bos() -> None:
+    from firefly.quant.evaluate import _perplexity
+
+    model = _TinyUniformLM()
+    _perplexity(model, _BosTokenizer(), ["x"], max_length=8)
+    assert model.seen_ids[0][0].tolist() == [2, 5, 6, 7]
+
+
+def test_perplexity_no_bos_defined_untouched() -> None:
+    from firefly.quant.evaluate import _perplexity
+
+    class _NoneBos(_NoBosTokenizer):
+        bos_token_id = None
+
+    model = _TinyUniformLM()
+    _perplexity(model, _NoneBos(), ["x"], max_length=8)
+    assert model.seen_ids[0][0].tolist() == [5, 6, 7]

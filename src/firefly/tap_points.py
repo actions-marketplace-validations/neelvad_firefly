@@ -17,10 +17,25 @@ from dataclasses import dataclass
 import torch.nn as nn
 
 # Common paths under which HF models expose their decoder ModuleList.
-_DECODER_LAYERS_PATHS = ("model.layers", "transformer.h", "layers")
+# `model.language_model.layers` is the multimodal-wrapper convention
+# (Gemma 3/4 "unified" checkpoints and friends): the text decoder nests
+# under a `language_model` next to the vision/audio towers.
+_DECODER_LAYERS_PATHS = (
+    "model.layers",
+    "transformer.h",
+    "layers",
+    "model.language_model.layers",
+    "language_model.layers",
+)
 
 # Common paths for the final pre-head normalization.
-_FINAL_NORM_PATHS = ("model.norm", "transformer.ln_f", "norm")
+_FINAL_NORM_PATHS = (
+    "model.norm",
+    "transformer.ln_f",
+    "norm",
+    "model.language_model.norm",
+    "language_model.norm",
+)
 
 # Attribute names under a decoder layer where the attention sub-module lives.
 _ATTN_MODULE_NAMES = ("self_attn", "self_attention", "attention", "attn")

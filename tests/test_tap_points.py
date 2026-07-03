@@ -71,6 +71,38 @@ def test_select_llm_tap_points_forward_order() -> None:
     assert taps[-1].module_path == "model.norm"
 
 
+class _FakeMultimodalWrapper(nn.Module):
+    """Mimics Gemma 3/4 unified checkpoints: the text decoder nests under
+    `model.language_model` next to vision/audio towers."""
+
+    def __init__(self, n_layers: int = 2) -> None:
+        super().__init__()
+
+        class _Outer(nn.Module):
+            def __init__(inner_self) -> None:
+                super().__init__()
+                inner_self.language_model = _FakeInner(n_layers)
+                inner_self.embed_vision = nn.Linear(4, 4)
+
+        self.model = _Outer()
+
+
+def test_select_llm_tap_points_multimodal_wrapper() -> None:
+    taps = select_llm_tap_points(_FakeMultimodalWrapper(n_layers=2))
+
+    assert [t.name for t in taps] == [
+        "layer.0.self_attn",
+        "layer.0.mlp",
+        "layer.0",
+        "layer.1.self_attn",
+        "layer.1.mlp",
+        "layer.1",
+        "final_norm",
+    ]
+    assert taps[0].module_path == "model.language_model.layers.0.self_attn"
+    assert taps[-1].module_path == "model.language_model.norm"
+
+
 def test_raises_when_no_decoder_layers_found() -> None:
     class _Empty(nn.Module):
         pass

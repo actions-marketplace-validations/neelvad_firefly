@@ -91,7 +91,17 @@ def _perplexity(model: nn.Module, tokenizer: object, texts: list[str], max_lengt
         with torch.no_grad():
             for text in texts:
                 enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
-                ids = enc["input_ids"].to(device)
+                ids = enc["input_ids"]
+                # Ensure BOS: some tokenizers (Gemma 4 on transformers v5) don't
+                # add it by default, and BOS-sensitive models score near-uniform
+                # without it — a silently wrecked metric, not a wrecked model.
+                # No-op when the tokenizer already emitted it or defines none.
+                bos = getattr(tokenizer, "bos_token_id", None)
+                if bos is not None and (ids.shape[-1] == 0 or ids[0, 0].item() != bos):
+                    ids = torch.cat(
+                        [torch.full((ids.shape[0], 1), bos, dtype=ids.dtype), ids], dim=1
+                    )
+                ids = ids.to(device)
                 if ids.shape[-1] < 2:
                     continue  # need at least one (context, target) pair
                 out = model(ids, labels=ids)

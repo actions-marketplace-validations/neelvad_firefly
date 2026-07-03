@@ -124,7 +124,7 @@ def serve_command(path: Path, *, max_model_len: int | None = None) -> str:
     return " ".join(parts)
 
 
-def _build_calib_dataset(model_id: str, texts: list[str], max_length: int):
+def _build_calib_dataset(tok, texts: list[str], max_length: int):
     """A pre-tokenized HF dataset for llm-compressor's calibration forward pass.
 
     GPTQ/AWQ derive their corrections from activation stats, so they need
@@ -133,13 +133,27 @@ def _build_calib_dataset(model_id: str, texts: list[str], max_length: int):
     guess a text column.
     """
     from datasets import Dataset
-    from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     rows = [tok(t, truncation=True, max_length=max_length) for t in texts]
     return Dataset.from_list(
         [{"input_ids": r["input_ids"], "attention_mask": r["attention_mask"]} for r in rows]
     )
+
+
+# Multimodal-wrapper checkpoints (Gemma 3/4 "unified" and friends) carry
+# vision/audio tower Linears that see NO activations under text-only
+# calibration — GPTQ/AWQ must not touch them (and text-only serving never
+# runs them). Regex ignores so non-multimodal models are unaffected; this
+# mirrors the ignore list Google ships in its own QAT compressed-tensors
+# exports (embed_vision/embed_audio/vision_embedder projections).
+_MULTIMODAL_TOWER_IGNORES = [
+    "re:.*embed_vision.*",
+    "re:.*embed_audio.*",
+    "re:.*vision_embedder.*",
+    "re:.*audio_embedder.*",
+    "re:.*vision_tower.*",
+    "re:.*multi_modal_projector.*",
+]
 
 
 def _quant_modifier(recipe: Recipe, method: str, ct_scheme: str, ignore: list[str]):
@@ -198,21 +212,54 @@ def export_deployable(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     ct_scheme = _COMPRESSED_TENSORS_SCHEME[recipe.scheme]
-    ignore = ["lm_head", *sorted(recipe.kept_fp_fqns)]
+    ignore = ["lm_head", *_MULTIMODAL_TOWER_IGNORES, *sorted(recipe.kept_fp_fqns)]
     dropped = [p["name"] for p in recipe.pre_transforms]  # SmoothQuant etc.: no servable effect
 
     from llmcompressor import oneshot
 
-    pipeline = [_quant_modifier(recipe, method, ct_scheme, ignore)]
-    if needs_calib:
-        ds = _build_calib_dataset(recipe.model_id, calib_texts, calib_max_length)
-        oneshot(
-            model=recipe.model_id, recipe=pipeline, dataset=ds,
-            num_calibration_samples=len(calib_texts), max_seq_length=calib_max_length,
-            output_dir=str(out),
-        )
-    else:
-        oneshot(model=recipe.model_id, recipe=pipeline, output_dir=str(out))
+    def _run_oneshot(export_method_name: str) -> None:
+        pipeline = [_quant_modifier(recipe, export_method_name, ct_scheme, ignore)]
+        if needs_calib:
+            # No trust_remote_code: the rest of the optimize pipeline loads the
+            # model without it (HF default), so a remote-code architecture can't
+            # reach this point anyway. Passed explicitly as oneshot's processor —
+            # it can't auto-initialize one for multimodal checkpoints.
+            from transformers import AutoTokenizer
+
+            tok = AutoTokenizer.from_pretrained(recipe.model_id)
+            ds = _build_calib_dataset(tok, calib_texts, calib_max_length)
+            oneshot(
+                model=recipe.model_id, recipe=pipeline, dataset=ds, processor=tok,
+                num_calibration_samples=len(calib_texts), max_seq_length=calib_max_length,
+                output_dir=str(out),
+            )
+        else:
+            oneshot(model=recipe.model_id, recipe=pipeline, output_dir=str(out))
+
+    method_fallback: dict | None = None
+    try:
+        _run_oneshot(method)
+    except ValueError as e:
+        # AWQ's smooth-layer mappings are resolved per-architecture inside
+        # llm-compressor; on architectures its registry doesn't know (e.g.
+        # day-one multimodal wrappers) they fail to resolve. GPTQ is the
+        # canonical int4 recovery and needs no cross-layer mappings, so fall
+        # back to it rather than failing the export — recorded in the manifest,
+        # and the served re-eval still gates what actually ships.
+        if method != "awq" or "smoothlayer" not in str(e):
+            raise
+        method_fallback = {"from": "awq", "to": "gptq", "reason": str(e)[:300]}
+        method = "gptq"
+        _run_oneshot(method)
+
+    # Guarantee a self-contained artifact: llm-compressor's processor save can
+    # write an incomplete tokenizer set on architectures it doesn't know
+    # (observed on Gemma 4: exported dir had no loadable fast tokenizer, so
+    # both the served re-eval and `vllm serve` would fail). Re-saving the
+    # source model's tokenizer is idempotent and cheap.
+    from transformers import AutoTokenizer
+
+    AutoTokenizer.from_pretrained(recipe.model_id).save_pretrained(str(out))
 
     cmd = serve_command(out, max_model_len=max_model_len)
     treatments = [method] + (["mixed-precision"] if recipe.kept_fp_fqns else [])
@@ -227,6 +274,7 @@ def export_deployable(
         "kept_fp_count": len(recipe.kept_fp_fqns),
         "quantization_backend": "llm-compressor / compressed-tensors",
         "measurement_backend": "torchao",
+        "method_fallback": method_fallback,
         "serve_command": cmd,
         "recipe_provenance": recipe.provenance,
         "measured": measured or {},
@@ -263,8 +311,10 @@ def evaluate_deployed(
     from firefly.capture import parse_dtype
     from firefly.quant.evaluate import perplexity_evaluator
 
+    # `dtype=` (not the removed-in-v5 `torch_dtype=`) so this loads on both
+    # the transformers 4.56+ line and v5.
     model = AutoModelForCausalLM.from_pretrained(
-        str(checkpoint_dir), torch_dtype=parse_dtype(dtype), device_map=device,
+        str(checkpoint_dir), dtype=parse_dtype(dtype), device_map=device,
     )
     tok = AutoTokenizer.from_pretrained(str(checkpoint_dir))
     return perplexity_evaluator(eval_texts, max_length=max_length)(model, tok)

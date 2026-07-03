@@ -112,3 +112,95 @@ class TestExportRefuses:
         # than silently exporting an uncalibrated (wrecked) int4 checkpoint.
         with pytest.raises(DeployabilityError, match="calibration"):
             export_deployable(_recipe(scheme="int4wo"), tmp_path)
+
+
+class TestAWQMappingFallback:
+    """AWQ's smooth-layer mappings resolve per-architecture inside llm-compressor;
+    unknown architectures (e.g. day-one multimodal wrappers) fail with the
+    'single smoothlayer' ValueError. The export must fall back to GPTQ (the
+    mapping-free canonical int4 recovery) and record the downgrade."""
+
+    def _install_fake_llmcompressor(self, monkeypatch, oneshot):
+        import importlib.machinery
+        import sys
+        import types
+
+        def _module(name: str) -> types.ModuleType:
+            mod = types.ModuleType(name)
+            # transformers' lazy-import machinery probes __spec__; a bare
+            # ModuleType carries None, which importlib rejects.
+            mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+            return mod
+
+        lc = _module("llmcompressor")
+        lc.oneshot = oneshot
+        quant_mod = _module("llmcompressor.modifiers.quantization")
+        awq_mod = _module("llmcompressor.modifiers.awq")
+
+        class _Modifier:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        quant_mod.GPTQModifier = type("GPTQModifier", (_Modifier,), {})
+        quant_mod.QuantizationModifier = type("QuantizationModifier", (_Modifier,), {})
+        awq_mod.AWQModifier = type("AWQModifier", (_Modifier,), {})
+        modifiers = _module("llmcompressor.modifiers")
+        for name, mod in {
+            "llmcompressor": lc,
+            "llmcompressor.modifiers": modifiers,
+            "llmcompressor.modifiers.quantization": quant_mod,
+            "llmcompressor.modifiers.awq": awq_mod,
+        }.items():
+            monkeypatch.setitem(sys.modules, name, mod)
+
+        ds_mod = _module("datasets")
+
+        class _Dataset:
+            @staticmethod
+            def from_list(rows):
+                return rows
+
+        ds_mod.Dataset = _Dataset
+        monkeypatch.setitem(sys.modules, "datasets", ds_mod)
+
+        import transformers
+
+        class _Tok:
+            def __call__(self, text, **kwargs):
+                return {"input_ids": [1, 2], "attention_mask": [1, 1]}
+
+            def save_pretrained(self, path):
+                pass
+
+        monkeypatch.setattr(
+            transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tok()
+        )
+
+    def test_awq_mapping_failure_falls_back_to_gptq(self, tmp_path, monkeypatch):
+        calls: list[type] = []
+
+        def oneshot(*, recipe, **kwargs):
+            calls.append(type(recipe[0]).__name__)
+            if type(recipe[0]).__name__ == "AWQModifier":
+                raise ValueError(
+                    "AWQ needs to match a single smoothlayer for each mapping but got [...]"
+                )
+
+        self._install_fake_llmcompressor(monkeypatch, oneshot)
+        r = _recipe(scheme="int4wo", quantizer={"name": "awq", "params": {"group_size": 128}})
+        artifact = export_deployable(r, tmp_path, calib_texts=["a", "b"])
+
+        assert calls == ["AWQModifier", "GPTQModifier"]
+        assert artifact.manifest["method"] == "gptq"
+        assert artifact.manifest["method_fallback"]["from"] == "awq"
+        assert "smoothlayer" in artifact.manifest["method_fallback"]["reason"]
+        assert "gptq" in artifact.manifest["treatments"]
+
+    def test_non_mapping_awq_error_still_raises(self, tmp_path, monkeypatch):
+        def oneshot(**kwargs):
+            raise ValueError("out of memory")
+
+        self._install_fake_llmcompressor(monkeypatch, oneshot)
+        r = _recipe(scheme="int4wo", quantizer={"name": "awq", "params": {"group_size": 128}})
+        with pytest.raises(ValueError, match="out of memory"):
+            export_deployable(r, tmp_path, calib_texts=["a"])
