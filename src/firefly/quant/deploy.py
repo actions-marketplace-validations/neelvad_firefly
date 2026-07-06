@@ -171,6 +171,53 @@ def _quant_modifier(recipe: Recipe, method: str, ct_scheme: str, ignore: list[st
     return QuantizationModifier(targets="Linear", scheme=ct_scheme, ignore=ignore)
 
 
+def _extend_config_ignores(out: Path) -> None:
+    """Re-append the raw multimodal-tower ignore patterns to the exported
+    config's quantization_config.
+
+    llm-compressor resolves ignore patterns against the *transformers* module
+    tree, but serving engines name modules differently (vLLM's Gemma 4:
+    ``vision_embedder.patch_dense`` vs transformers'
+    ``model.embed_vision.patch_dense``) — so a resolved-names-only ignore list
+    makes an engine construct fp-kept modules as quantized and die loading
+    their fp weights. ``re:`` patterns are matched at load time against the
+    engine's own naming, so they survive the rename.
+    """
+    cfg_path = out / "config.json"
+    if not cfg_path.exists():
+        return
+    cfg = json.loads(cfg_path.read_text())
+    qc = cfg.get("quantization_config")
+    if qc is None:
+        return
+    qc["ignore"] = list(dict.fromkeys([*qc.get("ignore", []), *_MULTIMODAL_TOWER_IGNORES]))
+    cfg_path.write_text(json.dumps(cfg, indent=2))
+
+
+def _copy_processor_files(model_id: str, out: Path) -> None:
+    """Copy the source checkpoint's tokenizer/processor config files into the
+    export dir (never weights, never config.json — that carries the exported
+    quantization_config)."""
+    import shutil
+
+    src = Path(model_id)
+    if not src.is_dir():
+        from huggingface_hub import snapshot_download
+
+        src = Path(
+            snapshot_download(
+                model_id,
+                allow_patterns=["*.json", "*.jinja", "*.model", "*.txt", "tokenizer*"],
+            )
+        )
+    for f in src.iterdir():
+        if not f.is_file() or f.name == "config.json":
+            continue
+        if "safetensors" in f.name or f.suffix in (".bin", ".pt", ".gguf"):
+            continue
+        shutil.copy2(f, out / f.name)
+
+
 def export_deployable(
     recipe: Recipe,
     out_dir: str | Path,
@@ -253,13 +300,16 @@ def export_deployable(
         _run_oneshot(method)
 
     # Guarantee a self-contained artifact: llm-compressor's processor save can
-    # write an incomplete tokenizer set on architectures it doesn't know
-    # (observed on Gemma 4: exported dir had no loadable fast tokenizer, so
-    # both the served re-eval and `vllm serve` would fail). Re-saving the
-    # source model's tokenizer is idempotent and cheap.
-    from transformers import AutoTokenizer
-
-    AutoTokenizer.from_pretrained(recipe.model_id).save_pretrained(str(out))
+    # write an incomplete set on architectures it doesn't know (observed on
+    # Gemma 4: exported dir had no loadable fast tokenizer, and vLLM also
+    # needs the full *processor* config — preprocessor_config.json etc. — to
+    # serve a multimodal checkpoint). Copy the source checkpoint's
+    # tokenizer/processor FILES rather than instantiating classes:
+    # instantiating Gemma 4's processor imports vision/audio deps a
+    # quantization environment doesn't (and shouldn't) carry. config.json is
+    # excluded — the exported one carries the quantization_config.
+    _copy_processor_files(recipe.model_id, out)
+    _extend_config_ignores(out)
 
     cmd = serve_command(out, max_model_len=max_model_len)
     treatments = [method] + (["mixed-precision"] if recipe.kept_fp_fqns else [])

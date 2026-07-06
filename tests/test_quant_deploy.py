@@ -176,6 +176,20 @@ class TestAWQMappingFallback:
             transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tok()
         )
 
+        # _copy_processor_files resolves the source checkpoint via
+        # snapshot_download; hand it a fake snapshot with one tokenizer file.
+        import tempfile
+        from pathlib import Path
+
+        snap = Path(tempfile.mkdtemp())
+        (snap / "tokenizer.json").write_text("{}")
+        (snap / "config.json").write_text('{"never": "copied"}')
+        import huggingface_hub
+
+        monkeypatch.setattr(
+            huggingface_hub, "snapshot_download", lambda *a, **k: str(snap)
+        )
+
     def test_awq_mapping_failure_falls_back_to_gptq(self, tmp_path, monkeypatch):
         calls: list[type] = []
 
@@ -195,6 +209,11 @@ class TestAWQMappingFallback:
         assert artifact.manifest["method_fallback"]["from"] == "awq"
         assert "smoothlayer" in artifact.manifest["method_fallback"]["reason"]
         assert "gptq" in artifact.manifest["treatments"]
+        # Self-contained artifact: source tokenizer file copied in, but never
+        # config.json (it carries the exported quantization_config; the fake
+        # oneshot wrote none, so copying it over would create one here).
+        assert (tmp_path / "tokenizer.json").exists()
+        assert not (tmp_path / "config.json").exists()
 
     def test_non_mapping_awq_error_still_raises(self, tmp_path, monkeypatch):
         def oneshot(**kwargs):
@@ -204,3 +223,35 @@ class TestAWQMappingFallback:
         r = _recipe(scheme="int4wo", quantizer={"name": "awq", "params": {"group_size": 128}})
         with pytest.raises(ValueError, match="out of memory"):
             export_deployable(r, tmp_path, calib_texts=["a"])
+
+
+def test_extend_config_ignores_appends_regex_patterns(tmp_path):
+    # llm-compressor resolves ignores to transformers-tree names; serving
+    # engines rename modules, so the raw re: patterns must survive in the
+    # exported config for load-time matching.
+    import json
+
+    from firefly.quant.deploy import _MULTIMODAL_TOWER_IGNORES, _extend_config_ignores
+
+    cfg = {"quantization_config": {"ignore": ["model.embed_vision.patch_dense", "lm_head"]}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    _extend_config_ignores(tmp_path)
+    ignore = json.loads((tmp_path / "config.json").read_text())["quantization_config"]["ignore"]
+    assert "model.embed_vision.patch_dense" in ignore and "lm_head" in ignore
+    for pattern in _MULTIMODAL_TOWER_IGNORES:
+        assert pattern in ignore
+    # idempotent
+    _extend_config_ignores(tmp_path)
+    again = json.loads((tmp_path / "config.json").read_text())["quantization_config"]["ignore"]
+    assert again == ignore
+
+
+def test_extend_config_ignores_noop_without_quant_config(tmp_path):
+    import json
+
+    from firefly.quant.deploy import _extend_config_ignores
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "plain"}))
+    _extend_config_ignores(tmp_path)  # must not crash or add a quantization_config
+    assert "quantization_config" not in json.loads((tmp_path / "config.json").read_text())
+    _extend_config_ignores(tmp_path / "missing")  # missing dir is a no-op too
