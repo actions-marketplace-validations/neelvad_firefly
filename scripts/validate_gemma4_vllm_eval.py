@@ -113,6 +113,37 @@ def _eval_token_ids() -> list[list[int]]:
     return out
 
 
+def _eval_chat_token_ids() -> list[tuple[list[int], int]]:
+    """(token ids, score_start) per eval text, with the text as the assistant
+    turn of a chat exchange — the distribution instruction-tuned/QAT models
+    were actually trained (and vetted) on. Scoring raw text instead sends
+    them off-distribution: the QAT checkpoint generates perfectly in chat
+    format yet assigns ~-27 logprobs to raw prose (630M "perplexity") — an
+    eval artifact, not a broken artifact. Only positions >= score_start (the
+    text, not the template) are scored."""
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(MODEL)
+    prefix = tok.apply_chat_template(
+        [{"role": "user", "content": "Write one interesting factual sentence."}],
+        tokenize=True, add_generation_prompt=True,
+    )
+    # transformers v5 returns a BatchEncoding (a UserDict — NOT a dict
+    # subclass, so duck-type on .keys); older versions return a flat list.
+    if hasattr(prefix, "keys"):
+        prefix = prefix["input_ids"]
+    if prefix and isinstance(prefix[0], list):
+        prefix = prefix[0]
+    prefix = [int(t) for t in prefix]  # loud failure if the shape shifts again
+    out = []
+    for text in _EVAL:
+        body = tok(text, truncation=True, max_length=EVAL_MAX_LENGTH, add_special_tokens=False)[
+            "input_ids"
+        ]
+        out.append((list(prefix) + body, len(prefix)))
+    return out
+
+
 @app.function(
     image=export_image, gpu="A100-80GB", timeout=3600, memory=65536,
     volumes={"/root/.cache/huggingface": hf_cache}, secrets=[hf_secret],
@@ -174,26 +205,33 @@ def score(source: str) -> dict:
     import vllm as vllm_pkg
     from vllm import LLM, SamplingParams, TokensPrompt
 
-    llm = LLM(model=source, dtype="bfloat16", max_model_len=EVAL_MAX_LENGTH + 8,
+    llm = LLM(model=source, dtype="bfloat16", max_model_len=256,
               gpu_memory_utilization=0.85)
-    prompts = [TokensPrompt(prompt_token_ids=ids) for ids in _eval_token_ids()]
     params = SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=0)
-    outs = llm.generate(prompts, params, use_tqdm=False)
 
-    total_nll, total_tokens = 0.0, 0
-    for out, ids in zip(outs, [p["prompt_token_ids"] for p in prompts], strict=True):
-        plp = out.prompt_logprobs  # [None, {tok: Logprob}, ...] aligned with ids
-        for pos in range(1, len(ids)):
-            entry = plp[pos]
-            lp = entry[ids[pos]].logprob if entry is not None else None
-            if lp is None:
-                continue
-            total_nll += -lp
-            total_tokens += 1
+    def _ppl(items: list[tuple[list[int], int]]) -> tuple[float, int]:
+        prompts = [TokensPrompt(prompt_token_ids=ids) for ids, _ in items]
+        outs = llm.generate(prompts, params, use_tqdm=False)
+        total_nll, total_tokens = 0.0, 0
+        for out, (ids, start) in zip(outs, items, strict=True):
+            plp = out.prompt_logprobs  # [None, {tok: Logprob}, ...] aligned with ids
+            for pos in range(max(start, 1), len(ids)):
+                entry = plp[pos]
+                lp = entry[ids[pos]].logprob if entry is not None else None
+                if lp is None:
+                    continue
+                total_nll += -lp
+                total_tokens += 1
+        return math.exp(total_nll / total_tokens), total_tokens
+
+    ppl_raw, n_raw = _ppl([(ids, 1) for ids in _eval_token_ids()])
+    ppl_chat, n_chat = _ppl(_eval_chat_token_ids())
     return {
         "source": source,
-        "perplexity": math.exp(total_nll / total_tokens),
-        "n_tokens": total_tokens,
+        "perplexity": ppl_raw,  # raw-text ppl (off-distribution for -it/QAT models)
+        "perplexity_chat": ppl_chat,  # the distribution-matched number
+        "n_tokens": n_raw,
+        "n_tokens_chat": n_chat,
         "vllm": vllm_pkg.__version__,
         "transformers": transformers.__version__,
     }
@@ -296,15 +334,21 @@ def _render(r: dict) -> None:
     print("\n=== Gemma 4 12B-it under vLLM: fp vs PTQ artifacts vs Google QAT ===")
     ppl = r["perplexity"]
     fp = ppl["fp"].get("perplexity")
+    fp_chat = ppl["fp"].get("perplexity_chat")
     if fp:
         print(f"  engine: vllm {ppl['fp'].get('vllm')} / transformers {ppl['fp'].get('transformers')}")
     for name in ("fp", "int8wo", "int4wo_gptq", "qat_w4a16"):
         e = ppl[name]
         if "error" in e:
             print(f"  {name:12s} ERROR: {e['error']}")
-        else:
-            rel = f"  ({(e['perplexity'] - fp) / fp:+.1%} vs fp)" if fp and name != "fp" else ""
-            print(f"  {name:12s} perplexity {e['perplexity']:.3f}{rel}")
+            continue
+        rel = f" ({(e['perplexity'] - fp) / fp:+.1%})" if fp and name != "fp" else ""
+        chat = e.get("perplexity_chat")
+        rel_c = (
+            f" ({(chat - fp_chat) / fp_chat:+.1%})" if chat and fp_chat and name != "fp" else ""
+        )
+        chat_s = f"{chat:.3f}{rel_c}" if chat else "n/a"
+        print(f"  {name:12s} chat-ppl {chat_s}   raw-ppl {e['perplexity']:.3f}{rel}")
     print("\n  measured serving (batch 8, in 512, out 128):")
     for name in ("fp", "int8wo"):
         b = r["benchmark"][name]
