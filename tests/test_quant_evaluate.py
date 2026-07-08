@@ -76,7 +76,7 @@ def test_load_eval_texts_jsonl(tmp_path: Path) -> None:
 def test_load_eval_texts_rejects_empty(tmp_path: Path) -> None:
     p = tmp_path / "e.json"
     p.write_text(json.dumps({"texts": []}))
-    with pytest.raises(ValueError, match="non-empty list of strings"):
+    with pytest.raises(ValueError, match="non-empty list"):
         load_eval_texts(p)
 
 
@@ -181,8 +181,11 @@ class _TinyUniformLM(__import__("torch").nn.Module):
         import torch
 
         self.seen_ids.append(input_ids.clone())
-        vocab = 8
+        self.seen_labels = labels.clone()
+        vocab = 16
         logits = torch.zeros(*input_ids.shape, vocab)
+        # ignore_index=-100 (the default) is load-bearing: chat samples mask
+        # the template prefix with -100, matching HF model loss behavior.
         loss = torch.nn.functional.cross_entropy(
             logits[:, :-1, :].reshape(-1, vocab), labels[:, 1:].reshape(-1)
         )
@@ -190,21 +193,27 @@ class _TinyUniformLM(__import__("torch").nn.Module):
 
 
 class _NoBosTokenizer:
-    """Mimics Gemma 4 on transformers v5: defines BOS but never emits it."""
+    """Mimics Gemma 4 on transformers v5: defines BOS but never emits it, and
+    apply_chat_template returns a BatchEncoding-like mapping."""
 
     bos_token_id = 2
 
     def __call__(self, text, **kwargs):
-        import torch
+        ids = [5, 6, 7]
+        if kwargs.get("add_special_tokens") is False:
+            return {"input_ids": ids}
+        return {"input_ids": ids}
 
-        return {"input_ids": torch.tensor([[5, 6, 7]])}
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
+        class _Enc(dict):  # duck-types like BatchEncoding (has .keys, not a list)
+            pass
+
+        return _Enc(input_ids=[2, 9, 10, 11])
 
 
 class _BosTokenizer(_NoBosTokenizer):
     def __call__(self, text, **kwargs):
-        import torch
-
-        return {"input_ids": torch.tensor([[2, 5, 6, 7]])}
+        return {"input_ids": [2, 5, 6, 7]}
 
 
 def test_perplexity_prepends_missing_bos() -> None:
@@ -232,3 +241,42 @@ def test_perplexity_no_bos_defined_untouched() -> None:
     model = _TinyUniformLM()
     _perplexity(model, _NoneBos(), ["x"], max_length=8)
     assert model.seen_ids[0][0].tolist() == [5, 6, 7]
+
+
+def test_perplexity_chat_sample_masks_template_prefix() -> None:
+    from firefly.quant.evaluate import _perplexity
+
+    model = _TinyUniformLM()
+    _perplexity(model, _NoBosTokenizer(), [{"user": "q", "assistant": "a"}], max_length=8)
+    # ids = template prefix [2, 9, 10, 11] + assistant body [5, 6, 7]
+    assert model.seen_ids[0][0].tolist() == [2, 9, 10, 11, 5, 6, 7]
+    # template positions label-masked; assistant positions scored
+    assert model.seen_labels[0].tolist() == [-100, -100, -100, -100, 5, 6, 7]
+
+
+def test_perplexity_mixed_raw_and_chat_samples() -> None:
+    from firefly.quant.evaluate import _perplexity
+
+    model = _TinyUniformLM()
+    out = _perplexity(
+        model, _NoBosTokenizer(), ["x", {"user": "q", "assistant": "a"}], max_length=8
+    )
+    assert out > 0
+    assert len(model.seen_ids) == 2
+
+
+def test_load_eval_texts_chat_schema(tmp_path) -> None:
+    import json
+
+    from firefly.quant.evaluate import load_eval_texts
+
+    p = tmp_path / "eval.json"
+    p.write_text(json.dumps({"chat": [{"user": "q1", "assistant": "a1"}]}))
+    samples = load_eval_texts(p)
+    assert samples == [{"user": "q1", "assistant": "a1"}]
+
+    p.write_text(json.dumps({"chat": [{"user": "q1"}]}))  # missing assistant
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="assistant"):
+        load_eval_texts(p)
