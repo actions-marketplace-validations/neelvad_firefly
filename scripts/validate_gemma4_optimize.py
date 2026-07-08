@@ -34,7 +34,8 @@ hf_secret = modal.Secret.from_dict({"HF_TOKEN": os.environ.get("HF_TOKEN", "")})
 MODEL = "google/gemma-4-12B-it"
 QAT_MODEL = "google/gemma-4-12B-it-qat-w4a16-ct"
 QUALITY_BAR = 0.10
-EVAL_MAX_LENGTH = 64
+EVAL_MAX_LENGTH = 128  # assistant turns run up to ~80 words
+CHAT_EVAL = "/root/chat_eval_dolly.json"  # 200 dolly chat pairs — the SERVED distribution
 
 # llmcompressor first (its resolver picks compatible compressed-tensors/datasets),
 # then transformers pinned to the v5 line gemma4 requires — later layer wins.
@@ -43,6 +44,10 @@ image = (
     .pip_install("torch", "llmcompressor", "torchao", "accelerate", "sentencepiece")
     .pip_install("transformers==5.12.1")
     .add_local_python_source("firefly")
+    .add_local_file(
+        str(__import__("pathlib").Path(__file__).parent / "prompts" / "chat_eval_dolly.json"),
+        CHAT_EVAL,
+    )
 )
 
 _CALIB = [
@@ -69,19 +74,6 @@ _CALIB = [
     "Encryption protects data by transforming it into a form only a key can reverse.",
     "Fiscal policy uses government spending and taxation to steer the economy.",
 ]
-_EVAL = [
-    "Photosynthesis converts sunlight into chemical energy stored in glucose.",
-    "The Roman Empire reached its greatest territorial extent under Trajan.",
-    "Gradient descent iteratively updates parameters to minimize a loss function.",
-    "Mount Everest, on the border of Nepal and Tibet, is Earth's highest peak.",
-    "The French Revolution began in 1789 and reshaped European politics.",
-    "Jupiter is the largest planet in the solar system, a gas giant with many moons.",
-    "Compound interest grows savings exponentially over long horizons.",
-    "Newton's three laws describe the motion of objects under forces.",
-    "A neural network learns features hierarchically across its layers.",
-    "Entropy measures the disorder of a thermodynamic system.",
-]
-
 
 @app.function(
     image=image, gpu="A100-80GB", timeout=7200, memory=65536,
@@ -111,8 +103,16 @@ def run() -> dict:
     inputs = Path(tempfile.mkdtemp()) / "calib.json"
     inputs.write_text(json.dumps({"texts": _CALIB, "max_length": 64}))
 
+    # Gate on the SERVED distribution: 200 chat pairs (dolly), scored on the
+    # assistant turn — the raw-text bar refused int4 for damage that only
+    # exists off-distribution. (Calibration stays raw text; GPTQ needs
+    # activations, not a metric.)
+    from firefly.quant.evaluate import load_eval_texts
+
+    eval_samples = load_eval_texts(Path(CHAT_EVAL))
+
     r = optimize_over_schemes(
-        MODEL, inputs, _EVAL, schemes=("int4wo", "int8wo"), quality_bar=QUALITY_BAR,
+        MODEL, inputs, eval_samples, schemes=("int4wo", "int8wo"), quality_bar=QUALITY_BAR,
         group_size=128, device="cuda", dtype="bfloat16", max_length=EVAL_MAX_LENGTH,
         out_dir="/tmp/gemma4_opt", benchmark=False,
     )
@@ -124,7 +124,7 @@ def run() -> dict:
     # Vendor baseline: Google's QAT W4A16 compressed-tensors export, scored with
     # the identical evaluator + eval set the optimize run used.
     qat_ppl = evaluate_deployed(
-        QAT_MODEL, _EVAL, max_length=EVAL_MAX_LENGTH, device="cuda", dtype="bfloat16"
+        QAT_MODEL, eval_samples, max_length=EVAL_MAX_LENGTH, device="cuda", dtype="bfloat16"
     )
 
     fp_ppl = r["winner"]["quality"]["fp"]

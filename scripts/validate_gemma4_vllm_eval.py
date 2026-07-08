@@ -41,7 +41,7 @@ MODEL = "google/gemma-4-12B-it"
 QAT_MODEL = "google/gemma-4-12B-it-qat-w4a16-ct"
 ARTIFACT_ROOT = "/root/.cache/huggingface/firefly_results/gemma4_artifacts"
 RESULT_PATH = "/root/.cache/huggingface/firefly_results/gemma4_vllm_eval.json"
-EVAL_MAX_LENGTH = 64
+EVAL_MAX_LENGTH = 128
 
 # Two images. Scoring/bench pin vllm==0.23.0: 0.24.0 (4 days old) crashes at
 # engine warmup importing minimax_m3's triton kernels (triton JIT
@@ -49,10 +49,16 @@ EVAL_MAX_LENGTH = 64
 # `python` on PATH for Modal's builder. The export leg gets the llmcompressor
 # stack; co-resolving the two in one pip install forced a vllm source build
 # (CUDA-mismatch death).
+CHAT_EVAL = "/root/chat_eval_dolly.json"  # 200 dolly chat pairs (see make_chat_eval.py)
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("vllm==0.23.0", "sentencepiece", "huggingface_hub>=0.24")
     .add_local_python_source("firefly")
+    .add_local_file(
+        str(__import__("pathlib").Path(__file__).parent / "prompts" / "chat_eval_dolly.json"),
+        CHAT_EVAL,
+    )
 )
 export_image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -114,34 +120,21 @@ def _eval_token_ids() -> list[list[int]]:
 
 
 def _eval_chat_token_ids() -> list[tuple[list[int], int]]:
-    """(token ids, score_start) per eval text, with the text as the assistant
-    turn of a chat exchange — the distribution instruction-tuned/QAT models
-    were actually trained (and vetted) on. Scoring raw text instead sends
-    them off-distribution: the QAT checkpoint generates perfectly in chat
-    format yet assigns ~-27 logprobs to raw prose (630M "perplexity") — an
-    eval artifact, not a broken artifact. Only positions >= score_start (the
-    text, not the template) are scored."""
+    """(token ids, score_start) per chat sample — the distribution
+    instruction-tuned/QAT models were actually trained (and vetted) on.
+    Scoring raw text instead sends them off-distribution: the QAT checkpoint
+    generates perfectly in chat format yet assigns ~-27 logprobs to raw prose
+    (630M "perplexity") — an eval artifact, not a broken artifact. 200 dolly
+    pairs via the shared product encoder (masked template prefix)."""
     from transformers import AutoTokenizer
 
+    from firefly.quant.evaluate import _encode_sample, load_eval_texts
+
     tok = AutoTokenizer.from_pretrained(MODEL)
-    prefix = tok.apply_chat_template(
-        [{"role": "user", "content": "Write one interesting factual sentence."}],
-        tokenize=True, add_generation_prompt=True,
-    )
-    # transformers v5 returns a BatchEncoding (a UserDict — NOT a dict
-    # subclass, so duck-type on .keys); older versions return a flat list.
-    if hasattr(prefix, "keys"):
-        prefix = prefix["input_ids"]
-    if prefix and isinstance(prefix[0], list):
-        prefix = prefix[0]
-    prefix = [int(t) for t in prefix]  # loud failure if the shape shifts again
-    out = []
-    for text in _EVAL:
-        body = tok(text, truncation=True, max_length=EVAL_MAX_LENGTH, add_special_tokens=False)[
-            "input_ids"
-        ]
-        out.append((list(prefix) + body, len(prefix)))
-    return out
+    return [
+        _encode_sample(tok, sample, EVAL_MAX_LENGTH)
+        for sample in load_eval_texts(__import__("pathlib").Path(CHAT_EVAL))
+    ]
 
 
 @app.function(
@@ -205,7 +198,7 @@ def score(source: str) -> dict:
     import vllm as vllm_pkg
     from vllm import LLM, SamplingParams, TokensPrompt
 
-    llm = LLM(model=source, dtype="bfloat16", max_model_len=256,
+    llm = LLM(model=source, dtype="bfloat16", max_model_len=EVAL_MAX_LENGTH + 96,
               gpu_memory_utilization=0.85)
     params = SamplingParams(temperature=0.0, max_tokens=1, prompt_logprobs=0)
 
