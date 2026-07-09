@@ -6,7 +6,7 @@ title: "Your quantization numbers were measured in the wrong place"
 # Your quantization numbers were measured in the wrong place
 
 *Draft. Every number below is measured; every limit is stated. The point is not
-"use our tool" — it's four specific, checkable ways a quantization measurement
+"use our tool" — it's five specific, checkable ways a quantization measurement
 lies, and one discipline that catches them.*
 
 Quantization tooling asks you to trust a number. You quantize a model, run an
@@ -18,10 +18,58 @@ model, a single layer in isolation — and **the number does not transfer.**
 We built a measurement engine (it started life as a numerical-parity CI gate for
 model deployments) and pointed it at quantization, with one rule: *always measure
 the model you actually ship, on the metric that matters.* That rule kept catching
-the tooling lying. Here are four cases, each one a thing worth checking in your
-own pipeline.
+the tooling lying — and once, our own eval. Here are five cases, each one a
+thing worth checking in your own pipeline.
 
-## Finding 1 — the backend you measure in isn't the backend you serve in
+## Finding 1 — the eval distribution isn't the serving distribution
+
+This is the one where the tool caught *us*. We put Gemma 4 12B — a day-one 2026
+release — through the loop: quantize, export, re-evaluate the served
+checkpoint against a 10% perplexity bar. The gate refused our int4-GPTQ export
+at **+581%** vs fp. Scored the same way, Google's own QAT W4A16 checkpoint for
+the same model read **34,000,000 perplexity** — six orders of magnitude broken.
+Two catastrophic verdicts, both measured on the served artifact, both
+replicated across two serving stacks (transformers and vLLM agree). By every
+rule above, publishable.
+
+Both verdicts were wrong. One probe showed it: the "broken" QAT checkpoint
+answers a chat-formatted prompt perfectly (*"The capital of France is
+Paris."*) while assigning ~−27 logprobs per token to plain prose — worse than
+uniform over its 262k vocab. Nothing was broken. Our eval scored **raw text**,
+and an instruction-tuned model — a chat-only-QAT'd one especially — has little
+raw-text language modeling left to measure. We were grading a chat model on a
+distribution it never serves.
+
+Re-scored on its served distribution (200 chat-formatted samples, template
+masked, same bar, same code):
+
+| gemma-4-12B-it, served (vLLM) | chat eval (what it serves) | raw-text eval |
+|---|---|---|
+| fp | 25.2 | 3,665 |
+| int8wo (ours, 2×) | +0.7% | −0.6% |
+| int4-GPTQ (ours, 4×) | **+3.0% — meets the bar** | **+581%** |
+| Google QAT W4A16 (4×) | **−10.4% (better than fp)** | +936,000% |
+
+Same artifacts, same engine, same 10% bar. On the raw-text eval the gate ships
+2× int8; on the served distribution it ships **4× int4 at +2.1%**. The vendor
+checkpoint goes from "catastrophically broken" to *better than the fp model*
+(QAT included more chat training). And the two columns together are a finding
+in their own right: quantization damage is **distribution-dependent** — int8
+is robust on both, int4 preserves the well-trained head of the distribution
+while destroying the tails, and QAT optimizes the head having abandoned the
+tails by design. (One family so far; treat the mechanism as a hypothesis.)
+
+**The lesson:** a quality bar is only meaningful on the distribution you
+serve. An off-distribution eval doesn't just add noise — it *reverses
+verdicts* in both directions: it refuses shippable models and condemns healthy
+ones. The fix is boring and structural: our eval sets now accept chat pairs
+(`{"chat": [{"user": ..., "assistant": ...}]}`), scored on the assistant turn
+with the template masked, so the whole select → export → re-eval loop gates on
+what the model will actually be asked to do. The full story — including the
+headline we nearly published — is in [the Gemma 4 case
+study](gemma4-day-one.html).
+
+## Finding 2 — the backend you measure in isn't the backend you serve in
 
 The most common quantization split in practice: you measure with one library
 (it has the nice per-layer hooks and filters) and deploy with another (it's what
@@ -53,7 +101,7 @@ sanity-check it. If you measure in framework A and serve from framework B,
 re-measure in B. We made this a default step — re-evaluate the *served* checkpoint
 — and it paid for itself immediately, twice more below.
 
-## Finding 2 — "98% recovery" can be a serving no-op
+## Finding 3 — "98% recovery" can be a serving no-op
 
 SmoothQuant is a well-known technique for recovering int8 activation-quantization
 quality. In torchao, on Qwen2.5-1.5B, it works exactly as advertised: plain w8a8
@@ -86,7 +134,7 @@ granularity, not the model), it's a *bit-identical* no-op on every architecture 
 tried. Our re-eval gate flagged it automatically — it re-scored the served model,
 saw no change, and refused to claim a recovery.
 
-## Finding 3 — per-layer mixed precision helps at 1.5B and *hurts* at 7B
+## Finding 4 — per-layer mixed precision helps at 1.5B and *hurts* at 7B
 
 "Keep the fragile layers in higher precision, quantize the rest" is the intuitive
 recipe for mixed-precision. We tested whether a *cheap* per-layer fragility
@@ -128,7 +176,7 @@ optimization's value *shrinks* with scale exactly where you'd want to deploy it.
 The 1.5B result alone would have justified building a feature that's worthless at
 7B. Measuring at the scale you deploy is the only thing that caught it.
 
-## Finding 4 — for recsys, AUC tells you the wrong component to protect
+## Finding 5 — for recsys, AUC tells you the wrong component to protect
 
 Everything above is LLMs. Recommendation models are the more interesting
 quantization target precisely because they're *heterogeneous* — big and small
@@ -171,6 +219,9 @@ served model let us build a loop that ships what it verifies:
 - **Pick the scheme by a quality bar.** Give a perplexity bar; the tool ships the
   most-compressed scheme that meets it — bar 10% → int8wo (2×, +2.7%), bar 30% →
   int4wo (4×). Same model, the bar decides.
+- **Gate on the distribution you serve.** Eval sets accept chat pairs, scored
+  on the assistant turn — on Gemma 4 the same 10% bar ships 2× under a raw-text
+  eval and 4× on the served distribution (Finding 1).
 - **Measured cost, not estimated.** Real serving throughput/memory from vLLM:
   fp8 is +20% decode *and* −24% prefill (weight quant helps memory-bound decode,
   costs compute-bound prefill — a regime split only measurement reveals).
@@ -194,7 +245,10 @@ one it measured — which is the whole story above.
 
 ## Honest scope
 
-- Findings 1 and 2 (backend transfer, SmoothQuant no-op) are confirmed across
+- Finding 1 (eval distribution) is one family (Gemma 4 12B), perplexity-only,
+  measured on both serving stacks; the tails-first damage mechanism is a
+  hypothesis pending cross-family replication.
+- Findings 2 and 3 (backend transfer, SmoothQuant no-op) are confirmed across
   three architecture families (Qwen, Llama-arch, Gemma). The re-eval gate, int4
   recovery, and multi-scheme search are built and GPU-validated on Qwen2.5
   (1.5B/7B); a downstream task metric beyond perplexity is the open evidence work.
