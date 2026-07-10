@@ -31,7 +31,7 @@ where a blind auto-quantizer can't. The same engine doubles as a standalone
 
 | Surface | The question it answers | Maturity |
 | --- | --- | --- |
-| **`firefly optimize`** — model + bar → servable faster model | Quantize to a memory/QPS target, pick the treatment, and prove the served speedup + quality | **Built & GPU-validated** end-to-end (select → export compressed-tensors → benchmark → re-eval) |
+| **`firefly optimize`** — model + bar → servable faster model | Quantize to a memory/QPS target, pick the treatment, and prove the served speedup + quality | **Built & GPU-validated** end-to-end (select → export compressed-tensors → benchmark → re-eval); took Gemma 4 from day-one release to a served, bar-checked **4×** artifact (int4-GPTQ, +2.1% on the served distribution) |
 | **Quantization diagnosis** — `quant-diff` / `quant-sensitivity` / `quant-recipe` / `quant-diagnose` | *Which* layers does a quantized build break, what treats it, which to keep in higher precision? | **Built & verified** — routes a detected failure mode to the intervention that treats it (activation-outliers → SmoothQuant; single-unit-dominance → mixed precision), gated on a real eval. A *general* technique-search agent is aspirational |
 | **Parity CI gate** — `firefly check` + GitHub Action | Did a kernel swap / dep bump / serving-stack drift silently change my model's activations? | **Shipped** — on the Marketplace, validated across 9 models / 8 families |
 
@@ -81,6 +81,14 @@ Two backends with one job: **torchao** is the measurement backend (it has the
 per-layer filters and activation hooks the diagnosis needs); **compressed-tensors**
 is the deployment backend (vLLM-native, portable). A recipe is just a scheme +
 which layers — measured by one, served by the other.
+
+**Gate on the distribution you serve.** Eval sets accept chat pairs
+(`{"chat": [{"user": ..., "assistant": ...}]}`), scored on the assistant turn
+with the template masked. This matters more than it sounds: on Gemma 4 the
+same artifacts read **+581%** on a raw-text eval and **+3%** on the chat
+distribution they actually serve — the eval set decides what you can ship.
+Full story: [the day-one case study](https://neelvad.github.io/firefly/gemma4-day-one.html)
+and [five measured ways a quantization number lies](https://neelvad.github.io/firefly/eval-results.html).
 
 ## Parity CI gate
 
@@ -457,6 +465,12 @@ changed upstream.
   (`deploy.py`) → **benchmark** the served artifact's real QPS/memory (`bench/`,
   vLLM) → **re-eval** the served model's quality (the bar is checked on what
   ships, not a proxy). GPU-validated.
+- **Day-one architecture support, exercised** — Gemma 4 (multimodal "unified"
+  wrapper, transformers v5) went release-week from unsupported to a served,
+  bar-checked 4× int4 artifact; the export path survived it (multimodal
+  processor/tower handling, AWQ→GPTQ fallback, engine-naming-proof ignore
+  lists, self-contained checkpoints) and eval sets gained **chat-format
+  gating** (score the assistant turn on the distribution you serve).
 - **Servable int4 recovery** — int4 exports via GPTQ (or AWQ when routed),
   GPU-validated to recover ~80–96% of int4 degradation *in the served model*
   (plain int4 RTN serves at +113% perplexity; GPTQ ~+5%). int8 weight-only

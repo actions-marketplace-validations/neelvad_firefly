@@ -212,4 +212,4 @@ the model get worse?" but "*where* did it get worse, and do you serve there?"
 *The engine, the gate, and every script referenced here are in the
 [repo](https://github.com/neelvad/firefly); the companion piece — four more
 ways a quantization number lies, measured — is
-[here](writeup-draft.html).*
+[here](eval-results.html).*

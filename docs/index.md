@@ -27,9 +27,11 @@ The most useful finding, before any setup:
 
 The rest of this post is how I got here.
 
-*(Related: the same per-layer machinery now drives [attribution-guided
-mixed-precision quantization](quant-recipe.html) — which layers to keep in high
-precision when you quantize, measured and verified.)*
+*(Related: the same per-layer machinery now drives the quantization loop —
+[five measured ways a quantization number lies](eval-results.html), the
+[Gemma 4 day-one case study](gemma4-day-one.html) (the gate refused a 4×
+model, we retracted two catastrophic verdicts, and the corrected eval shipped
+it), and [attribution-guided mixed-precision quantization](quant-recipe.html).)*
 
 ## What's Firefly
 

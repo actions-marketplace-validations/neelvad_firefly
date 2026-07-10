@@ -29,6 +29,7 @@ venv/
 .claude/settings.local.json
 AGENTS.md
 UPSTREAM_ISSUE_DRAFT.md
+UPSTREAM_ISSUE_LLMCOMPRESSOR.md
 
 # Firefly artifacts
 references/
